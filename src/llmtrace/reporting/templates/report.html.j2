@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLMTrace 审计报告 - {{ report_id }}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; color: #1a1a1a; background: #fff; line-height: 1.6; max-width: 960px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 1.5em; margin-bottom: 8px; }
+  h2 { font-size: 1.2em; margin-top: 24px; margin-bottom: 12px; border-bottom: 2px solid #e5e5e5; padding-bottom: 4px; }
+  h3 { font-size: 1.05em; margin-top: 16px; margin-bottom: 8px; }
+  .meta { color: #666; font-size: 0.9em; margin-bottom: 16px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+  th, td { border: 1px solid #e5e5e5; padding: 8px 12px; text-align: left; font-size: 0.9em; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .risk-high { color: #d32f2f; font-weight: bold; }
+  .risk-medium { color: #f57c00; font-weight: bold; }
+  .risk-low { color: #388e3c; font-weight: bold; }
+  .risk-inconclusive { color: #757575; }
+  .status-pass { color: #388e3c; }
+  .status-fail { color: #d32f2f; }
+  .status-warn { color: #f57c00; }
+  .finding { border: 1px solid #e5e5e5; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
+  .finding h3 { margin-top: 0; }
+  .facts, .inferences, .limitations { margin: 8px 0; }
+  .facts li, .inferences li, .limitations li { font-size: 0.9em; }
+  .evidence-item { border: 1px solid #e5e5e5; border-radius: 4px; padding: 12px; margin-bottom: 12px; }
+  .evidence-item summary { cursor: pointer; font-weight: 600; }
+  .evidence-item pre { background: #f5f5f5; padding: 8px; overflow-x: auto; font-size: 0.8em; margin-top: 8px; white-space: pre-wrap; word-break: break-all; }
+  .disclaimer { background: #fff3e0; border: 1px solid #ffe0b2; border-radius: 4px; padding: 12px; margin-top: 24px; font-size: 0.9em; }
+  .disclaimer h3 { color: #e65100; }
+</style>
+</head>
+<body>
+
+<h1>LLMTrace 审计报告</h1>
+<div class="meta">
+  <p>报告 ID: {{ report_id }}</p>
+  <p>生成时间: {{ utc_time }}</p>
+  <p>LLMTrace 版本: {{ llmtrace_version }}</p>
+  <p>Python: {{ python_version }} | {{ platform }}</p>
+</div>
+
+<h2>1. 被测接口摘要</h2>
+<table>
+  <tr><th>项目</th><th>值</th></tr>
+  <tr><td>Endpoint</td><td>{{ config.base_url }}</td></tr>
+  <tr><td>协议</td><td>{{ config.protocol }}</td></tr>
+  <tr><td>声称模型</td><td>{{ config.model }}</td></tr>
+  <tr><td>重复次数</td><td>{{ config.repeat_count }}</td></tr>
+  <tr><td>超时</td><td>{{ config.timeout }}s</td></tr>
+  <tr><td>最大输出 Token</td><td>{{ config.max_output_tokens }}</td></tr>
+</table>
+
+<h2>2. 风险结论</h2>
+<p class="risk-{{ risk_level | lower }}"><strong>风险等级: {{ risk_level }}</strong></p>
+<p>{{ risk_explanation }}</p>
+
+<h2>3. 探针结果</h2>
+{% for finding in findings %}
+<div class="finding">
+  <h3>{{ finding.probe_name }} <span class="status-{{ finding.status }}">[{{ finding.status }}]</span> <span>({{ finding.severity }})</span></h3>
+  {% if finding.facts %}
+  <div class="facts">
+    <strong>客观事实:</strong>
+    <ul>
+      {% for fact in finding.facts %}<li>{{ fact }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% if finding.inferences %}
+  <div class="inferences">
+    <strong>推断:</strong>
+    <ul>
+      {% for inf in finding.inferences %}<li>{{ inf }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% if finding.limitations %}
+  <div class="limitations">
+    <strong>局限说明:</strong>
+    <ul>
+      {% for lim in finding.limitations %}<li>{{ lim }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+<h2>4. 调用时间线</h2>
+<table>
+  <tr><th>#</th><th>请求模型</th><th>返回模型</th><th>HTTP</th><th>延迟(ms)</th><th>成功</th></tr>
+  {% for ev in evidence %}
+  <tr>
+    <td>{{ loop.index }}</td>
+    <td>{{ ev.request_model or 'N/A' }}</td>
+    <td>{{ ev.response_model or 'N/A' }}</td>
+    <td>{{ ev.http_status or 'N/A' }}</td>
+    <td>{{ "%.0f"|format(ev.total_latency_ms) if ev.total_latency_ms else 'N/A' }}</td>
+    <td>{{ '是' if ev.success else '否' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>5. 元数据一致性</h2>
+<table>
+  <tr><th>指标</th><th>值</th></tr>
+  <tr><td>返回模型集合</td><td>{{ response_models | join(', ') if response_models else '无' }}</td></tr>
+  <tr><td>响应结构指纹</td><td>{{ fingerprints | join(', ') if fingerprints else '无' }}</td></tr>
+  <tr><td>Token 字段存在率</td><td>{{ token_rate }}</td></tr>
+  <tr><td>请求 ID 存在率</td><td>{{ rid_rate }}</td></tr>
+</table>
+
+<h2>6. 原始证据摘要</h2>
+{% for ev in evidence %}
+<details class="evidence-item">
+  <summary>请求 #{{ loop.index }}: {{ ev.request_method }} {{ ev.request_path }} ({{ ev.http_status }})</summary>
+  <pre>{{ ev | tojson(indent=2) }}</pre>
+</details>
+{% endfor %}
+
+<h2>7. 限制和免责声明</h2>
+<div class="disclaimer">
+  <h3>重要限制</h3>
+  <ul>
+    <li>客户端无法看到中转站真实上游后台。</li>
+    <li>model 和请求 ID 可以被中转站改写。</li>
+    <li>无效模型被拒绝不代表实际模型真实。</li>
+    <li>回答风格相似不等于模型身份相同。</li>
+    <li>低风险不等于服务商已被证明可信。</li>
+    <li>延迟受网络、负载、缓存和队列影响。</li>
+    <li>模型别名可能造成名称不一致。</li>
+  </ul>
+  <p style="margin-top: 8px;"><strong>LLMTrace 不声称可以识别真实上游模型。本报告仅供审计参考，不构成法律或商业建议。</strong></p>
+</div>
+
+</body>
+</html>
