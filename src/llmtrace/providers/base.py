@@ -1,0 +1,223 @@
+"""Provider 基类."""
+
+from __future__ import annotations
+
+import json
+import time
+from abc import ABC, abstractmethod
+from datetime import UTC, datetime
+
+import httpx
+
+from llmtrace.config import AuditConfig
+from llmtrace.models.evidence import HTTPEvidence
+from llmtrace.security.redaction import redact_headers, redact_json_body, redact_url
+from llmtrace.utilities.hashing import sha256_hash
+
+
+class BaseProvider(ABC):
+    """Provider 抽象基类."""
+
+    def __init__(self, config: AuditConfig, api_key: str) -> None:
+        self.config = config
+        self.api_key = api_key
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """获取 HTTP 客户端."""
+        if self._client is None:
+            raise RuntimeError("Provider not initialized. Call `async with provider:` first.")
+        return self._client
+
+    async def __aenter__(self) -> BaseProvider:
+        self._client = httpx.AsyncClient(timeout=self.config.timeout)
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    @abstractmethod
+    def _build_headers(self) -> dict[str, str]:
+        """构建请求头."""
+        ...
+
+    @abstractmethod
+    def _build_models_url(self) -> str:
+        """构建模型列表 URL."""
+        ...
+
+    @abstractmethod
+    def _build_completion_url(self) -> str:
+        """构建补全请求 URL."""
+        ...
+
+    @abstractmethod
+    def _build_completion_body(self, model: str, messages: list[dict[str, str]]) -> dict[str, object]:
+        """构建补全请求体."""
+        ...
+
+    @abstractmethod
+    def _build_stream_body(self, model: str, messages: list[dict[str, str]]) -> dict[str, object]:
+        """构建流式请求体."""
+        ...
+
+    @abstractmethod
+    def _parse_response(self, data: dict[str, object], evidence: HTTPEvidence) -> None:
+        """解析响应数据到证据."""
+        ...
+
+    @abstractmethod
+    def _parse_stream_event(self, line: str) -> dict[str, object] | None:
+        """解析流式事件."""
+        ...
+
+    async def list_models(self) -> tuple[HTTPEvidence, list[str]]:
+        """获取模型列表."""
+        evidence = self._build_evidence("GET", self._build_models_url())
+        url = self._build_models_url()
+        headers = self._build_headers()
+
+        try:
+            evidence.request_time = datetime.now(tz=UTC)
+            start = time.monotonic()
+            response = await self.client.get(url, headers=headers)
+            elapsed = (time.monotonic() - start) * 1000
+            evidence.total_latency_ms = elapsed
+            evidence.response_time = datetime.now(tz=UTC)
+
+            evidence.http_status = response.status_code
+            evidence.response_headers = dict(response.headers)
+            body = response.text
+            evidence.response_body_size = len(body)
+
+            if response.status_code == 200:
+                data = response.json()
+                models = self._extract_models(data)
+                evidence.response_body_summary = json.dumps(data, ensure_ascii=False)[:2000]
+                evidence.response_body_sha256 = sha256_hash(body)
+                return evidence, models
+            else:
+                evidence.response_body_summary = body[:2000]
+                evidence.response_body_sha256 = sha256_hash(body)
+                return evidence, []
+
+        except Exception as e:
+            evidence.exception_type = type(e).__name__
+            evidence.exception_message = str(e)
+            return evidence, []
+
+    async def complete(self, model: str, messages: list[dict[str, str]]) -> HTTPEvidence:
+        """非流式补全请求."""
+        url = self._build_completion_url()
+        headers = self._build_headers()
+        body = self._build_completion_body(model, messages)
+        evidence = self._build_evidence("POST", url, body)
+
+        try:
+            evidence.request_time = datetime.now(tz=UTC)
+            start = time.monotonic()
+            response = await self.client.post(url, headers=headers, json=body)
+            elapsed = (time.monotonic() - start) * 1000
+            evidence.total_latency_ms = elapsed
+            evidence.response_time = datetime.now(tz=UTC)
+
+            evidence.http_status = response.status_code
+            evidence.response_headers = dict(response.headers)
+            resp_body = response.text
+            evidence.response_body_size = len(resp_body)
+
+            # 截断检查
+            if len(resp_body) > self.config.max_response_bytes:
+                evidence.response_truncated = True
+                resp_body = resp_body[: self.config.max_response_bytes]
+
+            evidence.response_body_summary = resp_body[:2000]
+            evidence.response_body_sha256 = sha256_hash(resp_body)
+
+            if response.status_code == 200:
+                data = response.json()
+                self._parse_response(data, evidence)
+
+        except Exception as e:
+            evidence.exception_type = type(e).__name__
+            evidence.exception_message = str(e)
+
+        return evidence
+
+    async def stream_complete(self, model: str, messages: list[dict[str, str]]) -> HTTPEvidence:
+        """流式补全请求."""
+        url = self._build_completion_url()
+        headers = self._build_headers()
+        body = self._build_stream_body(model, messages)
+        evidence = self._build_evidence("POST", url, body)
+
+        try:
+            evidence.request_time = datetime.now(tz=UTC)
+            start = time.monotonic()
+            first_token_time: float | None = None
+            full_text_parts: list[str] = []
+            raw_events: list[str] = []
+
+            async with self.client.stream("POST", url, headers=headers, json=body) as response:
+                evidence.http_status = response.status_code
+                evidence.response_headers = dict(response.headers)
+
+                async for line in response.aiter_lines():
+                    raw_events.append(line)
+                    if first_token_time is None:
+                        first_token_time = time.monotonic()
+                        evidence.first_token_latency_ms = (first_token_time - start) * 1000
+
+                    parsed = self._parse_stream_event(line)
+                    if parsed:
+                        text = self._extract_stream_text(parsed)
+                        if text:
+                            full_text_parts.append(text)
+                        self._parse_stream_finish(parsed, evidence)
+
+                evidence.total_latency_ms = (time.monotonic() - start) * 1000
+
+            evidence.response_text = "".join(full_text_parts)
+            evidence.response_body_summary = "\n".join(raw_events)[:2000]
+            evidence.response_body_sha256 = sha256_hash("\n".join(raw_events))
+            evidence.response_body_size = sum(len(e) for e in raw_events)
+
+        except Exception as e:
+            evidence.exception_type = type(e).__name__
+            evidence.exception_message = str(e)
+
+        return evidence
+
+    def _build_evidence(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, object] | None = None,
+    ) -> HTTPEvidence:
+        """构建基础证据对象."""
+        return HTTPEvidence(
+            request_method=method,
+            request_url_redacted=redact_url(url),
+            request_path=url.replace(self.config.base_url, ""),
+            request_headers_redacted=redact_headers(self._build_headers()),
+            request_body_redacted=redact_json_body(body),
+            request_model=self.config.model,
+        )
+
+    @abstractmethod
+    def _extract_models(self, data: dict[str, object]) -> list[str]:
+        """从模型列表响应中提取模型 ID."""
+        ...
+
+    @abstractmethod
+    def _extract_stream_text(self, event: dict[str, object]) -> str | None:
+        """从流式事件中提取文本."""
+        ...
+
+    @abstractmethod
+    def _parse_stream_finish(self, event: dict[str, object], evidence: HTTPEvidence) -> None:
+        """从流式事件中提取完成信息."""
+        ...
