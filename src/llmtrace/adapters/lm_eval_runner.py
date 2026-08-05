@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from llmtrace.adapters.lm_eval_bridge import ProviderBackedLM
-from llmtrace.benchmarks.models import CompletionOptions, CompletionProvider
+from llmtrace.benchmarks.models import CompletionProvider
 
 try:
     import lm_eval  # noqa: F401
@@ -166,16 +166,6 @@ def _prepare_task_dir(task_root: Path, task_name: str) -> tuple[str, str, tempfi
     return tmpdir.name, task_name, tmpdir
 
 
-def _build_actual_options(generation_kwargs: dict[str, object]) -> CompletionOptions | None:
-    """Build Controlled CompletionOptions from generation_kwargs used in this run."""
-    if not generation_kwargs:
-        return None
-    try:
-        return CompletionOptions.from_lm_eval_kwargs(generation_kwargs)
-    except (ValueError, TypeError):
-        return None
-
-
 class LmEvalRunner:
     """Isolated runner for lm-eval tasks via the Provider-backed LM bridge.
 
@@ -304,7 +294,7 @@ class LmEvalRunner:
                 "evidence_ids": evidence_ids,
                 "task_name": task_name,
                 "request_count": len(evidence_ids),
-                "actual_options": _build_actual_options(self._generation_kwargs),
+                "actual_options": self._lm.used_options if self._lm else None,
             }
         finally:
             # Auto-clean temp directory on all paths

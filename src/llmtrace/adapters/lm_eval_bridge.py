@@ -222,6 +222,23 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
         self._model_name = model_name
         self._evidence_registry: dict[str, HTTPEvidence] = evidence_registry if evidence_registry is not None else {}
         self._generation_kwargs: dict[str, object] = generation_kwargs or {}
+        self._used_options: list[CompletionOptions | None] = []
+
+    @property
+    def used_options(self) -> CompletionOptions | None:
+        """Return the options actually passed to Provider.complete().
+
+        If all requests used identical options, returns that single
+        CompletionOptions.  If different options were used across
+        requests, returns None (inconsistent options are a bug —
+        the smoke task should produce uniform options per task run).
+        """
+        if not self._used_options:
+            return None
+        first = self._used_options[0]
+        if all(o == first for o in self._used_options):
+            return first
+        return None
 
     # ------------------------------------------------------------------
     # generate_until — the only supported mode
@@ -254,6 +271,9 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
 
             # Build typed CompletionOptions (fails on unsupported keys)
             options = CompletionOptions.from_lm_eval_kwargs(merged_kwargs) if merged_kwargs else None
+
+            # Record the options actually passed to the provider
+            self._used_options.append(options)
 
             # Build chat messages; lm-eval sends the formatted prompt as ctx
             messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]

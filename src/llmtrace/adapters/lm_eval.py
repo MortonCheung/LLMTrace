@@ -6,6 +6,7 @@ TaskAttempt and GradeResult models via the Provider-backed bridge.
 
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import uuid4
 
 from llmtrace.adapters.base import BenchmarkAdapter
@@ -43,6 +44,10 @@ except ImportError:
 # Fixed smoke task identity (single source of truth)
 # ---------------------------------------------------------------------------
 
+# Built-in trusted task root — not configurable by callers.
+_BUILTIN_RESOURCES = Path(__file__).resolve().parent / "_resources"
+BUILTIN_SMOKE_TASK_ROOT = str(_BUILTIN_RESOURCES)
+
 _SMOKE_MANIFEST = SmokeTaskManifest()
 
 _SMOKE_TASK_SPEC = TaskSpec(
@@ -69,11 +74,10 @@ class LmEvalAdapter(BenchmarkAdapter):
 
     def __init__(
         self,
-        task_root: str,
         model_name: str = "test-model",
         generation_kwargs: dict[str, object] | None = None,
     ) -> None:
-        self._task_root = task_root
+        self._task_root = BUILTIN_SMOKE_TASK_ROOT
         self._model_name = model_name
         self._generation_kwargs = generation_kwargs or {}
 
@@ -366,28 +370,57 @@ class LmEvalAdapter(BenchmarkAdapter):
 # ---------------------------------------------------------------------------
 
 
+def parse_exact_match_metric(key: str) -> tuple[str, str] | None:
+    """Parse a metric key, accepting only exact_match or exact_match,<filter>.
+
+    Accepted:
+      "exact_match"  →  ("exact_match", "none")
+      "exact_match,none"  →  ("exact_match", "none")
+      "exact_match,my_filter"  →  ("exact_match", "my_filter")
+
+    Rejected:
+      "exact_match_fake"
+      "exact_matching"
+      "exact_match,"
+      Any other string that merely starts with "exact_match".
+    """
+    if key == "exact_match":
+        return ("exact_match", "none")
+    if key.startswith("exact_match,"):
+        parts = key.split(",", 1)
+        filter_name = parts[1].strip()
+        if filter_name:
+            return ("exact_match", filter_name)
+    return None
+
+
 def _find_exact_match(results: dict[str, object]) -> tuple[str | None, float]:
     """Find the exact_match metric in flat or nested results.
 
     Returns (metric_name, score) or (None, 0.0) if not found.
     """
+
+    def _lookup(d: dict[str, object]) -> tuple[str | None, float]:
+        for key in d:
+            parsed = parse_exact_match_metric(key)
+            if parsed is not None:
+                val = d[key]
+                if isinstance(val, (int, float)):
+                    return str(key), float(val)
+                return None, 0.0
+        return None, 0.0
+
     # Try flat format first
-    for key in results:
-        if key.startswith("exact_match"):
-            val = results[key]
-            if isinstance(val, (int, float)):
-                return str(key), float(val)
-            return None, 0.0
+    mn, score = _lookup(results)
+    if mn is not None:
+        return mn, score
 
     # Try nested format
     for _task_key, task_metrics in results.items():
         if isinstance(task_metrics, dict):
-            for key in task_metrics:
-                if key.startswith("exact_match"):
-                    val = task_metrics[key]
-                    if isinstance(val, (int, float)):
-                        return str(key), float(val)
-                    return None, 0.0
+            mn, score = _lookup(task_metrics)
+            if mn is not None:
+                return mn, score
 
     return None, 0.0
 
@@ -436,14 +469,12 @@ def _extract_metric_result(
     for _tn, metrics in task_results.items():
         if isinstance(metrics, dict):
             for key, val in metrics.items():
-                if key.startswith("exact_match"):
-                    metric_name = str(key)
-                    if "," in key:
-                        _, filter_name = key.split(",", 1)
+                parsed = parse_exact_match_metric(key)
+                if parsed is not None:
+                    metric_name, filter_name = parsed
                     if isinstance(val, (int, float)):
                         value = float(val)
                     else:
-                        # Non-numeric exact_match value — invalid
                         return None
                     break
         if metric_name is not None:
