@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
 
+class EvidenceType(StrEnum):
+    """证据用途类别."""
+
+    MODEL_CATALOG = "model_catalog"
+    BASELINE = "baseline"
+    INVALID_MODEL = "invalid_model"
+    STREAMING_BASELINE = "streaming_baseline"
+    CONNECTIVITY = "connectivity"
+
+
 class HTTPEvidence(BaseModel):
     """单次 HTTP 请求-响应证据."""
+
+    # 证据标识
+    evidence_id: UUID = Field(default_factory=uuid4)
+    evidence_type: str | None = None
 
     # 请求信息
     request_method: str

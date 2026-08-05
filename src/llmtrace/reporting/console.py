@@ -26,11 +26,11 @@ def print_audit_summary(result: AuditResult) -> None:
     table.add_row("声称模型", config.model)
     table.add_row("报告 ID", result.report_id)
 
-    # 成功率
-    evidence = [e for e in result.evidence if e.request_model == config.model and e.success]
-    total = sum(1 for e in result.evidence if e.request_model == config.model)
-    if total > 0:
-        table.add_row("正常请求成功率", f"{len(evidence)}/{total}")
+    # 成功率 — 只统计 baseline 证据
+    baseline_ev = [e for e in result.evidence if e.evidence_type == "baseline"]
+    baseline_success = [e for e in baseline_ev if e.success]
+    if baseline_ev:
+        table.add_row("正常请求成功率", f"{len(baseline_success)}/{len(baseline_ev)}")
     else:
         table.add_row("正常请求成功率", "N/A")
 

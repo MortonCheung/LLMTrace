@@ -50,8 +50,8 @@ def generate_html_report(result: AuditResult, output_path: Path) -> Path:
     )
     template = env.get_template("report.html.j2")
 
-    # 计算统计数据
-    evidence = [e for e in result.evidence if e.request_model == result.config.model]
+    # 计算统计数据 — 只统计 baseline 证据
+    evidence = [e for e in result.evidence if e.evidence_type == "baseline"]
     token_evidence = [e for e in evidence if e.input_tokens is not None and e.output_tokens is not None]
     rid_evidence = [e for e in evidence if e.response_id is not None]
     models = {e.response_model for e in evidence if e.response_model}

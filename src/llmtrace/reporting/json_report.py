@@ -14,6 +14,8 @@ from llmtrace.utilities.hashing import sha256_hash
 def evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
     """将证据对象转换为字典."""
     return {
+        "evidence_id": str(ev.evidence_id),
+        "evidence_type": ev.evidence_type,
         "request_method": ev.request_method,
         "request_url_redacted": ev.request_url_redacted,
         "request_path": ev.request_path,
