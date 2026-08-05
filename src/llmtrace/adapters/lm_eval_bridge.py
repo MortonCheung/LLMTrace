@@ -75,6 +75,20 @@ class UnsupportedRequestTypeError(NotImplementedError):
     """Raised when lm-eval requests a mode not yet supported by this bridge."""
 
 
+class LmEvalOptionsInconsistentError(Exception):
+    """Raised when different requests within a single task use different CompletionOptions.
+
+    This indicates a bug in the task configuration or Bridge logic.
+    The smoke task should produce uniform options per run.
+    """
+
+    def __init__(self, options_list: list[CompletionOptions | None]) -> None:
+        count = len(options_list)
+        unique = sorted({o.model_dump_json() if o else "None" for o in options_list})
+        super().__init__(f"LM_EVAL_OPTIONS_INCONSISTENT: {count} requests used {len(unique)} different options sets")
+        self.options_list = options_list
+
+
 # ---------------------------------------------------------------------------
 # Thread-based async bridge
 # ---------------------------------------------------------------------------
@@ -228,17 +242,21 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
     def used_options(self) -> CompletionOptions | None:
         """Return the options actually passed to Provider.complete().
 
-        If all requests used identical options, returns that single
-        CompletionOptions.  If different options were used across
-        requests, returns None (inconsistent options are a bug —
-        the smoke task should produce uniform options per task run).
+        Returns the single CompletionOptions if all requests used identical
+        options.  Raises LmEvalOptionsInconsistentError if different options
+        were used across requests.
         """
         if not self._used_options:
             return None
         first = self._used_options[0]
         if all(o == first for o in self._used_options):
             return first
-        return None
+        raise LmEvalOptionsInconsistentError(self._used_options)
+
+    @property
+    def used_options_list(self) -> list[CompletionOptions | None]:
+        """Return the raw list of options used (for error diagnostics)."""
+        return list(self._used_options)
 
     # ------------------------------------------------------------------
     # generate_until — the only supported mode

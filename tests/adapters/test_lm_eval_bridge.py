@@ -249,6 +249,77 @@ class TestProviderEvidenceFailure:
         assert len(reg) == 1
 
 
+class TestProviderBackedLMOptionsConsistency:
+    """Section 4 fix: inconsistent options across requests must be detected."""
+
+    def test_used_options_uniform_returns_single(self, smoke_provider: object) -> None:
+        """When all requests use the same options, used_options returns the single value."""
+        from tests.adapters.conftest import FakeProvider
+
+        provider = smoke_provider
+        assert isinstance(provider, FakeProvider)
+
+        lm = ProviderBackedLM(provider=provider, model_name="test", generation_kwargs={"temperature": 0.0})
+        lm.generate_until(
+            [
+                _make_instance("test1", {"temperature": 0.0}),
+                _make_instance("test2", {"temperature": 0.0}),
+            ]
+        )
+
+        opts = lm.used_options
+        assert opts is not None
+        assert opts.temperature == 0.0
+
+    def test_used_options_inconsistent_raises(self, smoke_provider: object) -> None:
+        """Two requests with different temperatures raise LmEvalOptionsInconsistentError."""
+        from llmtrace.adapters.lm_eval_bridge import LmEvalOptionsInconsistentError
+        from tests.adapters.conftest import FakeProvider
+
+        provider = smoke_provider
+        assert isinstance(provider, FakeProvider)
+
+        lm = ProviderBackedLM(provider=provider, model_name="test")
+        lm.generate_until(
+            [
+                _make_instance("test1", {"temperature": 0.0}),
+                _make_instance("test2", {"temperature": 0.7}),
+            ]
+        )
+
+        with pytest.raises(LmEvalOptionsInconsistentError, match="LM_EVAL_OPTIONS_INCONSISTENT"):
+            _ = lm.used_options
+
+    def test_used_options_empty_returns_none(self, smoke_provider: object) -> None:
+        """When no requests are made, used_options returns None without raising."""
+        from tests.adapters.conftest import FakeProvider
+
+        provider = smoke_provider
+        assert isinstance(provider, FakeProvider)
+
+        lm = ProviderBackedLM(provider=provider, model_name="test")
+        assert lm.used_options is None
+
+    def test_used_options_list_preserves_all(self, smoke_provider: object) -> None:
+        """used_options_list returns every recorded option, useful for diagnostics."""
+        from tests.adapters.conftest import FakeProvider
+
+        provider = smoke_provider
+        assert isinstance(provider, FakeProvider)
+
+        lm = ProviderBackedLM(provider=provider, model_name="test")
+        lm.generate_until(
+            [
+                _make_instance("test1", {"temperature": 0.0}),
+                _make_instance("test2", {"temperature": 0.7}),
+            ]
+        )
+
+        assert len(lm.used_options_list) == 2
+        assert lm.used_options_list[0] is not None
+        assert lm.used_options_list[1] is not None
+
+
 class TestProviderBackedLMUnsupported:
     def test_loglikelihood_raises_error(self, smoke_provider: object) -> None:
         """loglikelihood raises UnsupportedRequestTypeError."""

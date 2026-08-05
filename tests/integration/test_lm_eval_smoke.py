@@ -322,13 +322,15 @@ class TestLmEvalSmokeGenerationKwargs:
             assert opts is not None
             assert opts.temperature == 0.0  # YAML value wins
 
-        # metadata must also record 0.0
-        if attempt.status == TaskStatus.SUCCESS:
-            metric = attempt.metadata["metric_result"]
-            gen_opts = metric.get("generation_options")
-            if gen_opts is not None:
-                opts_obj = CompletionOptions(**gen_opts)
-                assert opts_obj.temperature == 0.0
+        # metadata must also record 0.0 — strict assertion
+        assert attempt.status == TaskStatus.SUCCESS
+        metric = attempt.metadata["metric_result"]
+        gen_opts = metric.get("generation_options")
+        assert gen_opts is not None, "generation_options must always be present in metric_result metadata"
+        opts_obj = CompletionOptions(**gen_opts)
+        assert opts_obj.temperature == 0.0  # YAML value wins
+        assert opts_obj.until == ["\n"]
+        assert opts_obj.do_sample is False
 
 
 # ---------------------------------------------------------------------------
@@ -466,18 +468,25 @@ data_files: llmtrace_smoke.json
 
 class TestTempDirectoryCleanup:
     @pytest.mark.asyncio
-    async def test_tempdir_cleaned_after_success(self, smoke_provider: object) -> None:
-        """After a successful run, the temp directory created by the Runner is gone."""
-        import tempfile as tf
-
+    async def test_tempdir_cleaned_after_success(self, monkeypatch: pytest.MonkeyPatch, smoke_provider: object) -> None:
+        """After a successful run, the temp dir created by Runner is gone."""
         from tests.adapters.conftest import FakeProvider
 
         provider = smoke_provider
         assert isinstance(provider, FakeProvider)
 
-        # Capture all directories created during the run
-        before = {Path(p) for p in tf.gettempdir() if "llmtrace_task_" in p}
-        before_dirs = {d for d in before if d.is_dir()}
+        captured_paths: list[Path] = []
+
+        def _capturing_prepare(task_root: Path, task_name: str):
+            result = _prepare_task_dir_orig(task_root, task_name)
+            captured_paths.append(Path(result[0]))
+            return result
+
+        # Monkeypatch _prepare_task_dir to capture the exact dir
+        import llmtrace.adapters.lm_eval_runner as runner_mod
+
+        _prepare_task_dir_orig = runner_mod._prepare_task_dir
+        monkeypatch.setattr(runner_mod, "_prepare_task_dir", _capturing_prepare)
 
         adapter = LmEvalAdapter(
             model_name="test-model",
@@ -487,26 +496,33 @@ class TestTempDirectoryCleanup:
         attempt = await adapter.run_task(task, provider)
 
         assert attempt.status == TaskStatus.SUCCESS
-
-        # After run: no llmtrace_task_ directories left behind
-        after = {Path(p) for p in tf.gettempdir() if "llmtrace_task_" in p}
-        after_dirs = {d for d in after if d.is_dir()}
-        leftover = after_dirs - before_dirs
-
-        assert not leftover, f"Temporary directories left behind: {leftover}"
+        assert len(captured_paths) == 1, "Expected exactly one temp dir to be created"
+        captured = captured_paths[0]
+        assert not captured.exists(), f"Temporary directory not cleaned up: {captured}"
+        assert captured.name.startswith("llmtrace_task_")
 
     @pytest.mark.asyncio
-    async def test_tempdir_cleaned_after_provider_error(self, exception_evidence_provider: object) -> None:
-        """After a provider error, the temp directory is still cleaned up."""
-        import tempfile as tf
-
+    async def test_tempdir_cleaned_after_provider_error(
+        self, monkeypatch: pytest.MonkeyPatch, exception_evidence_provider: object
+    ) -> None:
+        """After a provider error, the temp dir is also cleaned up."""
         from tests.adapters.conftest import FakeProvider
 
         provider = exception_evidence_provider
         assert isinstance(provider, FakeProvider)
 
-        before = {Path(p) for p in tf.gettempdir() if "llmtrace_task_" in p}
-        before_dirs = {d for d in before if d.is_dir()}
+        captured_paths: list[Path] = []
+
+        import llmtrace.adapters.lm_eval_runner as runner_mod
+
+        _prepare_task_dir_orig = runner_mod._prepare_task_dir
+
+        def _capturing_prepare(task_root: Path, task_name: str):
+            result = _prepare_task_dir_orig(task_root, task_name)
+            captured_paths.append(Path(result[0]))
+            return result
+
+        monkeypatch.setattr(runner_mod, "_prepare_task_dir", _capturing_prepare)
 
         adapter = LmEvalAdapter(
             model_name="test-model",
@@ -516,12 +532,9 @@ class TestTempDirectoryCleanup:
         attempt = await adapter.run_task(task, provider)
 
         assert attempt.status == TaskStatus.FAILURE
-
-        after = {Path(p) for p in tf.gettempdir() if "llmtrace_task_" in p}
-        after_dirs = {d for d in after if d.is_dir()}
-        leftover = after_dirs - before_dirs
-
-        assert not leftover, f"Temporary directories left behind after error: {leftover}"
+        assert len(captured_paths) == 1
+        captured = captured_paths[0]
+        assert not captured.exists(), f"Temporary directory not cleaned up after error: {captured}"
 
 
 # ---------------------------------------------------------------------------

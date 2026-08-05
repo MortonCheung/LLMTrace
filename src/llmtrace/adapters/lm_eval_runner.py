@@ -20,8 +20,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from llmtrace.adapters.lm_eval_bridge import ProviderBackedLM
-from llmtrace.benchmarks.models import CompletionProvider
+from llmtrace.adapters.lm_eval_bridge import (
+    LmEvalOptionsInconsistentError,
+    ProviderBackedLM,
+)
+from llmtrace.benchmarks.models import CompletionOptions, CompletionProvider
 
 try:
     import lm_eval  # noqa: F401
@@ -288,13 +291,24 @@ class LmEvalRunner:
 
             import lm_eval as pkg  # noqa: F811
 
+            # Check for options consistency
+            options_inconsistent = False
+            actual_options: CompletionOptions | None = None  # noqa: F811 — type imported above
+            if self._lm is not None:
+                try:
+                    actual_options = self._lm.used_options
+                except LmEvalOptionsInconsistentError:
+                    options_inconsistent = True
+                    actual_options = None
+
             return {
                 "results": task_results,
                 "version": getattr(pkg, "__version__", "unknown"),
                 "evidence_ids": evidence_ids,
                 "task_name": task_name,
                 "request_count": len(evidence_ids),
-                "actual_options": self._lm.used_options if self._lm else None,
+                "actual_options": actual_options,
+                "options_inconsistent": options_inconsistent,
             }
         finally:
             # Auto-clean temp directory on all paths

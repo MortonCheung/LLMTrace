@@ -202,6 +202,28 @@ class LmEvalAdapter(BenchmarkAdapter):
             evidence_ids: list[object] = list(evidence_ids_raw) if isinstance(evidence_ids_raw, list) else []
             evidence_refs = [str(eid) for eid in evidence_ids]
 
+            # Check for options inconsistency
+            if result.get("options_inconsistent"):
+                return TaskAttempt(
+                    attempt_id=attempt_id,
+                    source_id=_SMOKE_MANIFEST.source_id,
+                    source_revision=_SMOKE_MANIFEST.source_revision,
+                    suite_id=_SMOKE_MANIFEST.suite_id,
+                    suite_version=_SMOKE_MANIFEST.suite_version,
+                    task_id=task_spec.task_id,
+                    adapter_id=self.adapter_id,
+                    adapter_version=self.adapter_version,
+                    status=TaskStatus.FAILURE,
+                    evidence_refs=evidence_refs,
+                    failure=AdapterFailure(
+                        error_code="LM_EVAL_OPTIONS_INCONSISTENT",
+                        category=FailureCategory.ADAPTER,
+                        message="Different requests within this task used inconsistent CompletionOptions",
+                        retryable=False,
+                        details={"task_name": str(result.get("task_name", "unknown"))},
+                    ),
+                )
+
             # Build controlled LmEvalMetricResult from the raw output
             actual_options_raw: object = result.get("actual_options")
             actual_options = actual_options_raw if isinstance(actual_options_raw, CompletionOptions) else None
