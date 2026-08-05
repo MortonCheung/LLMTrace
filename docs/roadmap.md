@@ -1,51 +1,53 @@
 # LLMTrace 路线图
 
-## v0.1 证据审计 MVP（当前版本）
+路线图与 [docs/product/PRD.md](./product/PRD.md) 保持同步，每个版本对应 PRD「开发里程碑」中的一个阶段。
 
-- 协议证据采集
-- 基础探针（连接、模型列表、基线、无效模型、流式、元数据、稳定性）
-- 风险分析
-- JSON 和 HTML 报告
-- 跨报告比较
+## v0.1 证据审计 MVP（已完成）
 
-## v0.2 轻量能力基准
+- 协议证据采集（OpenAI-compatible / Anthropic-compatible，Base URL 与鉴权适配）
+- 基础探针：连接、鉴权、模型列表、基线、无效模型、流式、元数据、稳定性
+- 模型标识漂移检测与风险分析（LOW / MEDIUM / HIGH / INCONCLUSIVE）
+- Evidence 唯一 ID 与 Finding 引用，原始响应 SHA-256、Token、延迟记录
+- JSON / HTML 报告与跨报告比较
+- honest / fallback / inconsistent Mock Server
+- CLI：`audit`、`inspect`、`compare`
+- 质量基线：GitHub Actions CI（Python 3.11 / 3.12 / 3.13、Ruff、Format、Mypy、Pytest、覆盖率门禁）
 
-- 设计低成本、可验证的能力基准测试题
-- 不依赖完整评测框架，保持快速执行
-- 集成到审计流程中作为可选探针
+## v0.2 评测粘合层与能力评分基础（开发中）
 
-## v0.3 官方参考模型对照
+- Source / Suite / Task / Run / Score 统一数据模型
+- Benchmark Adapter Protocol（`list_tasks`、`build_plan`、`estimate_cost`、`run_task`、`normalize_result`）
+- RunPlan 与 Budget Estimator
+- 首个 `lm-evaluation-harness` 最小适配器（subprocess 隔离、固定 revision）
+- 统一结果模型与 Evidence 集成
 
-- 建立官方参考模型的基线数据
-- 将中转站返回结果与官方参考模型对比
-- 识别行为差异模式
+完成标准：一个外部任务通过 Mock Provider 跑通完整闭环并进入 Evidence 与报告。
 
-## v0.4 跨时间路由漂移
+## v0.3 能力评分 MVP
 
-- 增强多报告比较功能
-- 识别路由策略随时间变化的模式
-- 支持定期自动审计
+- 接入外部评测：lm-eval 精选任务、LiveBench 精选客观题、EvalPlus 精选代码题
+- 快速模式，20–40 个任务
+- 4 个能力维度：推理、数学、代码、指令遵循
+- 0–100 分综合评分与置信度
+- 成本估算与 JSON / HTML 报告
 
-## v0.5 LLMmap 指纹适配
+## v0.4 参考模型对照
 
-- 适配 LLMmap 的模型指纹库
-- 将指纹匹配结果纳入证据
-- 与内部结构指纹互补
+- ReferenceProfile 参考模型体系
+- 官方 API 实测基线数据
+- 声明模型差距与分项差距
+- 版本化参考组
 
-## v0.6 Model Equality Testing 统计模式
+## v0.5 行为相似度与混合路由
 
-- 实现统计显著性检验
-- 需要更大样本量支持
-- 作为可选的高级分析模式
+- 主动指纹题与行为向量
+- Top-K 相似度
+- Model Equality Testing 统计模式
+- 混合路由与跨时间动态降级
 
-## v0.7 Promptfoo 与 lm-eval 外部适配
+## v0.6 简易 Web 前端
 
-- 接入 Promptfoo 作为提示词评测引擎
-- 接入 lm-evaluation-harness 作为能力基准引擎
-- 将外部评测结果纳入 LLMTrace 报告
-
-## v0.8 Web 可视化界面
-
-- 提供 Web 界面查看审计报告
-- 支持历史报告浏览和趋势分析
+- 输入接口与成本确认
+- 开始测试与实时进度
+- 结果报告与历史记录
 - 不依赖外部服务，可本地运行
