@@ -52,7 +52,7 @@ def _build_wheel(project_root: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Session-scoped fixtures (shared across all tests in this module)
 # ---------------------------------------------------------------------------
 
 
@@ -62,6 +62,20 @@ def project_root() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+@pytest.fixture(scope="session")
+def dist_dir(project_root: Path) -> Path:
+    """Build a wheel and return the dist directory."""
+    return _build_wheel(project_root)
+
+
+@pytest.fixture(scope="session")
+def wheel_path(dist_dir: Path) -> Path:
+    """Return the path to the single built wheel."""
+    wheels = _find_wheels(dist_dir)
+    assert len(wheels) == 1, f"Expected exactly one wheel, got {len(wheels)}"
+    return wheels[0]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -69,16 +83,6 @@ def project_root() -> Path:
 
 class TestBuiltinResourcesInWheel:
     """Verify that the built-in YAML and JSON resources are in the wheel."""
-
-    @pytest.fixture(scope="class")
-    def dist_dir(self, project_root: Path) -> Path:
-        return _build_wheel(project_root)
-
-    @pytest.fixture(scope="class")
-    def wheel_path(self, dist_dir: Path) -> Path:
-        wheels = _find_wheels(dist_dir)
-        assert len(wheels) == 1, f"Expected exactly one wheel, got {len(wheels)}"
-        return wheels[0]
 
     def test_wheel_contains_smoke_yaml(self, wheel_path: Path) -> None:
         """The wheel must contain llmtrace/adapters/_resources/llmtrace_smoke.yaml."""
