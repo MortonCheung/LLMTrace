@@ -14,9 +14,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 import uuid
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,7 +25,32 @@ MODE = "honest"
 PORT = 8080
 DEFAULT_MODEL = "mock-model-v1"
 ALT_MODEL = "mock-model-v2"
-REQUEST_COUNTER = 0
+
+# 线程安全的请求日志：记录每次实际收到的审计请求
+REQUEST_LOG: list[dict[str, str]] = []
+LOG_LOCK = threading.Lock()
+# 只对"正常模型"请求递增的计数器，用于 inconsistent 模式轮换
+NORMAL_COUNTER = 0
+
+
+def reset_state() -> None:
+    """清空请求日志和计数器（每次测试启动新服务器时调用）."""
+    global NORMAL_COUNTER
+    with LOG_LOCK:
+        REQUEST_LOG.clear()
+        NORMAL_COUNTER = 0
+
+
+def _log_request(method: str, path: str) -> None:
+    """记录一次审计请求（线程安全）."""
+    with LOG_LOCK:
+        REQUEST_LOG.append({"method": method, "path": path})
+
+
+def get_request_log() -> list[dict[str, str]]:
+    """返回请求日志的副本."""
+    with LOG_LOCK:
+        return list(REQUEST_LOG)
 
 
 def generate_openai_response(
@@ -233,13 +259,20 @@ class MockProxyHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
     def _determine_response_model(self, requested_model: str) -> tuple[str, bool]:
-        """根据模式确定响应模型和拒绝状态."""
-        global REQUEST_COUNTER
-        REQUEST_COUNTER += 1
+        """根据模式确定响应模型和拒绝状态.
+
+        返回 (响应模型, 是否拒绝):
+        - honest:      正常 -> DEFAULT_MODEL; 无效模型 -> 拒绝 (404)
+        - fallback:    任何模型 -> DEFAULT_MODEL (无效模型也成功返回)
+        - inconsistent:正常 -> DEFAULT/ALT 轮换; 无效模型 -> 拒绝 (404)
+        """
+        global NORMAL_COUNTER
+
+        is_invalid = requested_model.startswith("llmtrace-invalid-")
 
         if MODE == "honest":
-            if requested_model.startswith("llmtrace-invalid-"):
-                return "", True  # 拒绝无效模型
+            if is_invalid:
+                return "", True
             return DEFAULT_MODEL, False
 
         elif MODE == "fallback":
@@ -247,20 +280,20 @@ class MockProxyHandler(BaseHTTPRequestHandler):
             return DEFAULT_MODEL, False
 
         elif MODE == "inconsistent":
-            # 轮换返回模型
-            if REQUEST_COUNTER % 3 == 0:
+            if is_invalid:
+                return "", True
+            # 只对正常模型请求轮换，保证基线漂移可复现
+            NORMAL_COUNTER += 1
+            if NORMAL_COUNTER % 3 == 0:
                 return ALT_MODEL, False
-            elif REQUEST_COUNTER % 3 == 2:
-                return DEFAULT_MODEL, False
-            else:
-                return DEFAULT_MODEL, False
+            return DEFAULT_MODEL, False
 
         return DEFAULT_MODEL, False
 
     def _should_include_usage(self) -> bool:
         """决定是否包含 usage 字段."""
         if MODE == "inconsistent":
-            return REQUEST_COUNTER % 2 == 0
+            return NORMAL_COUNTER % 2 == 0
         return True
 
     def _should_include_id(self) -> bool:
@@ -358,6 +391,11 @@ class MockProxyHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         """处理 GET 请求."""
         parsed = urlparse(self.path)
+        # 调试端点：返回实际接收到的审计请求日志（本身不计入请求数）
+        if parsed.path == "/debug/requests":
+            self._send_json({"count": len(get_request_log()), "requests": get_request_log()})
+            return
+        _log_request("GET", parsed.path)
         if parsed.path in ("/v1/models", "/models"):
             self._handle_models()
         else:
@@ -365,6 +403,8 @@ class MockProxyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """处理 POST 请求."""
+        parsed = urlparse(self.path)
+        _log_request("POST", parsed.path)
         protocol = self._detect_protocol()
         if protocol == "openai":
             self._handle_openai_completion()
@@ -390,13 +430,16 @@ def main() -> None:
     MODE = args.mode
     PORT = args.port
 
-    server = HTTPServer(("127.0.0.1", PORT), MockProxyHandler)
+    reset_state()
+
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), MockProxyHandler)
     print(f"Mock Proxy Server 启动: http://127.0.0.1:{PORT}")
     print(f"模式: {MODE}")
     print("支持端点:")
     print(f"  GET  http://127.0.0.1:{PORT}/v1/models")
     print(f"  POST http://127.0.0.1:{PORT}/v1/chat/completions  (OpenAI-compatible)")
     print(f"  POST http://127.0.0.1:{PORT}/v1/messages  (Anthropic-compatible)")
+    print(f"  GET  http://127.0.0.1:{PORT}/debug/requests  (请求日志)")
     print()
     print("按 Ctrl+C 停止服务器")
 
