@@ -9,6 +9,7 @@ from llmtrace.benchmarks.models import (
     BudgetEstimate,
     GradeStatus,
     RunPlan,
+    SmokeTaskManifest,
     TaskSpec,
     TaskStatus,
 )
@@ -16,32 +17,47 @@ from llmtrace.benchmarks.models import (
 
 class TestLmEvalAdapterMetadata:
     def test_adapter_id(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         assert adapter.adapter_id == "lm-eval"
 
     def test_adapter_version_is_string(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         assert isinstance(adapter.adapter_version, str)
         assert len(adapter.adapter_version) > 0
 
 
 class TestLmEvalAdapterListTasks:
     def test_list_tasks_returns_smoke_task(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         tasks = adapter.list_tasks()
         assert len(tasks) == 1
         assert tasks[0].task_id == "llmtrace_smoke"
         assert tasks[0].num_samples == 4
 
     def test_list_tasks_has_smoke_category(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         tasks = adapter.list_tasks()
         assert tasks[0].category == "smoke"
 
 
+class TestSmokeTaskManifest:
+    def test_manifest_defaults(self) -> None:
+        manifest = SmokeTaskManifest()
+        assert manifest.task_id == "llmtrace_smoke"
+        assert manifest.suite_id == "llmtrace_smoke"
+        assert manifest.metric == "exact_match"
+        assert manifest.filter == "none"
+        assert manifest.capability_score_eligible is False
+
+    def test_manifest_is_frozen(self) -> None:
+        manifest = SmokeTaskManifest()
+        with pytest.raises((TypeError, ValueError)):
+            manifest.task_id = "other"  # type: ignore[misc]
+
+
 class TestLmEvalAdapterBuildPlan:
     def test_build_plan_returns_run_plan(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         plan = adapter.build_plan(
             suite_id="smoke_suite",
             suite_version="1.0.0",
@@ -56,30 +72,53 @@ class TestLmEvalAdapterBuildPlan:
         assert plan.adapter_id == "lm-eval"
 
     def test_build_plan_is_deterministic(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         plan1 = adapter.build_plan("s", "v", "src", "rev", ["llmtrace_smoke"])
         plan2 = adapter.build_plan("s", "v", "src", "rev", ["llmtrace_smoke"])
         assert plan1.plan_id == plan2.plan_id
 
+    def test_build_plan_rejects_unknown_task_id(self) -> None:
+        """Section 7: Unknown task_id must raise an error."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        with pytest.raises(ValueError, match="Unknown task_ids"):
+            adapter.build_plan("s", "v", "src", "rev", ["nonexistent_task"])
+
+    def test_build_plan_rejects_empty_task_ids(self) -> None:
+        """Section 7: Empty task_ids must raise an error."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        with pytest.raises(ValueError, match="task_ids must not be empty"):
+            adapter.build_plan("s", "v", "src", "rev", [])
+
 
 class TestLmEvalAdapterBudget:
     def test_estimate_budget(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         budget = adapter.estimate_budget("s", ["llmtrace_smoke"])
         assert isinstance(budget, BudgetEstimate)
         assert budget.planned_requests == 4
         assert budget.maximum_requests == 4
 
     def test_estimate_budget_with_retries(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         budget = adapter.estimate_budget("s", ["llmtrace_smoke"], max_retries=2)
         assert budget.planned_requests == 4
         assert budget.maximum_requests == 12
 
+    def test_estimate_budget_rejects_unknown_task_id(self) -> None:
+        """Section 7: Unknown task_id must raise an error in estimate_budget too."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        with pytest.raises(ValueError, match="Unknown task_ids"):
+            adapter.estimate_budget("s", ["nonexistent"])
+
+    def test_estimate_budget_rejects_empty_task_ids(self) -> None:
+        adapter = LmEvalAdapter(task_root="/fake")
+        with pytest.raises(ValueError, match="task_ids must not be empty"):
+            adapter.estimate_budget("s", [])
+
 
 class TestLmEvalAdapterNormalizeResult:
     def test_normalize_with_exact_match(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         grade = adapter.normalize_result(
             {
                 "results": {"exact_match": 1.0},
@@ -94,7 +133,7 @@ class TestLmEvalAdapterNormalizeResult:
         assert grade.status == GradeStatus.GRADED
 
     def test_normalize_with_partial_score(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         grade = adapter.normalize_result(
             {
                 "results": {"exact_match": 0.5},
@@ -106,7 +145,7 @@ class TestLmEvalAdapterNormalizeResult:
         assert grade.normalized_score == 0.5
 
     def test_normalize_with_no_results(self) -> None:
-        adapter = LmEvalAdapter(include_path="/fake")
+        adapter = LmEvalAdapter(task_root="/fake")
         grade = adapter.normalize_result(
             {
                 "results": {},
@@ -118,19 +157,82 @@ class TestLmEvalAdapterNormalizeResult:
         assert grade.status == GradeStatus.UNGRADABLE
         assert grade.normalized_score == 0.0
 
+    def test_normalize_score_out_of_bounds_rejected(self) -> None:
+        """Section 6: Scores outside [0, 1] must be UNGRADABLE."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        grade = adapter.normalize_result(
+            {
+                "results": {"exact_match": 1.5},
+                "evidence_ids": [],
+                "task_name": "llmtrace_smoke",
+                "attempt_id": "a",
+            }
+        )
+        assert grade.status == GradeStatus.UNGRADABLE
+        assert "outside" in (grade.error_message or "")
+
+    def test_normalize_negative_score_rejected(self) -> None:
+        """Section 6: Negative scores must be UNGRADABLE."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        grade = adapter.normalize_result(
+            {
+                "results": {"exact_match": -0.1},
+                "evidence_ids": [],
+                "task_name": "llmtrace_smoke",
+                "attempt_id": "a",
+            }
+        )
+        assert grade.status == GradeStatus.UNGRADABLE
+
+    def test_normalize_with_exact_match_filter_format(self) -> None:
+        """exact_match,none format should be accepted."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        grade = adapter.normalize_result(
+            {
+                "results": {"exact_match,none": 0.75},
+                "evidence_ids": [],
+                "task_name": "llmtrace_smoke",
+                "attempt_id": "a",
+            }
+        )
+        assert grade.status == GradeStatus.GRADED
+        assert grade.normalized_score == 0.75
+
+    def test_normalize_non_numeric_metric_ungradable(self) -> None:
+        """Non-numeric exact_match value should be UNGRADABLE."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        grade = adapter.normalize_result(
+            {
+                "results": {"exact_match": "not-a-number"},
+                "evidence_ids": [],
+                "task_name": "llmtrace_smoke",
+                "attempt_id": "a",
+            }
+        )
+        assert grade.status == GradeStatus.UNGRADABLE
+
+    def test_normalize_non_exact_match_metric_ungradable(self) -> None:
+        """Section 6: Only exact_match is accepted - no fallback to first metric."""
+        adapter = LmEvalAdapter(task_root="/fake")
+        grade = adapter.normalize_result(
+            {
+                "results": {"f1_score": 0.8},
+                "evidence_ids": [],
+                "task_name": "llmtrace_smoke",
+                "attempt_id": "a",
+            }
+        )
+        assert grade.status == GradeStatus.UNGRADABLE
+        assert "No exact_match" in (grade.error_message or "")
+
 
 class TestLmEvalAdapterRunTaskWithoutLmEval:
     @pytest.mark.asyncio
     async def test_run_task_fails_when_lm_eval_not_installed(self) -> None:
-        """When lm-eval is not installed (or unavailable), run_task returns FAILURE."""
-        # This test verifies the failure path without needing lm-eval installed.
-        # Since we can't uninstall lm-eval in the test env, we test the
-        # adapter's structural failure handling.
-        adapter = LmEvalAdapter(include_path="/nonexistent/path")
+        """When lm-eval is not available, run_task returns FAILURE."""
+        adapter = LmEvalAdapter(task_root="/nonexistent/path")
         task = TaskSpec(task_id="llmtrace_smoke", name="Smoke", num_samples=4)
 
-        # This should fail because the include_path doesn't exist,
-        # proving the adapter returns structured failures.
         from tests.adapters.conftest import FakeProvider
 
         provider = FakeProvider()

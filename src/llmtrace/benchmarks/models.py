@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import (
@@ -19,6 +19,9 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
+
+if TYPE_CHECKING:
+    from llmtrace.models.evidence import HTTPEvidence
 
 # ---------------------------------------------------------------------------
 # Shared type aliases
@@ -386,3 +389,161 @@ class BenchmarkRunResult(BenchmarkProvenance):
         self.error_count = sum(1 for a in self.task_attempts if a.status == TaskStatus.FAILURE)
         self.skip_count = sum(1 for a in self.task_attempts if a.status == TaskStatus.SKIPPED)
         return self
+
+
+# ---------------------------------------------------------------------------
+# CompletionOptions — generation kwargs contract for Provider.complete()
+# ---------------------------------------------------------------------------
+
+# Recognised generation kwargs from lm-eval; anything else must fail explicitly.
+_RECOGNISED_GEN_KWARGS = frozenset({"until", "stop", "temperature", "max_gen_toks", "max_tokens", "do_sample"})
+
+
+class CompletionOptions(BaseModel):
+    """Typed generation options passed to Provider.complete().
+
+    Supports both the lm-eval ``generation_kwargs`` namespace and
+    the OpenAI-/Anthropic-compatible key sets:
+
+    ================== ================ ===================
+    lm-eval key         OpenAI key       Anthropic key
+    ================== ================ ===================
+    until / stop         stop             stop_sequences
+    temperature          temperature      temperature
+    max_gen_toks /       max_tokens       max_tokens
+    max_tokens
+    do_sample            (ignored)        (ignored)
+    ================== ================ ===================
+    """
+
+    until: list[str] | None = None
+    stop: list[str] | None = None
+    temperature: float | None = None
+    max_gen_toks: int | None = None
+    max_tokens: int | None = None
+    do_sample: bool | None = None
+
+    model_config = {"extra": "forbid"}
+
+    @classmethod
+    def from_lm_eval_kwargs(cls, gen_kwargs: dict[str, object]) -> CompletionOptions:
+        """Build from lm-eval generation_kwargs, failing on unknown keys."""
+        unknown = set(gen_kwargs.keys()) - _RECOGNISED_GEN_KWARGS
+        if unknown:
+            raise ValueError(
+                f"Unsupported generation kwargs: {sorted(unknown)}. Supported keys: {sorted(_RECOGNISED_GEN_KWARGS)}"
+            )
+
+        return cls(
+            until=cls._as_str_list(gen_kwargs.get("until")),
+            stop=cls._as_str_list(gen_kwargs.get("stop")),
+            temperature=cls._as_float_or_none(gen_kwargs.get("temperature")),
+            max_gen_toks=cls._as_int_or_none(gen_kwargs.get("max_gen_toks")),
+            max_tokens=cls._as_int_or_none(gen_kwargs.get("max_tokens")),
+            do_sample=cls._as_bool_or_none(gen_kwargs.get("do_sample")),
+        )
+
+    @staticmethod
+    def _as_str_list(value: object) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        raise TypeError(f"Expected list[str] or None, got {type(value).__name__}")
+
+    @staticmethod
+    def _as_float_or_none(value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        raise TypeError(f"Expected float or None, got {type(value).__name__}")
+
+    @staticmethod
+    def _as_int_or_none(value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        raise TypeError(f"Expected int or None, got {type(value).__name__}")
+
+    @staticmethod
+    def _as_bool_or_none(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        raise TypeError(f"Expected bool or None, got {type(value).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# CompletionProvider Protocol — contract for any Provider used by the bridge
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class CompletionProvider(Protocol):
+    """Protocol that any Provider must satisfy when used with the lm-eval bridge.
+
+    At minimum, the provider must implement an async ``complete()`` method
+    that accepts an optional ``CompletionOptions`` and returns an HTTPEvidence.
+    """
+
+    async def complete(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        options: CompletionOptions | None = None,
+    ) -> HTTPEvidence:  # noqa: F821  (forward ref via TYPE_CHECKING)
+        ...
+
+
+# ---------------------------------------------------------------------------
+# SmokeTaskManifest — fixed identity for the smoke task
+# ---------------------------------------------------------------------------
+
+
+class SmokeTaskManifest(BaseModel):
+    """Fixed provenance and identity for the LLMTrace smoke task.
+
+    This manifest is the single source of truth for smoke task identity
+    and is shared by RunPlan, TaskAttempt, and GradeResult.
+    """
+
+    task_id: NonEmptyStr = Field(default="llmtrace_smoke")
+    suite_id: NonEmptyStr = Field(default="llmtrace_smoke")
+    suite_version: NonEmptyStr = Field(default="1.0.0")
+    source_id: NonEmptyStr = Field(default="lm-eval")
+    source_revision: NonEmptyStr = Field(default="0000000-smoke")
+    metric: NonEmptyStr = Field(default="exact_match")
+    filter: NonEmptyStr = Field(default="none")
+    capability_score_eligible: bool = Field(default=False)
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+# ---------------------------------------------------------------------------
+# LmEvalMetricResult — controlled metric schema for metadata
+# ---------------------------------------------------------------------------
+
+
+class LmEvalMetricResult(BaseModel):
+    """Controlled, schema-validated metric extracted from an lm-eval run.
+
+    Only a whitelisted set of fields is stored; the full raw per-task
+    results dict MUST NOT be placed in TaskAttempt.metadata.
+    """
+
+    task_name: NonEmptyStr = Field(..., description="lm-eval task name")
+    metric_name: NonEmptyStr = Field(..., description="Metric name, e.g. 'exact_match'")
+    filter_name: str = Field(default="none", description="Filter name from lm-eval metric key")
+    value: float = Field(..., description="Metric value")
+    fewshot: int = Field(default=0, description="Number of few-shot examples")
+    lm_eval_version: str = Field(default="unknown", description="lm-eval package version")
+    task_revision: str = Field(default="unknown", description="lm-eval task revision")
+    generation_options: CompletionOptions | None = Field(
+        default=None, description="Generation options used for this run"
+    )
+
+    model_config = {"extra": "forbid"}

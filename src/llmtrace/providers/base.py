@@ -128,8 +128,25 @@ class BaseProvider(ABC):
             evidence.exception_message = str(e)
             return evidence, []
 
-    async def complete(self, model: str, messages: list[dict[str, str]]) -> HTTPEvidence:
-        """非流式补全请求."""
+    async def complete(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        options: object | None = None,
+    ) -> HTTPEvidence:
+        """非流式补全请求.
+
+        Args:
+            model: Model identifier.
+            messages: Chat messages.
+            options: Optional CompletionOptions for generation kwargs.
+                     Currently reserved for future use; not yet applied to the request.
+        """
+        # options are accepted but not yet applied to the request body.
+        # Real providers can override to map them into provider-specific formats.
+        _ = options
+
         url = self._build_completion_url()
         headers = self._build_headers()
         body = self._build_completion_body(model, messages)

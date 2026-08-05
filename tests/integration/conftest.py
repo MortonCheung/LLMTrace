@@ -2,22 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
-
 # Import shared fixtures from the adapters conftest
 from tests.adapters.conftest import (  # noqa: F401
     FakeProvider,
     FakeProviderError,
+    empty_response_provider,
+    exception_evidence_provider,
     failing_provider,
+    http_401_provider,
+    http_429_provider,
+    http_500_provider,
     smoke_provider,
     smoke_task_path,
 )
-
-
-@pytest.fixture(autouse=True)
-def _require_lm_eval_for_integration_tests() -> None:
-    """Skip lm-eval integration tests when the package is not installed."""
-    try:
-        import lm_eval  # noqa: F401
-    except ImportError:
-        pytest.skip("lm-evaluation-harness not installed")

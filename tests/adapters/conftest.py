@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from llmtrace.benchmarks.models import CompletionOptions
 from llmtrace.models.evidence import HTTPEvidence
 
 # ---------------------------------------------------------------------------
@@ -21,15 +22,15 @@ class FakeProviderError(Exception):
 
 
 class FakeProvider:
-    """A fake provider for testing the lm-eval → Provider chain.
+    """A fake provider for testing the lm-eval -> Provider chain.
 
     Returns deterministic responses based on the last message content.
     Generates real HTTPEvidence objects with UUID-backed evidence_id.
-    Supports failure simulation by raising FakeProviderError.
+    Supports multiple failure simulation modes and records received options.
 
     This is intentionally a standalone class (not inheriting from BaseProvider)
     because it must produce valid HTTPEvidence objects without real HTTP traffic.
-    The ProviderBackedLM bridge calls only ``complete(model, messages)``,
+    The ProviderBackedLM bridge calls ``complete(model, messages, options=...)``,
     so minimal duck-typing is sufficient.
     """
 
@@ -39,24 +40,43 @@ class FakeProvider:
         *,
         fail_on_call: int | None = None,
         fail_error: str = "Simulated provider failure",
+        # Failure mode: return evidence with exception_type set
+        fail_with_exception_type: str | None = None,
+        fail_with_exception_message: str | None = None,
+        # Failure mode: return specific HTTP status
+        fail_with_http_status: int | None = None,
+        # Failure mode: return empty response_text
+        fail_with_empty_response: bool = False,
     ) -> None:
         """Args:
-        response_map: dict of prompt substring → response text.
+        response_map: dict of prompt substring -> response text.
         fail_on_call: If set, raise error on the N-th call.
         fail_error: The error message to raise.
+        fail_with_exception_type: Set exception_type on the returned evidence.
+        fail_with_exception_message: Set exception_message on the returned evidence.
+        fail_with_http_status: Override the evidence http_status to this value.
+        fail_with_empty_response: Return evidence with empty response_text.
         """
         self.response_map = response_map or {}
         self.fail_on_call = fail_on_call
         self.fail_error = fail_error
+        self.fail_with_exception_type = fail_with_exception_type
+        self.fail_with_exception_message = fail_with_exception_message
+        self.fail_with_http_status = fail_with_http_status
+        self.fail_with_empty_response = fail_with_empty_response
         self.call_count = 0
         self.calls: list[dict[str, Any]] = []
+        self.received_options: list[CompletionOptions | None] = []
 
     async def complete(
         self,
         model: str,
         messages: list[dict[str, str]],
+        *,
+        options: CompletionOptions | None = None,
     ) -> HTTPEvidence:
         self.call_count += 1
+        self.received_options.append(options)
 
         if self.fail_on_call is not None and self.call_count == self.fail_on_call:
             raise FakeProviderError(self.fail_error)
@@ -64,7 +84,7 @@ class FakeProvider:
         prompt = messages[-1]["content"] if messages else ""
         response_text = self._lookup(prompt)
 
-        self.calls.append({"model": model, "messages": messages, "response": response_text})
+        self.calls.append({"model": model, "messages": messages, "response": response_text, "options": options})
 
         # Build a valid HTTPEvidence with all required fields
         return HTTPEvidence(
@@ -77,16 +97,17 @@ class FakeProvider:
             request_body_redacted={"model": model, "messages": [{"role": "user", "content": "[redacted]"}]},
             request_model=model,
             response_model=model,
-            response_text=response_text,
-            http_status=200,
+            response_text="" if self.fail_with_empty_response else response_text,
+            http_status=self.fail_with_http_status if self.fail_with_http_status is not None else 200,
             total_latency_ms=float(int(time.monotonic() * 1000) % 1000),
+            exception_type=self.fail_with_exception_type,
+            exception_message=self.fail_with_exception_message,
         )
 
     def _lookup(self, prompt: str) -> str:
         for key, val in self.response_map.items():
             if key in prompt:
                 return val
-        # Default: check for common repeat patterns
         if "LLMTRACE_OK" in prompt:
             return "LLMTRACE_OK"
         if "DETERMINISTIC" in prompt:
@@ -109,20 +130,6 @@ def smoke_task_path() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Auto-use fixture: ensure lm-eval is available for integration tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _require_lm_eval_for_lm_eval_tests() -> None:
-    """Skip lm-eval tests when the package is not installed."""
-    try:
-        import lm_eval  # noqa: F401
-    except ImportError:
-        pytest.skip("lm-evaluation-harness not installed")
-
-
-# ---------------------------------------------------------------------------
 # FakeProvider with smoke task responses
 # ---------------------------------------------------------------------------
 
@@ -142,8 +149,41 @@ def smoke_provider() -> FakeProvider:
 
 @pytest.fixture
 def failing_provider() -> FakeProvider:
-    """Provider that fails on the first call."""
+    """Provider that fails on the first call by raising an exception."""
     return FakeProvider(
         fail_on_call=1,
         fail_error="Simulated provider failure",
     )
+
+
+@pytest.fixture
+def exception_evidence_provider() -> FakeProvider:
+    """Provider that returns evidence with an exception_type set."""
+    return FakeProvider(
+        fail_with_exception_type="ConnectionError",
+        fail_with_exception_message="Simulated connection error",
+    )
+
+
+@pytest.fixture
+def http_401_provider() -> FakeProvider:
+    """Provider that returns evidence with HTTP 401 status."""
+    return FakeProvider(fail_with_http_status=401)
+
+
+@pytest.fixture
+def http_429_provider() -> FakeProvider:
+    """Provider that returns evidence with HTTP 429 status."""
+    return FakeProvider(fail_with_http_status=429)
+
+
+@pytest.fixture
+def http_500_provider() -> FakeProvider:
+    """Provider that returns evidence with HTTP 500 status."""
+    return FakeProvider(fail_with_http_status=500)
+
+
+@pytest.fixture
+def empty_response_provider() -> FakeProvider:
+    """Provider that returns evidence with empty response_text."""
+    return FakeProvider(fail_with_empty_response=True)

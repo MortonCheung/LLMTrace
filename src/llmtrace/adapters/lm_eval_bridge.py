@@ -1,6 +1,6 @@
 """Provider-backed LM bridge for lm-evaluation-harness.
 
-Wraps a Provider-like object so that lm-eval's synchronous generate_until
+Wraps a Provider so that lm-eval's synchronous generate_until
 calls are routed through LLMTrace's async Provider infrastructure.
 
 Usage (test-only, no real API)::
@@ -18,8 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any
+from uuid import UUID
 
+from llmtrace.benchmarks.models import (
+    CompletionOptions,
+    CompletionProvider,
+    FailureCategory,
+)
 from llmtrace.models.evidence import HTTPEvidence
 
 # ---------------------------------------------------------------------------
@@ -32,12 +37,56 @@ except ImportError:  # pragma: no cover  (lm-eval is optional)
     _LmEvalLMBase = object
 
 
+# ---------------------------------------------------------------------------
+# ProviderEvidenceError — structured failure from evidence inspection
+# ---------------------------------------------------------------------------
+
+
+class ProviderEvidenceError(Exception):
+    """Raised when an Evidence indicates a failed provider request.
+
+    ProviderBackedLM inspects every HTTPEvidence after saving it to the
+    registry.  If the evidence shows a non-successful request (exception,
+    non-2xx status, or empty response_text), this exception is raised
+    with a structured payload that the adapter can catch and convert into
+    an AdapterFailure.
+    """
+
+    def __init__(
+        self,
+        evidence_id: UUID,
+        error_code: str,
+        category: FailureCategory,
+        retryable: bool,
+        http_status: int | None,
+        exception_type: str | None,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.evidence_id = evidence_id
+        self.error_code = error_code
+        self.category = category
+        self.retryable = retryable
+        self.http_status = http_status
+        self.exception_type = exception_type
+
+
+class UnsupportedRequestTypeError(NotImplementedError):
+    """Raised when lm-eval requests a mode not yet supported by this bridge."""
+
+
+# ---------------------------------------------------------------------------
+# Thread-based async bridge
+# ---------------------------------------------------------------------------
+
+
 def _run_async_in_thread(coro: object) -> object:
     """Run an async coroutine from a synchronous context using a dedicated event loop.
 
-    lm-eval's generate_until is synchronous, but BaseProvider.complete() is async.
-    This bridge runs the coroutine in a new event loop inside a background thread,
-    which avoids asyncio.run() conflicts when called from within an existing loop.
+    lm-eval's generate_until is synchronous, but CompletionProvider.complete()
+    is async.  This bridge runs the coroutine in a new event loop inside a
+    background thread, which avoids asyncio.run() conflicts when called from
+    within an existing loop.
     """
     result: list[object] = []
     error: list[BaseException] = []
@@ -61,12 +110,89 @@ def _run_async_in_thread(coro: object) -> object:
     return result[0]
 
 
-class UnsupportedRequestTypeError(NotImplementedError):
-    """Raised when lm-eval requests a mode not yet supported by this bridge."""
+# ---------------------------------------------------------------------------
+# Evidence failure inspection
+# ---------------------------------------------------------------------------
+
+
+def _check_evidence(evidence: HTTPEvidence) -> None:
+    """Inspect an HTTPEvidence and raise ProviderEvidenceError on failure.
+
+    A request is considered failed when ANY of these hold:
+    - exception_type is set (network / SDK error)
+    - HTTP status is not 2xx
+    - response_text is empty (and status was 200 — a suspicious "empty success")
+    """
+    evidence_id = evidence.evidence_id
+
+    if evidence.exception_type:
+        category = _category_from_exception(evidence.exception_type)
+        raise ProviderEvidenceError(
+            evidence_id=evidence_id,
+            error_code="PROVIDER_EXCEPTION",
+            category=category,
+            retryable=category in (FailureCategory.NETWORK, FailureCategory.TIMEOUT, FailureCategory.RATE_LIMIT),
+            http_status=evidence.http_status,
+            exception_type=evidence.exception_type,
+            message=f"Provider raised {evidence.exception_type}: {evidence.exception_message or '(no message)'}",
+        )
+
+    if evidence.http_status is not None and not (200 <= evidence.http_status < 300):
+        category = _category_from_http_status(evidence.http_status)
+        raise ProviderEvidenceError(
+            evidence_id=evidence_id,
+            error_code="PROVIDER_HTTP_ERROR",
+            category=category,
+            retryable=category in (FailureCategory.NETWORK, FailureCategory.TIMEOUT, FailureCategory.RATE_LIMIT),
+            http_status=evidence.http_status,
+            exception_type=None,
+            message=f"Provider returned HTTP {evidence.http_status}",
+        )
+
+    if not evidence.response_text:
+        raise ProviderEvidenceError(
+            evidence_id=evidence_id,
+            error_code="PROVIDER_EMPTY_RESPONSE",
+            category=FailureCategory.PROVIDER,
+            retryable=True,
+            http_status=evidence.http_status,
+            exception_type=None,
+            message="Provider returned empty response_text",
+        )
+
+
+def _category_from_exception(exception_type: str) -> FailureCategory:
+    """Map an exception class name to a FailureCategory."""
+    lower = exception_type.lower()
+    if "timeout" in lower:
+        return FailureCategory.TIMEOUT
+    if any(kw in lower for kw in ("auth", "unauthorized", "forbidden")):
+        return FailureCategory.AUTH
+    if any(kw in lower for kw in ("rate", "throttl", "limit")):
+        return FailureCategory.RATE_LIMIT
+    if any(kw in lower for kw in ("connection", "network", "dns", "resolve")):
+        return FailureCategory.NETWORK
+    return FailureCategory.PROVIDER
+
+
+def _category_from_http_status(http_status: int) -> FailureCategory:
+    """Map an HTTP status code to a FailureCategory."""
+    if http_status in (401, 403):
+        return FailureCategory.AUTH
+    if http_status == 429:
+        return FailureCategory.RATE_LIMIT
+    if 500 <= http_status < 600:
+        return FailureCategory.PROVIDER
+    return FailureCategory.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# ProviderBackedLM
+# ---------------------------------------------------------------------------
 
 
 class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
-    """An lm-eval LM that delegates generate_until to a Provider-like object.
+    """An lm-eval LM that delegates generate_until to a CompletionProvider.
 
     Only generate_until is supported in this round.
     loglikelihood() and loglikelihood_rolling() explicitly raise
@@ -85,7 +211,7 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
 
     def __init__(
         self,
-        provider: Any,
+        provider: CompletionProvider,
         model_name: str,
         *,
         evidence_registry: dict[str, HTTPEvidence] | None = None,
@@ -105,36 +231,41 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
         """Generate completions for each Instance request.
 
         Each Instance for generate_until has arguments = (ctx, gen_kwargs).
-        Each completion is obtained via Provider.complete(), producing
-        a real HTTPEvidence object that is stored in evidence_registry.
-
-        Returns:
-            List of generated text strings, one per request.
+        gen_kwargs are validated through CompletionOptions.from_lm_eval_kwargs.
+        After each provider call the returned HTTPEvidence is saved to the
+        registry AND inspected for failure (→ ProviderEvidenceError).
         """
         responses: list[str] = []
         for instance in requests:
             # Extract (prompt, gen_kwargs) from Instance.arguments
-            # We use duck-typing to avoid importing lm_eval.api.instance.Instance
             inst_args = getattr(instance, "args", None)
             if isinstance(inst_args, tuple) and len(inst_args) >= 1:
-                prompt: str = str(inst_args[0])
-                gen_kwargs: dict[str, object] = (
+                prompt: str = inst_args[0]
+                instance_gen_kwargs: dict[str, object] = (
                     inst_args[1] if len(inst_args) >= 2 and isinstance(inst_args[1], dict) else {}
                 )
             else:
                 prompt = str(inst_args)
-                gen_kwargs = {}
+                instance_gen_kwargs = {}
 
+            # Merge: base generation_kwargs + per-instance overrides
             merged_kwargs: dict[str, object] = dict(self._generation_kwargs)
-            merged_kwargs.update(gen_kwargs)
+            merged_kwargs.update(instance_gen_kwargs)
+
+            # Build typed CompletionOptions (fails on unsupported keys)
+            options = CompletionOptions.from_lm_eval_kwargs(merged_kwargs) if merged_kwargs else None
 
             # Build chat messages; lm-eval sends the formatted prompt as ctx
             messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+
             evidence = _run_async_in_thread(
-                self._provider.complete(self._model_name, messages),
+                self._provider.complete(self._model_name, messages, options=options),
             )
             assert isinstance(evidence, HTTPEvidence)
             self._evidence_registry[str(evidence.evidence_id)] = evidence
+
+            # Inspect evidence for failure AFTER saving (evidence is always persisted)
+            _check_evidence(evidence)
 
             text = evidence.response_text or ""
             responses.append(text)

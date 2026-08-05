@@ -9,14 +9,22 @@ from __future__ import annotations
 from uuid import uuid4
 
 from llmtrace.adapters.base import BenchmarkAdapter
-from llmtrace.adapters.lm_eval_runner import LmEvalNotInstalledError, LmEvalRunner
+from llmtrace.adapters.lm_eval_bridge import ProviderEvidenceError
+from llmtrace.adapters.lm_eval_runner import (
+    LmEvalNotInstalledError,
+    LmEvalRunner,
+    LmEvalSecurityError,
+    LmEvalValidationError,
+)
 from llmtrace.benchmarks.models import (
     AdapterFailure,
     BudgetEstimate,
     FailureCategory,
     GradeResult,
     GradeStatus,
+    LmEvalMetricResult,
     RunPlan,
+    SmokeTaskManifest,
     TaskAttempt,
     TaskSpec,
     TaskStatus,
@@ -30,26 +38,22 @@ except ImportError:
     _LM_EVAL_VERSION = "unknown"
 
 # ---------------------------------------------------------------------------
-# Fixed smoke task identity (MUST NOT be used in capability scoring)
+# Fixed smoke task identity (single source of truth)
 # ---------------------------------------------------------------------------
 
-_SMOKE_SUITE_ID = "llmtrace_smoke"
-_SMOKE_SUITE_VERSION = "1.0.0"
-_SMOKE_SOURCE_REVISION = "0000000-smoke"
+_SMOKE_MANIFEST = SmokeTaskManifest()
 
-# ---------------------------------------------------------------------------
-# Known task specs for the local smoke test (extensible in future rounds)
-# ---------------------------------------------------------------------------
+_SMOKE_TASK_SPEC = TaskSpec(
+    task_id=_SMOKE_MANIFEST.task_id,
+    name="LLMTrace Smoke Task",
+    description="Deterministic format-following smoke test for lm-eval adapter validation",
+    category="smoke",
+    num_samples=4,
+)
 
-_KNOWN_TASKS = [
-    TaskSpec(
-        task_id=_SMOKE_SUITE_ID,
-        name="LLMTrace Smoke Task",
-        description="Deterministic format-following smoke test for lm-eval adapter validation",
-        category="smoke",
-        num_samples=4,
-    ),
-]
+_KNOWN_TASKS: dict[str, TaskSpec] = {
+    _SMOKE_MANIFEST.task_id: _SMOKE_TASK_SPEC,
+}
 
 
 class LmEvalAdapter(BenchmarkAdapter):
@@ -63,11 +67,11 @@ class LmEvalAdapter(BenchmarkAdapter):
 
     def __init__(
         self,
-        include_path: str,
+        task_root: str,
         model_name: str = "test-model",
         generation_kwargs: dict[str, object] | None = None,
     ) -> None:
-        self._include_path = include_path
+        self._task_root = task_root
         self._model_name = model_name
         self._generation_kwargs = generation_kwargs or {}
 
@@ -85,7 +89,7 @@ class LmEvalAdapter(BenchmarkAdapter):
 
     def list_tasks(self) -> list[TaskSpec]:
         """Return the list of known task specs."""
-        return list(_KNOWN_TASKS)
+        return list(_KNOWN_TASKS.values())
 
     def build_plan(
         self,
@@ -95,10 +99,28 @@ class LmEvalAdapter(BenchmarkAdapter):
         source_revision: str,
         task_ids: list[str],
     ) -> RunPlan:
-        """Build a RunPlan using the shared planner."""
+        """Build a RunPlan using the shared planner.
+
+        Raises:
+            ValueError: If any task_id is unknown or if task_ids is empty.
+        """
         from llmtrace.benchmarks.planner import build_plan as _build_plan
 
-        tasks = [t for t in _KNOWN_TASKS if t.task_id in task_ids]
+        if not task_ids:
+            raise ValueError("task_ids must not be empty")
+
+        tasks: list[TaskSpec] = []
+        unknown: list[str] = []
+        for tid in task_ids:
+            spec = _KNOWN_TASKS.get(tid)
+            if spec is None:
+                unknown.append(tid)
+            else:
+                tasks.append(spec)
+
+        if unknown:
+            raise ValueError(f"Unknown task_ids: {unknown}. Known tasks: {sorted(_KNOWN_TASKS.keys())}")
+
         return _build_plan(
             suite_id=suite_id,
             suite_version=suite_version,
@@ -115,8 +137,26 @@ class LmEvalAdapter(BenchmarkAdapter):
         task_ids: list[str],
         max_retries: int = 0,
     ) -> BudgetEstimate:
-        """Estimate budget based on known task specs."""
-        tasks = [t for t in _KNOWN_TASKS if t.task_id in task_ids]
+        """Estimate budget based on known task specs.
+
+        Raises:
+            ValueError: If any task_id is unknown or if task_ids is empty.
+        """
+        if not task_ids:
+            raise ValueError("task_ids must not be empty")
+
+        tasks: list[TaskSpec] = []
+        unknown: list[str] = []
+        for tid in task_ids:
+            spec = _KNOWN_TASKS.get(tid)
+            if spec is None:
+                unknown.append(tid)
+            else:
+                tasks.append(spec)
+
+        if unknown:
+            raise ValueError(f"Unknown task_ids: {unknown}. Known tasks: {sorted(_KNOWN_TASKS.keys())}")
+
         total = sum(t.num_samples for t in tasks)
         return BudgetEstimate(
             planned_requests=total,
@@ -132,17 +172,17 @@ class LmEvalAdapter(BenchmarkAdapter):
     ) -> TaskAttempt:
         """Run a single lm-eval task via the LmEvalRunner.
 
-        On failure (including lm-eval exceptions), returns a TaskAttempt
-        with status=FAILURE and a structured AdapterFailure.
+        On ProviderEvidenceError, captures the structured failure with
+        evidence_refs still pointing to the failed Evidence.
 
-        The ``provider`` argument must implement ``complete(model, messages) -> HTTPEvidence``.
+        The ``provider`` argument must implement the CompletionProvider protocol.
         """
         attempt_id = str(uuid4())
         try:
             runner = LmEvalRunner(
-                provider=provider,
+                provider=provider,  # type: ignore[arg-type]
                 model_name=self._model_name,
-                include_path=self._include_path,
+                task_root=self._task_root,
                 generation_kwargs=self._generation_kwargs,
             )
 
@@ -156,56 +196,78 @@ class LmEvalAdapter(BenchmarkAdapter):
             evidence_ids: list[object] = list(evidence_ids_raw) if isinstance(evidence_ids_raw, list) else []
             evidence_refs = [str(eid) for eid in evidence_ids]
 
-            # Extract metric results for metadata
-            task_results: dict[str, object] = result.get("results", {})  # type: ignore[assignment]
+            # Build controlled LmEvalMetricResult from the raw output
+            metric_result = _extract_metric_result(result, self.adapter_version)
 
             return TaskAttempt(
                 attempt_id=attempt_id,
-                source_id="lm-eval",
-                source_revision=_SMOKE_SOURCE_REVISION,
-                suite_id=_SMOKE_SUITE_ID,
-                suite_version=_SMOKE_SUITE_VERSION,
+                source_id=_SMOKE_MANIFEST.source_id,
+                source_revision=_SMOKE_MANIFEST.source_revision,
+                suite_id=_SMOKE_MANIFEST.suite_id,
+                suite_version=_SMOKE_MANIFEST.suite_version,
                 task_id=task_spec.task_id,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.SUCCESS,
                 evidence_refs=evidence_refs,
                 metadata={
-                    "lm_eval_version": _LM_EVAL_VERSION,
-                    "task_name": task_spec.task_id,
-                    "include_path": self._include_path,
-                    "output_type": "generate_until",
-                    "fewshot": 0,
-                    "task_results": task_results,
+                    "metric_result": metric_result.model_dump(),
                 },
             )
 
-        except LmEvalNotInstalledError as exc:
+        except ProviderEvidenceError as exc:
+            evidence_refs = [str(exc.evidence_id)]
             return TaskAttempt(
                 attempt_id=attempt_id,
-                source_id="lm-eval",
-                source_revision=_SMOKE_SOURCE_REVISION,
-                suite_id=_SMOKE_SUITE_ID,
-                suite_version=_SMOKE_SUITE_VERSION,
+                source_id=_SMOKE_MANIFEST.source_id,
+                source_revision=_SMOKE_MANIFEST.source_revision,
+                suite_id=_SMOKE_MANIFEST.suite_id,
+                suite_version=_SMOKE_MANIFEST.suite_version,
+                task_id=task_spec.task_id,
+                adapter_id=self.adapter_id,
+                adapter_version=self.adapter_version,
+                status=TaskStatus.FAILURE,
+                evidence_refs=evidence_refs,
+                failure=AdapterFailure(
+                    error_code=exc.error_code,
+                    category=exc.category,
+                    message=str(exc),
+                    retryable=exc.retryable,
+                    details={
+                        "evidence_id": str(exc.evidence_id),
+                        "exception_type": exc.exception_type,
+                        "http_status": exc.http_status,
+                    },
+                ),
+            )
+
+        except (LmEvalNotInstalledError, LmEvalSecurityError, LmEvalValidationError) as exc:
+            return TaskAttempt(
+                attempt_id=attempt_id,
+                source_id=_SMOKE_MANIFEST.source_id,
+                source_revision=_SMOKE_MANIFEST.source_revision,
+                suite_id=_SMOKE_MANIFEST.suite_id,
+                suite_version=_SMOKE_MANIFEST.suite_version,
                 task_id=task_spec.task_id,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
                 failure=AdapterFailure(
-                    error_code="LM_EVAL_NOT_INSTALLED",
+                    error_code="LM_EVAL_SETUP_ERROR",
                     category=FailureCategory.ADAPTER,
                     message=str(exc),
                     retryable=False,
+                    details={"exception_type": type(exc).__name__},
                 ),
             )
 
         except Exception as exc:
             return TaskAttempt(
                 attempt_id=attempt_id,
-                source_id="lm-eval",
-                source_revision=_SMOKE_SOURCE_REVISION,
-                suite_id=_SMOKE_SUITE_ID,
-                suite_version=_SMOKE_SUITE_VERSION,
+                source_id=_SMOKE_MANIFEST.source_id,
+                source_revision=_SMOKE_MANIFEST.source_revision,
+                suite_id=_SMOKE_MANIFEST.suite_id,
+                suite_version=_SMOKE_MANIFEST.suite_version,
                 task_id=task_spec.task_id,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
@@ -222,12 +284,9 @@ class LmEvalAdapter(BenchmarkAdapter):
     def normalize_result(self, raw_result: dict[str, object]) -> GradeResult:
         """Normalize a raw lm-eval result dict into a GradeResult.
 
-        Expects raw_result to contain at minimum:
-        - results: dict of metric_name → score (per-task metrics)
-        - evidence_ids: list of evidence UUIDs
-        - task_name: task identifier
-
-        Uses exact_match metric if available, otherwise the first metric.
+        Only accepts exact_match or exact_match,<filter> metrics.
+        Values outside [0, 1] or non-numeric are rejected as UNGRADABLE.
+        No fallback to "first numeric metric".
         """
         results: dict[str, object] = raw_result.get("results", {})  # type: ignore[assignment]
         evidence_ids_raw = raw_result.get("evidence_ids", [])
@@ -235,101 +294,130 @@ class LmEvalAdapter(BenchmarkAdapter):
         task_name = str(raw_result.get("task_name", "unknown"))
 
         if not results:
-            return GradeResult(
-                grade_id=str(uuid4()),
-                attempt_id=str(raw_result.get("attempt_id", "unknown")),
-                source_id="lm-eval",
-                source_revision=_SMOKE_SOURCE_REVISION,
-                suite_id=_SMOKE_SUITE_ID,
-                suite_version=_SMOKE_SUITE_VERSION,
-                task_id=task_name,
-                adapter_id=self.adapter_id,
-                adapter_version=self.adapter_version,
-                grader_id="exact_match",
-                raw_score=0.0,
-                normalized_score=0.0,
-                status=GradeStatus.UNGRADABLE,
-                error_message="No results found in raw lm-eval output",
-                evidence_refs=[],
-            )
-
-        # The results may be either:
-        #   flat:   {"exact_match": 1.0}
-        #   nested: {"llmtrace_smoke": {"exact_match": 1.0, ...}}
-        # Note: lm-eval may return metric keys like "exact_match,none" (metric,filter format)
-        metric_name = "exact_match"
-        raw_score: float = 0.0
+            return _ungradable(task_name, "No results found in raw lm-eval output")
 
         if not isinstance(results, dict):
-            return GradeResult(
-                grade_id=str(uuid4()),
-                attempt_id=str(raw_result.get("attempt_id", "unknown")),
-                source_id="lm-eval",
-                source_revision=_SMOKE_SOURCE_REVISION,
-                suite_id=_SMOKE_SUITE_ID,
-                suite_version=_SMOKE_SUITE_VERSION,
-                task_id=task_name,
-                adapter_id=self.adapter_id,
-                adapter_version=self.adapter_version,
-                grader_id="exact_match",
-                raw_score=0.0,
-                normalized_score=0.0,
-                status=GradeStatus.UNGRADABLE,
-                error_message="Results is not a dict",
-                evidence_refs=[],
+            return _ungradable(task_name, "Results is not a dict")
+
+        # Strict: only accept exact_match or exact_match,<filter>
+        metric_name, raw_score = _find_exact_match(results)
+
+        if metric_name is None:
+            return _ungradable(task_name, "No exact_match metric found in results")
+
+        # Strict: value must be within [0, 1]
+        if raw_score < 0.0 or raw_score > 1.0:
+            return _ungradable(
+                task_name,
+                f"exact_match value {raw_score} is outside [0, 1]",
             )
-
-        # Try flat format first (exact_match or exact_match,filter as a top-level key)
-        for key in results:
-            if key.startswith("exact_match"):
-                val = results[key]
-                if isinstance(val, (int, float)):
-                    raw_score = float(val)
-                    metric_name = str(key)
-                    break
-        else:
-            # Try nested format
-            for _task_key, task_metrics in results.items():
-                if isinstance(task_metrics, dict):
-                    for key in task_metrics:
-                        if key.startswith("exact_match"):
-                            val = task_metrics[key]
-                            if isinstance(val, (int, float)):
-                                raw_score = float(val)
-                                metric_name = str(key)
-                                break
-                    else:
-                        # Fallback: use the first numeric metric
-                        if task_metrics:
-                            first_key = next(iter(task_metrics.keys()))
-                            first_val = task_metrics[first_key]
-                            if isinstance(first_val, (int, float)):
-                                metric_name = str(first_key)
-                                raw_score = float(first_val)
-
-        normalized_score = max(0.0, min(1.0, raw_score))
 
         return GradeResult(
             grade_id=str(uuid4()),
             attempt_id=str(raw_result.get("attempt_id", "unknown")),
-            source_id="lm-eval",
-            source_revision=_SMOKE_SOURCE_REVISION,
-            suite_id=_SMOKE_SUITE_ID,
-            suite_version=_SMOKE_SUITE_VERSION,
+            source_id=_SMOKE_MANIFEST.source_id,
+            source_revision=_SMOKE_MANIFEST.source_revision,
+            suite_id=_SMOKE_MANIFEST.suite_id,
+            suite_version=_SMOKE_MANIFEST.suite_version,
             task_id=task_name,
             adapter_id=self.adapter_id,
             adapter_version=self.adapter_version,
             grader_id=metric_name,
             raw_score=raw_score,
-            normalized_score=normalized_score,
+            normalized_score=raw_score,
             evidence_refs=[str(e) for e in evidence_ids],
             metadata={
                 "lm_eval_version": _LM_EVAL_VERSION,
                 "metric_name": metric_name,
-                "all_metrics": {
-                    str(k): float(v)
-                    for k, v in results.items()
-                    if not isinstance(v, dict) and isinstance(v, (int, float))
-                },
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_exact_match(results: dict[str, object]) -> tuple[str | None, float]:
+    """Find the exact_match metric in flat or nested results.
+
+    Returns (metric_name, score) or (None, 0.0) if not found.
+    """
+    # Try flat format first
+    for key in results:
+        if key.startswith("exact_match"):
+            val = results[key]
+            if isinstance(val, (int, float)):
+                return str(key), float(val)
+            return None, 0.0
+
+    # Try nested format
+    for _task_key, task_metrics in results.items():
+        if isinstance(task_metrics, dict):
+            for key in task_metrics:
+                if key.startswith("exact_match"):
+                    val = task_metrics[key]
+                    if isinstance(val, (int, float)):
+                        return str(key), float(val)
+                    return None, 0.0
+
+    return None, 0.0
+
+
+def _ungradable(task_name: str, error_message: str) -> GradeResult:
+    """Create an UNGRADABLE GradeResult."""
+    return GradeResult(
+        grade_id=str(uuid4()),
+        attempt_id="unknown",
+        source_id=_SMOKE_MANIFEST.source_id,
+        source_revision=_SMOKE_MANIFEST.source_revision,
+        suite_id=_SMOKE_MANIFEST.suite_id,
+        suite_version=_SMOKE_MANIFEST.suite_version,
+        task_id=task_name,
+        adapter_id="lm-eval",
+        adapter_version=_LM_EVAL_VERSION,
+        grader_id="exact_match",
+        raw_score=0.0,
+        normalized_score=0.0,
+        status=GradeStatus.UNGRADABLE,
+        error_message=error_message,
+        evidence_refs=[],
+    )
+
+
+def _extract_metric_result(
+    result: dict[str, object],
+    adapter_version: str,
+) -> LmEvalMetricResult:
+    """Extract a controlled LmEvalMetricResult from runner output."""
+    task_results: dict[str, object] = result.get("results", {})  # type: ignore[assignment]
+    task_name = str(result.get("task_name", "unknown"))
+
+    metric_name: str = "exact_match"
+    filter_name: str = "none"
+    value: float = 0.0
+
+    if isinstance(task_results, dict):
+        for _tn, metrics in task_results.items():
+            if isinstance(metrics, dict):
+                for key, val in metrics.items():
+                    if key.startswith("exact_match"):
+                        metric_name = str(key)
+                        # lm-eval key format: "exact_match,<filter>"
+                        if "," in key:
+                            _, filter_name = key.split(",", 1)
+                        if isinstance(val, (int, float)):
+                            value = float(val)
+                        break
+                break
+
+    return LmEvalMetricResult(
+        task_name=task_name,
+        metric_name=metric_name,
+        filter_name=filter_name,
+        value=value,
+        fewshot=0,
+        lm_eval_version=adapter_version,
+        task_revision="1.0",
+        generation_options=None,
+    )
