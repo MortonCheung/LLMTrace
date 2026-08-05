@@ -53,10 +53,21 @@ class StabilityProbe(BaseProbe):
         successes = [e for e in baseline_evidence if e.success]
         facts.append(f"基线请求数: {total}, 成功: {len(successes)}")
 
+        evidence_refs = [str(e.evidence_id) for e in baseline_evidence]
+
         # 检查返回模型一致性
         response_models = {e.response_model for e in successes if e.response_model}
         if len(response_models) > 1:
+            # 模型标识漂移是独立的高风险证据，直接形成 FAIL/HIGH
             inferences.append(f"返回模型不一致: {sorted(response_models)}")
+            return self._result(
+                ProbeStatus.FAIL,
+                Severity.HIGH,
+                facts=facts,
+                inferences=inferences,
+                limitations=["基线请求返回了多个不相关的模型标识，接口行为存在重大异常"],
+                evidence_refs=evidence_refs,
+            )
         elif len(response_models) == 1:
             facts.append(f"返回模型一致: {list(response_models)[0]}")
         else:
@@ -94,8 +105,6 @@ class StabilityProbe(BaseProbe):
         # 检查部分成功部分失败
         if 0 < len(successes) < total:
             inferences.append(f"部分请求失败 ({len(successes)}/{total} 成功)")
-
-        evidence_refs = [str(e.evidence_id) for e in baseline_evidence]
 
         if not inferences:
             return self._result(

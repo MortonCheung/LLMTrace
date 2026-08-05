@@ -63,8 +63,17 @@ class BaselineProbe(BaseProbe):
             )
             return ProbeOutcome(findings=[result], evidence=evidence_list)
 
+        # 模型标识漂移是独立的高风险证据，直接形成 FAIL/HIGH
         if len(response_models) > 1:
-            inferences.append(f"同一会话中返回了多个不同的模型标识: {sorted(response_models)}")
+            result = self._result(
+                ProbeStatus.FAIL,
+                Severity.HIGH,
+                facts=facts,
+                inferences=[f"同一会话中返回了多个不同的模型标识: {sorted(response_models)}"],
+                limitations=["基线请求返回了多个不相关的模型标识，接口行为存在重大异常"],
+                evidence_refs=evidence_refs,
+            )
+            return ProbeOutcome(findings=[result], evidence=evidence_list)
 
         if success_rate < 1.0:
             inferences.append(f"部分请求失败 ({successes}/{len(evidence_list)})")
