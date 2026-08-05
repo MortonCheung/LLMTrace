@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
+from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.utilities.hashing import sha256_hash
+
+# Single source of truth for schema version
+SCHEMA_VERSION = "1.1"
 
 
 def evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -59,12 +64,31 @@ def finding_to_dict(f: FindingResult) -> dict[str, object]:
     }
 
 
-def generate_json_report(result: AuditResult, output_path: Path) -> Path:
-    """生成 JSON 报告."""
+def generate_json_report(
+    result: AuditResult,
+    output_path: Path,
+    benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
+) -> Path:
+    """生成 JSON 报告（v1.1 — 支持 benchmark 段).
+
+    Args:
+        result: 审计结果.
+        output_path: 输出文件路径.
+        benchmark_sections: 可选 benchmark 报告段列表.
+
+    Returns:
+        写入后的输出文件路径.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    report = {
-        "schema_version": "1.0",
+    # Build benchmark list
+    benchmarks: list[dict[str, object]] = []
+    if benchmark_sections:
+        for bs in benchmark_sections:
+            benchmarks.append(bs.model_dump(mode="json"))
+
+    report: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
         "report_id": result.report_id,
         "meta": {
             "llmtrace_version": result.llmtrace_version,
@@ -81,7 +105,7 @@ def generate_json_report(result: AuditResult, output_path: Path) -> Path:
             },
             "probe_list": [f.probe_name for f in result.findings],
             "risk_level": result.risk_level.value,
-            "schema_version": "1.0",
+            "schema_version": SCHEMA_VERSION,
             "content_hash": "",
         },
         "config": {
@@ -102,9 +126,10 @@ def generate_json_report(result: AuditResult, output_path: Path) -> Path:
         "model_list": result.model_list,
         "model_list_available": result.model_list_available,
         "model_in_list": result.model_in_list,
+        "benchmarks": benchmarks,
     }
 
-    # 计算内容哈希
+    # 计算内容哈希（包含 benchmarks）
     content_json = json.dumps(report, sort_keys=True, ensure_ascii=False)
     content_hash = sha256_hash(content_json)
     meta = report["meta"]

@@ -1,9 +1,9 @@
 {
   "run_id": "11111111-1111-1111-1111-111111111111",
   "plan_id": "golden-plan",
-  "suite_id": "golden-suite",
+  "suite_id": "test-suite",
   "suite_version": "1.0.0",
-  "source_id": "golden-source",
+  "source_id": "test-source",
   "source_revision": "abc123",
   "adapter_id": "lm-eval",
   "adapter_version": "0.4.12",

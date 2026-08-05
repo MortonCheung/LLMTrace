@@ -9,7 +9,7 @@ parents outside this module.
 This is the *first layer* of the benchmark report pipeline:
   - data models (this module)
   - mapper (benchmark_mapper.py)
-  - JSON serialization (future)
+  - JSON serialization (json_report.py)
   - HTML sections (future)
 
 No total_score or capability_score is computed here — that work belongs
@@ -19,9 +19,64 @@ in a later aggregation layer.
 from __future__ import annotations
 
 from datetime import datetime
+from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# ---------------------------------------------------------------------------
+# Report-specific enums
+# ---------------------------------------------------------------------------
+
+
+class BenchmarkReportStatus(StrEnum):
+    """Overall status of a benchmark run section."""
+
+    SUCCESS = "success"
+    PARTIAL_FAILURE = "partial_failure"
+    FAILURE = "failure"
+    INCOMPLETE = "incomplete"
+    SKIPPED = "skipped"
+
+
+class TaskReportStatus(StrEnum):
+    """Status of a single task in a report."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILURE = "failure"
+    SKIPPED = "skipped"
+
+
+class ReportGradeStatus(StrEnum):
+    """Grading status in report output."""
+
+    GRADED = "graded"
+    UNGRADABLE = "ungradable"
+    ERROR = "error"
+
+
+class ReportFailureCategory(StrEnum):
+    """Failure category in report output."""
+
+    NETWORK = "network"
+    TIMEOUT = "timeout"
+    AUTH = "auth"
+    RATE_LIMIT = "rate_limit"
+    ADAPTER = "adapter"
+    PROVIDER = "provider"
+    UNKNOWN = "unknown"
+
+
+# ---------------------------------------------------------------------------
+# JSON-safe value type
+# ---------------------------------------------------------------------------
+
+# Allowed types for recursive metadata sanitization (used at runtime, not in Pydantic schema)
+JsonSafeScalar = bool | int | float | str | None
+
 
 # ---------------------------------------------------------------------------
 # BenchmarkRunSummary — top-level numeric summary
@@ -31,12 +86,14 @@ from pydantic import BaseModel, ConfigDict, Field
 class BenchmarkRunSummary(BaseModel):
     """Numeric summary of a single benchmark run section.
 
-    All unknown / unavailable values must be None, never 0.
+    All unknown / unavailable values must be None, never forged as 0.
     """
 
-    planned_requests: int = Field(..., ge=0, description="Planned request count from RunPlan.budget")
-    maximum_requests: int = Field(..., ge=0, description="Maximum request count including retries")
-    actual_requests: int = Field(..., ge=0, description="Actual request count (from Evidence counting)")
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    planned_requests: int = Field(..., ge=0)
+    maximum_requests: int = Field(..., ge=0)
+    actual_requests: int = Field(..., ge=0)
     success_count: int = Field(default=0, ge=0)
     failure_count: int = Field(default=0, ge=0)
     skip_count: int = Field(default=0, ge=0)
@@ -47,12 +104,23 @@ class BenchmarkRunSummary(BaseModel):
     estimated_cost: float | None = Field(default=None, ge=0)
     warnings: list[str] = Field(default_factory=list)
 
-    model_config = ConfigDict(extra="forbid")
-
 
 # ---------------------------------------------------------------------------
 # FailureReportItem — structured, safe failure representation
 # ---------------------------------------------------------------------------
+
+
+# Sensitive keys that must be rejected or redacted from safe_details
+_SENSITIVE_KEY_PATTERNS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "token",
+        "secret",
+        "password",
+        "cookie",
+    }
+)
 
 
 class FailureReportItem(BaseModel):
@@ -61,16 +129,16 @@ class FailureReportItem(BaseModel):
     No exception objects, raw dicts, or foreign Pydantic objects.
     """
 
-    error_code: str = Field(..., description="Machine-readable error code")
-    category: str = Field(..., description="Failure category enum value as string")
-    message: str = Field(..., description="Human-readable error message")
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    error_code: str = Field(..., min_length=1, description="Machine-readable error code")
+    category: ReportFailureCategory
+    message: str
     retryable: bool = Field(default=False)
     safe_details: dict[str, str] = Field(
         default_factory=dict,
-        description="Diagnostic details limited to str→str (no objects or nested dicts)",
+        description="Diagnostic details limited to str→str, sensitive keys redacted",
     )
-
-    model_config = ConfigDict(extra="forbid")
 
 
 # ---------------------------------------------------------------------------
@@ -82,29 +150,23 @@ class TaskReportItem(BaseModel):
     """Report view of a single TaskAttempt + optional GradeResult.
 
     One TaskReportItem per TaskAttempt.  GradeResult is merged by
-    attempt_id in the mapper.  smoke tasks are excluded from capability
-    scoring.
+    attempt_id in the mapper.  Smoke tasks are excluded from capability
+    scoring via explicit metadata, not name guessing.
     """
 
-    task_id: str = Field(..., description="Unique task identifier")
-    attempt_id: str = Field(..., description="Matching TaskAttempt.attempt_id")
-    status: str = Field(..., description="TaskAttempt.status as string")
-    grader_id: str | None = Field(default=None, description="Grader identifier from GradeResult")
-    grade_status: str | None = Field(default=None, description="GradeStatus as string")
-    raw_score: float | None = Field(default=None, description="None when ungraded or failed")
-    normalized_score: float | None = Field(default=None, description="None when ungraded or failed")
-    evidence_refs: list[str] = Field(default_factory=list, description="Evidence UUIDs as strings")
-    failure: FailureReportItem | None = Field(default=None, description="Present only on FAILURE")
-    capability_score_eligible: bool = Field(
-        default=True,
-        description="False for smoke/internal tasks; true for real benchmarks",
-    )
-    metadata: dict[str, object] = Field(
-        default_factory=dict,
-        description="Safe metadata dict (no Pydantic objects, exceptions, or external objects)",
-    )
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-    model_config = ConfigDict(extra="forbid")
+    task_id: str = Field(..., min_length=1)
+    attempt_id: str = Field(..., min_length=1)
+    status: TaskReportStatus
+    grader_id: str | None = Field(default=None)
+    grade_status: ReportGradeStatus | None = Field(default=None)
+    raw_score: float | None = Field(default=None, description="None when ungraded, failed, or ungradable")
+    normalized_score: float | None = Field(default=None, description="None when ungraded, failed, or ungradable")
+    evidence_refs: list[str] = Field(default_factory=list)
+    failure: FailureReportItem | None = Field(default=None)
+    capability_score_eligible: bool = Field(default=True, description="False for smoke/infrastructure tasks")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="JSON-safe metadata (validated at runtime)")
 
 
 # ---------------------------------------------------------------------------
@@ -120,15 +182,17 @@ class BenchmarkReportSection(BaseModel):
     UUID references.
     """
 
-    run_id: UUID = Field(..., description="BenchmarkRunResult.run_id as UUID")
-    plan_id: str = Field(..., description="RunPlan.plan_id")
-    suite_id: str = Field(..., description="Suite identifier from provenance")
-    suite_version: str = Field(..., description="Suite version from provenance")
-    source_id: str = Field(..., description="Source identifier from provenance")
-    source_revision: str = Field(..., description="Source revision from provenance")
-    adapter_id: str = Field(..., description="Adapter identifier from provenance")
-    adapter_version: str = Field(..., description="Adapter version from provenance")
-    status: str = Field(..., description="Overall run status: 'success', 'partial_failure', 'failure'")
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    run_id: UUID
+    plan_id: str = Field(..., min_length=1)
+    suite_id: str = Field(..., min_length=1)
+    suite_version: str = Field(..., min_length=1)
+    source_id: str = Field(..., min_length=1)
+    source_revision: str = Field(..., min_length=1)
+    adapter_id: str = Field(..., min_length=1)
+    adapter_version: str = Field(..., min_length=1)
+    status: BenchmarkReportStatus
     started_at: datetime | None = Field(default=None)
     finished_at: datetime | None = Field(default=None)
     planned_requests: int = Field(..., ge=0)
@@ -140,5 +204,3 @@ class BenchmarkReportSection(BaseModel):
     tasks: list[TaskReportItem] = Field(default_factory=list)
     summary: BenchmarkRunSummary = Field(...)
     warnings: list[str] = Field(default_factory=list)
-
-    model_config = ConfigDict(extra="forbid")
