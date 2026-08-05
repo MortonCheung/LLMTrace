@@ -41,7 +41,7 @@ class MetadataProbe(BaseProbe):
         baseline_ev = [e for e in evidence_list if e.evidence_type == "baseline"]
         model_catalog_ev = [e for e in evidence_list if e.evidence_type == "model_catalog"]
         invalid_model_ev = [e for e in evidence_list if e.evidence_type == "invalid_model"]
-        streaming_ev = [e for e in evidence_list if e.evidence_type == "streaming_baseline"]
+        streaming_ev = [e for e in evidence_list if e.evidence_type in ("streaming_baseline", "streaming_comparison")]
         connectivity_ev = [e for e in evidence_list if e.evidence_type == "connectivity"]
 
         total = len(evidence_list)
@@ -103,11 +103,12 @@ class MetadataProbe(BaseProbe):
 
         if missing_fields:
             for field, count in sorted(missing_fields.items()):
-                facts.append(
-                    f"{field} 缺失: {count}/{len(baseline_ev)}"
-                    if "baseline" not in field
-                    else f"{field} 缺失: {count}/{len(baseline_ev)}"
-                )
+                if field.endswith("(streaming)"):
+                    facts.append(f"{field} 缺失: {count}/{len(streaming_ev)}")
+                elif field == "model_catalog_error":
+                    facts.append(f"{field}: {count}/{len(model_catalog_ev)}")
+                else:
+                    facts.append(f"{field} 缺失: {count}/{len(baseline_ev)}")
             inferences.append(f"共 {len(missing_fields)} 个字段存在缺失，不要把单个字段缺失直接定为高风险")
             return self._result(
                 ProbeStatus.WARN,

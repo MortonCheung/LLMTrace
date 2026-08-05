@@ -17,6 +17,7 @@ class EvidenceType(StrEnum):
     BASELINE = "baseline"
     INVALID_MODEL = "invalid_model"
     STREAMING_BASELINE = "streaming_baseline"
+    STREAMING_COMPARISON = "streaming_comparison"
     CONNECTIVITY = "connectivity"
 
 

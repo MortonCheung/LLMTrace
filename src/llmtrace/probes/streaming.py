@@ -35,9 +35,9 @@ class StreamingProbe(BaseProbe):
         nonce = secrets.token_hex(4)
         messages = [{"role": "user", "content": f"Reply with only the word: {nonce}"}]
 
-        # 非流式请求
+        # 非流式对照请求（不属于 baseline，独立证据类型）
         non_stream = await self.provider.complete(self.config.model, messages)
-        non_stream.evidence_type = "baseline"
+        non_stream.evidence_type = "streaming_comparison"
         # 流式请求
         stream = await self.provider.stream_complete(self.config.model, messages)
         stream.evidence_type = "streaming_baseline"
