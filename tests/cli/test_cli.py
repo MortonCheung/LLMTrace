@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -11,6 +12,15 @@ from typer.testing import CliRunner
 from llmtrace.cli import app
 
 runner = CliRunner()
+
+# 新版 Typer/Rich 的帮助输出可能包含 ANSI 控制符（尤其在 CI 环境），
+# 断言前需剥离（等效 click.utils.strip_ansi；click 已不再是 typer 的依赖）。
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """剥离 ANSI 控制序列，返回纯文本."""
+    return _ANSI_ESCAPE.sub("", text)
 
 
 # ---------------------------------------------------------------------------
@@ -21,39 +31,43 @@ runner = CliRunner()
 def test_main_help() -> None:
     """测试主应用 --help 输出."""
     result = runner.invoke(app, ["--help"])
+    stdout = _strip_ansi(result.stdout)
     assert result.exit_code == 0
-    assert "LLMTrace" in result.stdout
-    assert "audit" in result.stdout
-    assert "compare" in result.stdout
-    assert "inspect" in result.stdout
+    assert "LLMTrace" in stdout
+    assert "audit" in stdout
+    assert "compare" in stdout
+    assert "inspect" in stdout
 
 
 def test_audit_help() -> None:
     """测试 audit 子命令 --help 输出."""
     result = runner.invoke(app, ["audit", "--help"])
+    stdout = _strip_ansi(result.stdout)
     assert result.exit_code == 0
-    assert "audit" in result.stdout.lower() or "审计" in result.stdout
-    assert "--protocol" in result.stdout
-    assert "--base-url" in result.stdout
-    assert "--model" in result.stdout
-    assert "--api-key-env" in result.stdout
-    assert "--dry-run" in result.stdout
+    assert "audit" in stdout.lower() or "审计" in stdout
+    assert "--protocol" in stdout
+    assert "--base-url" in stdout
+    assert "--model" in stdout
+    assert "--api-key-env" in stdout
+    assert "--dry-run" in stdout
 
 
 def test_compare_help() -> None:
     """测试 compare 子命令 --help 输出."""
     result = runner.invoke(app, ["compare", "--help"])
+    stdout = _strip_ansi(result.stdout)
     assert result.exit_code == 0
-    assert "compare" in result.stdout.lower() or "比较" in result.stdout
-    assert "report_a" in result.stdout
+    assert "compare" in stdout.lower() or "比较" in stdout
+    assert "report_a" in stdout
 
 
 def test_inspect_help() -> None:
     """测试 inspect 子命令 --help 输出."""
     result = runner.invoke(app, ["inspect", "--help"])
+    stdout = _strip_ansi(result.stdout)
     assert result.exit_code == 0
-    assert "inspect" in result.stdout.lower() or "查看" in result.stdout
-    assert "report_path" in result.stdout
+    assert "inspect" in stdout.lower() or "查看" in stdout
+    assert "report_path" in stdout
 
 
 # ---------------------------------------------------------------------------
