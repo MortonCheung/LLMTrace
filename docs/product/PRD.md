@@ -6,7 +6,7 @@
 > 当前代码版本：v0.1.0  
 > 当前阶段：协议证据审计 MVP 已完成，能力评测后端规划阶段  
 > 仓库：`MortonCheung/LLMTrace`  
-> 当前远端主分支基线：`main` / `59dfabd93ae825bdbcc28092a867cc405b772753`
+> 当前开发基线：`main`，v0.1 证据审计 MVP 与 GitHub Actions 质量门禁已完成
 
 ---
 
@@ -85,7 +85,6 @@ LLMTrace 不重新发明已经成熟的学术基准。外部项目和研究负�
 
 尚未完成：
 
-- GitHub Actions CI；
 - 标准化能力题库；
 - 外部评测 Adapter；
 - 0–100 分能力体系；
