@@ -1,0 +1,39 @@
+# LLMTrace Integration Smoke Task
+#
+# Purpose: Validate the lm-eval adapter integration chain
+#   lm-eval task → ProviderBackedLM → Provider → HTTPEvidence
+#   → TaskAttempt → GradeResult
+#
+# This is NOT a capability benchmark and MUST NOT be counted in
+# future capability scores. It verifies the adapter pipeline only.
+#
+# IDENTITY (fixed):
+#   task_id:        llmtrace_smoke
+#   suite_version:  1.0.0
+#   source_revision: 0000000-smoke
+
+task: llmtrace_smoke
+dataset_path: json
+dataset_kwargs:
+  data_files: llmtrace_smoke.json
+output_type: generate_until
+training_split: train
+validation_split: train
+test_split: train
+fewshot_split: train
+doc_to_text: "{{input}}"
+doc_to_target: "{{output}}"
+process_results: !function utils.process_results
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+generation_kwargs:
+  until:
+    - "\n"
+  do_sample: false
+  temperature: 0.0
+repeats: 1
+num_fewshot: 0
+metadata:
+  version: 1.0

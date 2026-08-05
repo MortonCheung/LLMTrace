@@ -36,6 +36,9 @@ dev = [
     "ruff>=0.5.0",
     "mypy>=1.10.0",
 ]
+lm-eval = [
+    "lm-eval==0.4.12",
+]
 
 [project.scripts]
 llmtrace = "llmtrace.cli:app"
@@ -64,6 +67,7 @@ skip-magic-trailing-comma = false
 python_version = "3.11"
 strict = true
 warn_unused_configs = true
+ignore_missing_imports = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
