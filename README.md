@@ -10,10 +10,12 @@ v0.1 实现首个纵向闭环：输入中转站地址、协议、模型名称和
 
 - 统一执行链：每次请求只发送一次，探针直接返回真实证据（Evidence）与发现（Finding），CLI 仅负责编排汇总
 - 每条证据带唯一 `evidence_id`（UUID），所有 Finding 的 `evidence_refs` 引用真实存在的证据 ID
-- 证据按类型分类（baseline / invalid_model / streaming_baseline / model_catalog / connectivity），稳定性与元数据分析仅针对基线证据
+- 证据按类型分类（baseline / streaming_comparison / streaming_baseline / invalid_model / model_catalog / connectivity），正常基线与流式对照属于不同证据类型；稳定性与元数据分析仅针对基线证据
 - 无效模型探针使用随机假模型名请求，证据中同时记录配置声明模型、本次随机无效模型和服务端返回模型
-- 响应哈希基于完整响应体计算后再截断保存摘要，截断时标记 `truncated=true`
+- 模型标识漂移（同一会话返回多个不相关模型标识）独立形成 HIGH 风险
+- 响应哈希基于完整原始响应字节计算（SHA-256），摘要再按字节截断，截断时标记 `truncated=true`；`response_body_size` 单位是字节
 - 流式首 Token 延迟从首段非空文本 delta 计算，记录流开始/首文本/结束时间
+- 请求次数以统一 AuditPlan 为准：dry-run 计划次数与实际执行完全一致；报告证据数与实际 HTTP 请求计数通过 Mock Server 调试接口独立核验
 - 多报告跨时间漂移比较
 - 密钥自动脱敏，不写入报告
 
@@ -88,9 +90,11 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 ```
 
 支持三种模式：
-- `honest`：正常模型成功，无效模型返回 404
-- `fallback`：不论请求什么模型都成功，暴露静默回退行为
-- `inconsistent`：轮换返回模型、usage 字段时有时无
+- `honest`：正常模型返回 v1，无效模型返回 404
+- `fallback`：不论请求什么模型都成功返回 v1（无效模型也被接受），暴露静默回退行为
+- `inconsistent`：正常模型在 v1/v2 之间轮换，无效模型返回 404；usage 字段时有时无
+
+模拟服务器提供 `GET /debug/requests` 调试端点，返回实际接收到的审计请求日志（该端点本身不计入请求数），用于端到端核验 dry-run 计划次数与实际请求次数一致。
 
 ## 报告示例
 

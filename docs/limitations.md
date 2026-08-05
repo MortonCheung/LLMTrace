@@ -3,10 +3,12 @@
 ## 证据链限制
 
 - 每条证据带唯一 `evidence_id`（UUID），Finding 的 `evidence_refs` 引用此 ID，报告生成前进行完整性校验
-- 响应哈希基于完整响应体计算（SHA-256），截断保存摘要不影响哈希值
+- 响应哈希基于完整原始响应字节计算（SHA-256），摘要再按字节截断，截断不影响哈希值；`response_body_size` 为原始字节长度
+- 正常基线（`baseline`）与流式对照（`streaming_comparison`、`streaming_baseline`）属于不同证据类型，互不混入
 - 流式证据的 `first_token_latency_ms` 从首段非空文本 delta 计算，连接事件和空文本不计入
 - 流式发生解析错误时保留已采集事件，不丢弃整条证据
 - `request_id` 从多个响应头（request-id / x-request-id / anthropic-request-id / openai-request-id / x-amzn-requestid / cf-ray）中提取，`response_id` 从响应体解析，两者分开保存
+- 请求次数以统一 AuditPlan 为准：dry-run 计划次数与实际执行一致；报告中的证据数与 Mock Server 调试接口返回的实际请求计数独立核验
 
 ## 客户端视角限制
 
@@ -45,6 +47,7 @@
 - 首版只做可解释的规则统计，不实现机器学习分类
 - 稳定性分析仅针对 baseline 证据，不混入模型列表、无效模型、流式兼容性请求
 - 样本量有限（默认 3 次重复），统计结论可能不具代表性
+- 报告中的证据数对应真实 HTTP 请求数（每条请求一条证据），但请求计数以 AuditPlan 和 Mock Server 调试接口为准，不以报告文字为准
 - 跨报告比较受测试套件版本和接口变化影响
 - 当前版本仍不具备模型指纹识别能力，不能识别真实模型身份
 
