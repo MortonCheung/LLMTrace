@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from pydantic import BaseModel, Field
+
 from llmtrace.config import AuditConfig
+from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult, ProbeStatus, Severity
 from llmtrace.providers.base import BaseProvider
+
+
+class ProbeOutcome(BaseModel):
+    """探针执行结果：包含 Findings 和本次真实 Evidence."""
+
+    findings: list[FindingResult] = Field(default_factory=list)
+    evidence: list[HTTPEvidence] = Field(default_factory=list)
 
 
 class BaseProbe(ABC):
@@ -20,8 +30,8 @@ class BaseProbe(ABC):
         self.provider = provider
 
     @abstractmethod
-    async def run(self) -> FindingResult:
-        """执行探针."""
+    async def run(self) -> ProbeOutcome:
+        """执行探针，返回 Findings + Evidence."""
         ...
 
     def _result(

@@ -1,6 +1,6 @@
 """LLMTrace probes package."""
 
-from llmtrace.probes.base import BaseProbe
+from llmtrace.probes.base import BaseProbe, ProbeOutcome
 from llmtrace.probes.baseline import BaselineProbe
 from llmtrace.probes.connectivity import ConfigPrecheckProbe, ConnectivityProbe
 from llmtrace.probes.invalid_model import InvalidModelProbe
@@ -11,6 +11,7 @@ from llmtrace.probes.streaming import StreamingProbe
 
 __all__ = [
     "BaseProbe",
+    "ProbeOutcome",
     "ConfigPrecheckProbe",
     "ConnectivityProbe",
     "ModelCatalogProbe",

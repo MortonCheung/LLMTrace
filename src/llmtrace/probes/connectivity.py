@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from llmtrace.config import AuditConfig, Protocol
-from llmtrace.models.findings import FindingResult, ProbeStatus, Severity
-from llmtrace.probes.base import BaseProbe
+from llmtrace.models.findings import ProbeStatus, Severity
+from llmtrace.probes.base import BaseProbe, ProbeOutcome
 from llmtrace.providers.base import BaseProvider
 from llmtrace.security.redaction import check_api_key
 
@@ -18,7 +18,7 @@ class ConfigPrecheckProbe(BaseProbe):
     def __init__(self, config: AuditConfig, provider: BaseProvider) -> None:
         super().__init__(config, provider)
 
-    async def run(self) -> FindingResult:
+    async def run(self) -> ProbeOutcome:
         facts: list[str] = []
         errors: list[str] = []
 
@@ -53,20 +53,22 @@ class ConfigPrecheckProbe(BaseProbe):
         facts.append(f"最大输出 Token: {self.config.max_output_tokens}")
 
         if errors:
-            return self._result(
+            result = self._result(
                 ProbeStatus.FAIL,
                 Severity.HIGH,
                 facts=facts,
                 inferences=errors,
                 limitations=["配置错误将阻止后续探针执行"],
             )
+            return ProbeOutcome(findings=[result], evidence=[])
 
-        return self._result(
+        result = self._result(
             ProbeStatus.PASS,
             Severity.INFO,
             facts=facts,
             inferences=["所有配置项检查通过"],
         )
+        return ProbeOutcome(findings=[result], evidence=[])
 
 
 class ConnectivityProbe(BaseProbe):
@@ -78,13 +80,15 @@ class ConnectivityProbe(BaseProbe):
     def __init__(self, config: AuditConfig, provider: BaseProvider) -> None:
         super().__init__(config, provider)
 
-    async def run(self) -> FindingResult:
+    async def run(self) -> ProbeOutcome:
         facts: list[str] = []
         inferences: list[str] = []
 
         # 发送一个最小请求来测试连接
         messages = [{"role": "user", "content": "hi"}]
         evidence = await self.provider.complete(self.config.model, messages)
+        evidence.evidence_type = "connectivity"
+        evidence_ref = str(evidence.evidence_id)
 
         facts.append(f"HTTP 状态码: {evidence.http_status}")
         facts.append(f"Content-Type: {evidence.response_headers.get('content-type', 'N/A')}")
@@ -92,47 +96,52 @@ class ConnectivityProbe(BaseProbe):
         if evidence.exception_type:
             facts.append(f"异常类型: {evidence.exception_type}")
             facts.append(f"异常信息: {evidence.exception_message}")
-            return self._result(
+            result = self._result(
                 ProbeStatus.FAIL,
                 Severity.HIGH,
                 facts=facts,
                 inferences=[f"连接失败: {evidence.exception_message}"],
                 limitations=["网络问题可能导致后续探针无法执行"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
+            return ProbeOutcome(findings=[result], evidence=[evidence])
 
         if evidence.http_status == 401:
-            return self._result(
+            result = self._result(
                 ProbeStatus.FAIL,
                 Severity.HIGH,
                 facts=facts,
                 inferences=["鉴权失败 (401)，请检查 API Key"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
+            return ProbeOutcome(findings=[result], evidence=[evidence])
         elif evidence.http_status == 403:
-            return self._result(
+            result = self._result(
                 ProbeStatus.FAIL,
                 Severity.HIGH,
                 facts=facts,
                 inferences=["访问被拒绝 (403)"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
+            return ProbeOutcome(findings=[result], evidence=[evidence])
         elif evidence.http_status == 429:
-            return self._result(
+            result = self._result(
                 ProbeStatus.WARN,
                 Severity.MEDIUM,
                 facts=facts,
                 inferences=["遇到限流 (429)，后续探针可能受影响"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
+            return ProbeOutcome(findings=[result], evidence=[evidence])
         elif evidence.http_status is not None and evidence.http_status >= 500:
-            return self._result(
+            result = self._result(
                 ProbeStatus.WARN,
                 Severity.MEDIUM,
                 facts=facts,
                 inferences=[f"服务端错误 ({evidence.http_status})"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
+            return ProbeOutcome(findings=[result], evidence=[evidence])
 
         # 检查 Content-Type
         content_type = evidence.response_headers.get("content-type", "")
@@ -141,18 +150,20 @@ class ConnectivityProbe(BaseProbe):
             inferences.append("响应可能不是标准 JSON，但可能仍可解析")
 
         if evidence.success:
-            return self._result(
+            result = self._result(
                 ProbeStatus.PASS,
                 Severity.INFO,
                 facts=facts,
                 inferences=["连接正常，鉴权通过"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
         else:
-            return self._result(
+            result = self._result(
                 ProbeStatus.WARN,
                 Severity.MEDIUM,
                 facts=facts,
                 inferences=[f"请求返回非 2xx 状态码: {evidence.http_status}"],
-                evidence_refs=["connectivity_check"],
+                evidence_refs=[evidence_ref],
             )
+
+        return ProbeOutcome(findings=[result], evidence=[evidence])

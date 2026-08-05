@@ -6,8 +6,8 @@ import secrets
 
 from llmtrace.config import AuditConfig
 from llmtrace.models.evidence import HTTPEvidence
-from llmtrace.models.findings import FindingResult, ProbeStatus, Severity
-from llmtrace.probes.base import BaseProbe
+from llmtrace.models.findings import ProbeStatus, Severity
+from llmtrace.probes.base import BaseProbe, ProbeOutcome
 from llmtrace.providers.base import BaseProvider
 
 
@@ -20,7 +20,7 @@ class BaselineProbe(BaseProbe):
     def __init__(self, config: AuditConfig, provider: BaseProvider) -> None:
         super().__init__(config, provider)
 
-    async def run(self) -> FindingResult:
+    async def run(self) -> ProbeOutcome:
         facts: list[str] = []
         inferences: list[str] = []
         evidence_list: list[HTTPEvidence] = []
@@ -30,9 +30,9 @@ class BaselineProbe(BaseProbe):
             nonce = secrets.token_hex(4)
             messages = [{"role": "user", "content": f"Reply with only the word: {nonce}"}]
             evidence = await self.provider.complete(self.config.model, messages)
+            evidence.evidence_type = "baseline"
             evidence_list.append(evidence)
-            ref = f"baseline_{idx + 1}"
-            evidence_refs.append(ref)
+            evidence_refs.append(str(evidence.evidence_id))
 
             if evidence.success:
                 facts.append(
@@ -54,13 +54,14 @@ class BaselineProbe(BaseProbe):
         facts.append(f"返回模型集合: {sorted(response_models)}" if response_models else "返回模型: 无")
 
         if success_rate == 0:
-            return self._result(
+            result = self._result(
                 ProbeStatus.FAIL,
                 Severity.HIGH,
                 facts=facts,
                 inferences=["所有基线请求均失败，无法继续分析"],
                 evidence_refs=evidence_refs,
             )
+            return ProbeOutcome(findings=[result], evidence=evidence_list)
 
         if len(response_models) > 1:
             inferences.append(f"同一会话中返回了多个不同的模型标识: {sorted(response_models)}")
@@ -69,7 +70,7 @@ class BaselineProbe(BaseProbe):
             inferences.append(f"部分请求失败 ({successes}/{len(evidence_list)})")
 
         if len(response_models) <= 1 and success_rate == 1.0:
-            return self._result(
+            result = self._result(
                 ProbeStatus.PASS,
                 Severity.INFO,
                 facts=facts,
@@ -77,7 +78,7 @@ class BaselineProbe(BaseProbe):
                 evidence_refs=evidence_refs,
             )
         elif success_rate >= 0.5:
-            return self._result(
+            result = self._result(
                 ProbeStatus.WARN,
                 Severity.MEDIUM,
                 facts=facts,
@@ -85,10 +86,12 @@ class BaselineProbe(BaseProbe):
                 evidence_refs=evidence_refs,
             )
         else:
-            return self._result(
+            result = self._result(
                 ProbeStatus.FAIL,
                 Severity.HIGH,
                 facts=facts,
                 inferences=inferences,
                 evidence_refs=evidence_refs,
             )
+
+        return ProbeOutcome(findings=[result], evidence=evidence_list)

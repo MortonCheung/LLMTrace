@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "LLMTrace - 模型寻迹：面向第三方 AI API 的黑盒模型审计工具"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+
 authors = [{name = "LLMTrace Contributors"}]
 keywords = ["llm", "audit", "openai", "anthropic", "proxy", "black-box"]
 classifiers = [

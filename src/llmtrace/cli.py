@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import typer
 
@@ -60,6 +61,91 @@ def _create_provider(config: AuditConfig, api_key: str) -> BaseProvider:
         raise ValueError(f"不支持的协议: {config.protocol}")
 
 
+def _build_audit_plan(config: AuditConfig) -> list[dict[str, object]]:
+    """构建审计计划，用于 dry-run 和实际执行."""
+    plan: list[dict[str, object]] = []
+
+    # 1. 配置预检（0 次请求）
+    plan.append({"probe": "配置预检", "request_type": "none", "count": 0, "model_type": "N/A", "streaming": False})
+
+    # 2. 连接与鉴权（1 次请求，声明模型）
+    plan.append(
+        {
+            "probe": "连接与鉴权",
+            "request_type": "completion",
+            "count": 1,
+            "model_type": "声明模型",
+            "streaming": False,
+        }
+    )
+
+    # 3. 模型列表（1 次 GET 请求）
+    plan.append({"probe": "模型列表", "request_type": "GET", "count": 1, "model_type": "N/A", "streaming": False})
+
+    # 4. 正常基线（repeat_count 次请求，声明模型）
+    plan.append(
+        {
+            "probe": "正常基线",
+            "request_type": "completion",
+            "count": config.repeat_count,
+            "model_type": "声明模型",
+            "streaming": False,
+        }
+    )
+
+    # 5. 无效模型（1 次请求，随机无效模型）
+    plan.append(
+        {
+            "probe": "无效模型",
+            "request_type": "completion",
+            "count": 1,
+            "model_type": "随机无效模型",
+            "streaming": False,
+        }
+    )
+
+    # 6. 流式一致性（1 次非流式 + 1 次流式）
+    if config.check_streaming:
+        plan.append(
+            {
+                "probe": "流式一致性",
+                "request_type": "completion+stream",
+                "count": 2,
+                "model_type": "声明模型",
+                "streaming": True,
+            }
+        )
+
+    # 7-8. 元数据完整性和会话稳定性（0 次额外请求，分析已有证据）
+    plan.append(
+        {"probe": "元数据完整性", "request_type": "analysis", "count": 0, "model_type": "N/A", "streaming": False}
+    )
+    plan.append(
+        {"probe": "会话稳定性", "request_type": "analysis", "count": 0, "model_type": "N/A", "streaming": False}
+    )
+
+    return plan
+
+
+def _validate_evidence_refs(findings: list[FindingResult], evidence_list: list[HTTPEvidence]) -> None:
+    """验证所有 evidence_refs 都能在 evidence 集合中找到."""
+    evidence_ids = {str(e.evidence_id) for e in evidence_list}
+    for f in findings:
+        for ref in f.evidence_refs:
+            if ref not in evidence_ids:
+                raise ValueError(f"证据引用 '{ref}' (探针: {f.probe_name}) 在证据集合中找不到。")
+
+
+def _check_duplicate_evidence_ids(evidence_list: list[HTTPEvidence]) -> None:
+    """检查是否有重复的 evidence_id."""
+    seen: set[str] = set()
+    for ev in evidence_list:
+        eid = str(ev.evidence_id)
+        if eid in seen:
+            raise ValueError(f"重复的 evidence_id: {eid}")
+        seen.add(eid)
+
+
 @app.command()
 def audit(
     protocol: str = typer.Option(..., "--protocol", "-p", help="协议类型: openai 或 anthropic"),
@@ -94,6 +180,10 @@ def audit(
         output_dir=output_dir,
     )
 
+    # 构建审计计划
+    plan = _build_audit_plan(config)
+    total_requests = sum(int(cast(int, item["count"])) for item in plan)
+
     if dry_run:
         print_dry_run(
             {
@@ -101,7 +191,7 @@ def audit(
                 "Base URL": config.base_url,
                 "模型": config.model,
                 "重复次数": str(config.repeat_count),
-                "预计调用次数": str(config.repeat_count + 2),  # baseline + invalid + streaming
+                "预计调用次数": str(total_requests),
                 "最大输出 Token": str(config.max_output_tokens),
                 "流式检查": "是" if config.check_streaming else "否",
                 "无效模型调用": "是",
@@ -135,12 +225,14 @@ def audit(
 
     async def _run() -> None:
         async with provider:
+            nonlocal findings, evidence_list
+
             # 1. 配置预检
             precheck = ConfigPrecheckProbe(config, provider)
-            precheck_result = await precheck.run()
-            findings.append(precheck_result)
+            outcome = await precheck.run()
+            findings.extend(outcome.findings)
 
-            if precheck_result.status.value == "fail":
+            if outcome.findings and outcome.findings[0].status.value == "fail":
                 result.findings = findings
                 result.risk_level = RiskLevel.INCONCLUSIVE
                 result.end_time = utc_now()
@@ -149,10 +241,11 @@ def audit(
 
             # 2. 连接与鉴权
             conn = ConnectivityProbe(config, provider)
-            conn_result = await conn.run()
-            findings.append(conn_result)
+            outcome = await conn.run()
+            findings.extend(outcome.findings)
+            evidence_list.extend(outcome.evidence)
 
-            if conn_result.status.value == "fail":
+            if outcome.findings and outcome.findings[0].status.value == "fail":
                 result.findings = findings
                 result.risk_level = RiskLevel.INCONCLUSIVE
                 result.end_time = utc_now()
@@ -161,60 +254,43 @@ def audit(
 
             # 3. 模型列表
             catalog = ModelCatalogProbe(config, provider)
-            cat_result = await catalog.run()
-            findings.append(cat_result)
+            outcome = await catalog.run()
+            findings.extend(outcome.findings)
+            evidence_list.extend(outcome.evidence)
 
             # 获取模型列表数据
-            list_evidence, models = await provider.list_models()
-            evidence_list.append(list_evidence)
-            result.model_list = models
-            result.model_list_available = list_evidence.success
-            result.model_in_list = config.model in models
+            if outcome.evidence:
+                list_ev = outcome.evidence[0]
+                result.model_list_available = list_ev.success
+                # 尝试从 evidence 中提取模型列表
+                if list_ev.success and list_ev.response_body_summary:
+                    try:
+                        data = json.loads(list_ev.response_body_summary)
+                        models = data.get("data", [])
+                        if isinstance(models, list):
+                            result.model_list = [m.get("id", "") for m in models if isinstance(m, dict)]
+                            result.model_in_list = config.model in result.model_list
+                    except (json.JSONDecodeError, AttributeError):
+                        pass
 
             # 4. 正常基线
             baseline = BaselineProbe(config, provider)
-            base_result = await baseline.run()
-            findings.append(base_result)
-
-            # 重新执行基线以收集证据
-            import secrets
-
-            for _i in range(config.repeat_count):
-                nonce = secrets.token_hex(4)
-                ev = await provider.complete(
-                    config.model,
-                    [{"role": "user", "content": f"Reply with only the word: {nonce}"}],
-                )
-                evidence_list.append(ev)
+            outcome = await baseline.run()
+            findings.extend(outcome.findings)
+            evidence_list.extend(outcome.evidence)
 
             # 5. 无效模型
             invalid = InvalidModelProbe(config, provider)
-            inv_result = await invalid.run()
-            findings.append(inv_result)
-
-            # 重新执行无效模型以收集证据
-            import uuid as uuid_mod
-
-            invalid_model = f"llmtrace-invalid-{uuid_mod.uuid4().hex[:12]}"
-            inv_ev = await provider.complete(
-                invalid_model,
-                [{"role": "user", "content": "Reply with only the word: hello"}],
-            )
-            evidence_list.append(inv_ev)
+            outcome = await invalid.run()
+            findings.extend(outcome.findings)
+            evidence_list.extend(outcome.evidence)
 
             # 6. 流式一致性
             if config.check_streaming:
                 streaming = StreamingProbe(config, provider)
-                stream_result = await streaming.run()
-                findings.append(stream_result)
-
-                # 重新执行流式以收集证据
-                stream_nonce = secrets.token_hex(4)
-                stream_ev = await provider.stream_complete(
-                    config.model,
-                    [{"role": "user", "content": f"Reply with only the word: {stream_nonce}"}],
-                )
-                evidence_list.append(stream_ev)
+                outcome = await streaming.run()
+                findings.extend(outcome.findings)
+                evidence_list.extend(outcome.evidence)
 
             # 7. 元数据完整性
             metadata = MetadataProbe(config, provider)
@@ -232,6 +308,10 @@ def audit(
                     fp = generate_schema_fingerprint(ev.response_body_summary)
                     if fp:
                         result.schema_fingerprints.append(fp)
+
+            # 完整性校验
+            _validate_evidence_refs(findings, evidence_list)
+            _check_duplicate_evidence_ids(evidence_list)
 
     try:
         import asyncio
@@ -369,7 +449,8 @@ def inspect(
     table.add_row("协议", str(config.get("protocol", "N/A")))
     table.add_row("模型", str(config.get("model", "N/A")))
     table.add_row("风险等级", str(data.get("risk_level", "N/A")))
-    table.add_row("内容哈希", str(meta.get("content_hash", "N/A")[:16] + "..."))
+    h = str(meta.get("content_hash", ""))
+    table.add_row("内容哈希", h[:16] + "..." if len(h) > 16 else h)
 
     console.print(table)
 
@@ -395,6 +476,7 @@ def inspect(
         console.print()
         ev_table = Table(title="证据概要")
         ev_table.add_column("#", style="white")
+        ev_table.add_column("类型", style="cyan")
         ev_table.add_column("请求模型", style="cyan")
         ev_table.add_column("返回模型", style="white")
         ev_table.add_column("HTTP", style="white")
@@ -402,6 +484,7 @@ def inspect(
         for i, ev in enumerate(evidence, 1):
             ev_table.add_row(
                 str(i),
+                str(ev.get("evidence_type", "N/A")),
                 str(ev.get("request_model", "N/A")),
                 str(ev.get("response_model", "N/A")),
                 str(ev.get("http_status", "N/A")),
