@@ -418,7 +418,7 @@ LLMTrace 只负责 Provider、任务选择、执行参数、结果转换和 Evid
 | 长文本 | 10% |
 | 工具调用 | 5% |
 
-v0.2 MVP 只实现前四项。
+v0.3 能力评分 MVP 只实现前四项。
 
 ### 10.2 评分优先级
 
@@ -954,7 +954,7 @@ RunPlan
 
 ---
 
-## 22. v0.2 MVP 验收标准
+## 22. v0.3 能力评分 MVP 验收标准
 
 1. 支持配置任意 OpenAI-compatible 或 Anthropic-compatible 接口；
 2. 可生成测试计划；
