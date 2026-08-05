@@ -110,17 +110,17 @@ class BaseProvider(ABC):
             evidence.http_status = response.status_code
             evidence.response_headers = dict(response.headers)
             evidence.request_id = _extract_request_id(evidence.response_headers)
-            body = response.text
-            evidence.response_body_size = len(body)
-            evidence.response_body_sha256 = sha256_hash(body)
+            full_bytes = response.content
+            evidence.response_body_size = len(full_bytes)
+            evidence.response_body_sha256 = sha256_hash(full_bytes)
 
             if response.status_code == 200:
                 data = response.json()
                 models = self._extract_models(data)
-                evidence.response_body_summary = body[:2000]
+                evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
                 return evidence, models
             else:
-                evidence.response_body_summary = body[:2000]
+                evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
                 return evidence, []
 
         except Exception as e:
@@ -147,18 +147,18 @@ class BaseProvider(ABC):
             evidence.response_headers = dict(response.headers)
             evidence.request_id = _extract_request_id(evidence.response_headers)
 
-            full_body = response.text
-            evidence.response_body_size = len(full_body)
+            # 响应体按原始字节处理：哈希基于完整字节，摘要再按字节截断
+            full_bytes = response.content
+            evidence.response_body_size = len(full_bytes)
+            evidence.response_body_sha256 = sha256_hash(full_bytes)
 
-            # 先计算完整响应哈希
-            evidence.response_body_sha256 = sha256_hash(full_body)
-
-            # 再按最大保存长度截断响应摘要
-            if len(full_body) > self.config.max_response_bytes:
+            if len(full_bytes) > self.config.max_response_bytes:
                 evidence.response_truncated = True
-                evidence.response_body_summary = full_body[: self.config.max_response_bytes]
+                evidence.response_body_summary = full_bytes[: self.config.max_response_bytes].decode(
+                    "utf-8", errors="replace"
+                )
             else:
-                evidence.response_body_summary = full_body[:2000]
+                evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
 
             if response.status_code == 200:
                 data = response.json()
@@ -181,7 +181,8 @@ class BaseProvider(ABC):
         start = time.monotonic()
         first_token_time: float | None = None
         full_text_parts: list[str] = []
-        raw_events: list[str] = []
+        raw_bytes = bytearray()
+        line_buffer = b""
 
         try:
             async with self.client.stream("POST", url, headers=headers, json=body) as response:
@@ -189,19 +190,23 @@ class BaseProvider(ABC):
                 evidence.response_headers = dict(response.headers)
                 evidence.request_id = _extract_request_id(evidence.response_headers)
 
-                async for line in response.aiter_lines():
-                    raw_events.append(line)
-
-                    parsed = self._parse_stream_event(line)
-                    if parsed:
-                        text = self._extract_stream_text(parsed)
-                        # 首 Token 延迟：从第一段非空文本 delta 计算
-                        if first_token_time is None and text:
-                            first_token_time = time.monotonic()
-                            evidence.first_token_latency_ms = (first_token_time - start) * 1000
-                        if text:
-                            full_text_parts.append(text)
-                        self._parse_stream_finish(parsed, evidence)
+                # 按原始字节累积，同时通过增量行缓冲解析 SSE 事件
+                async for chunk in response.aiter_bytes():
+                    raw_bytes.extend(chunk)
+                    line_buffer += chunk
+                    while b"\n" in line_buffer:
+                        line_bytes, line_buffer = line_buffer.split(b"\n", 1)
+                        line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
+                        parsed = self._parse_stream_event(line)
+                        if parsed:
+                            text = self._extract_stream_text(parsed)
+                            # 首 Token 延迟：从第一段非空文本 delta 计算
+                            if first_token_time is None and text:
+                                first_token_time = time.monotonic()
+                                evidence.first_token_latency_ms = (first_token_time - start) * 1000
+                            if text:
+                                full_text_parts.append(text)
+                            self._parse_stream_finish(parsed, evidence)
 
                 stream_end = time.monotonic()
                 evidence.total_latency_ms = (stream_end - start) * 1000
@@ -211,18 +216,21 @@ class BaseProvider(ABC):
             evidence.exception_type = type(e).__name__
             evidence.exception_message = str(e)
 
-        # 无论是否异常，只要有已采集的事件就保留证据
-        if raw_events:
+        # 无论是否异常，只要有已采集的原始字节就保留证据
+        if raw_bytes:
             evidence.response_text = "".join(full_text_parts)
-            full_body = "\n".join(raw_events)
-            evidence.response_body_size = sum(len(e) for e in raw_events)
-            evidence.response_body_sha256 = sha256_hash(full_body)
+            full_bytes = bytes(raw_bytes)
+            evidence.response_body_size = len(full_bytes)
+            # 哈希基于完整原始字节，摘要再按字节截断
+            evidence.response_body_sha256 = sha256_hash(full_bytes)
 
-            if len(full_body) > self.config.max_response_bytes:
+            if len(full_bytes) > self.config.max_response_bytes:
                 evidence.response_truncated = True
-                evidence.response_body_summary = full_body[: self.config.max_response_bytes]
+                evidence.response_body_summary = full_bytes[: self.config.max_response_bytes].decode(
+                    "utf-8", errors="replace"
+                )
             else:
-                evidence.response_body_summary = full_body[:2000]
+                evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
 
             # 如果异常导致未设置结束时间，使用当前时间
             if evidence.response_time is None:
