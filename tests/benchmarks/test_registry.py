@@ -42,6 +42,7 @@ class _FakeAdapterForRegistry:
     def __init__(self, adapter_id: str = "fake", adapter_version: str = "1.0.0") -> None:
         self._adapter_id = adapter_id
         self._adapter_version = adapter_version
+        self._called: int = 0
 
     @property
     def adapter_id(self) -> str:
@@ -64,22 +65,38 @@ class TestBenchmarkSourceRegistry:
         reg.register(src)
         assert reg.get("mmlu") == src
 
-    def test_list_ids(self) -> None:
+    def test_list_ids_returns_tuple(self) -> None:
         reg = BenchmarkSourceRegistry()
         reg.register(_make_source("mmlu"))
         reg.register(_make_source("livebench"))
         ids = reg.list_ids()
+        assert isinstance(ids, tuple)
         assert sorted(ids) == ["livebench", "mmlu"]
 
-    def test_list_all(self) -> None:
+    def test_list_all_returns_tuple_of_deep_copies(self) -> None:
         reg = BenchmarkSourceRegistry()
         reg.register(_make_source("mmlu"))
-        reg.register(_make_source("livebench"))
         all_sources = reg.list_all()
-        assert len(all_sources) == 2
-        # Verify they are copies (deepcopy), not the original references
+        assert isinstance(all_sources, tuple)
+        # Mutate returned object must not affect registry
         all_sources[0].name = "Modified"
-        assert reg.get(all_sources[0].source_id).name == all_sources[0].source_id.upper()  # type: ignore[union-attr]
+        assert reg.get("mmlu").name == "MMLU"  # type: ignore[union-attr]
+
+    def test_get_returns_deep_copy(self) -> None:
+        reg = BenchmarkSourceRegistry()
+        reg.register(_make_source("mmlu"))
+        src = reg.get("mmlu")
+        assert src is not None
+        src.name = "Modified"
+        # Internal state unchanged
+        assert reg.get("mmlu").name == "MMLU"  # type: ignore[union-attr]
+
+    def test_register_stores_deep_copy(self) -> None:
+        reg = BenchmarkSourceRegistry()
+        src = _make_source("mmlu")
+        reg.register(src)
+        src.name = "Modified"
+        assert reg.get("mmlu").name == "MMLU"  # type: ignore[union-attr]
 
     def test_duplicate_registration_raises(self) -> None:
         reg = BenchmarkSourceRegistry()
@@ -122,10 +139,26 @@ class TestBenchmarkSuiteRegistry:
         with pytest.raises(DuplicateRegistrationError, match="already registered"):
             reg.register(_make_suite("mmlu"))
 
-    def test_list_all_returns_copies(self) -> None:
+    def test_get_returns_deep_copy(self) -> None:
+        reg = BenchmarkSuiteRegistry()
+        reg.register(_make_suite("mmlu"))
+        sut = reg.get("mmlu")
+        assert sut is not None
+        sut.name = "Modified"
+        assert reg.get("mmlu").name == "MMLU"  # type: ignore[union-attr]
+
+    def test_register_stores_deep_copy(self) -> None:
+        reg = BenchmarkSuiteRegistry()
+        suite = _make_suite("mmlu")
+        reg.register(suite)
+        suite.name = "Modified"
+        assert reg.get("mmlu").name == "MMLU"  # type: ignore[union-attr]
+
+    def test_list_all_returns_tuple_of_deep_copies(self) -> None:
         reg = BenchmarkSuiteRegistry()
         reg.register(_make_suite("mmlu"))
         all_suites = reg.list_all()
+        assert isinstance(all_suites, tuple)
         all_suites[0].name = "Modified"
         assert reg.get("mmlu").name == "MMLU"  # type: ignore[union-attr]
 
@@ -147,7 +180,7 @@ class TestBenchmarkSuiteRegistry:
 
 
 class TestBenchmarkAdapterRegistry:
-    def test_register_and_get(self) -> None:
+    def test_register_and_get_returns_same_instance(self) -> None:
         reg = BenchmarkAdapterRegistry()
         adapter = _FakeAdapterForRegistry("lm-eval")
         reg.register(adapter)  # type: ignore[arg-type]
@@ -159,11 +192,19 @@ class TestBenchmarkAdapterRegistry:
         with pytest.raises(DuplicateRegistrationError, match="already registered"):
             reg.register(_FakeAdapterForRegistry("lm-eval"))  # type: ignore[arg-type]
 
-    def test_list_ids(self) -> None:
+    def test_list_ids_returns_tuple(self) -> None:
         reg = BenchmarkAdapterRegistry()
         reg.register(_FakeAdapterForRegistry("a"))  # type: ignore[arg-type]
         reg.register(_FakeAdapterForRegistry("b"))  # type: ignore[arg-type]
-        assert sorted(reg.list_ids()) == ["a", "b"]
+        ids = reg.list_ids()
+        assert isinstance(ids, tuple)
+        assert sorted(ids) == ["a", "b"]
+
+    def test_list_all_returns_tuple(self) -> None:
+        reg = BenchmarkAdapterRegistry()
+        reg.register(_FakeAdapterForRegistry("a"))  # type: ignore[arg-type]
+        all_adapters = reg.list_all()
+        assert isinstance(all_adapters, tuple)
 
     def test_contains(self) -> None:
         reg = BenchmarkAdapterRegistry()

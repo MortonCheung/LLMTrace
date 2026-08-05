@@ -1,11 +1,14 @@
 """Benchmarks package for capability evaluation foundation."""
 
 from llmtrace.benchmarks.models import (
+    AdapterFailure,
+    BenchmarkProvenance,
     BenchmarkRunResult,
     BenchmarkSource,
     BenchmarkSuite,
     BudgetEstimate,
     DimensionResult,
+    FailureCategory,
     GradeResult,
     GradeStatus,
     RunPlan,
@@ -13,14 +16,18 @@ from llmtrace.benchmarks.models import (
     TaskAttempt,
     TaskSpec,
     TaskStatus,
+    validate_evidence_refs,
 )
 
 __all__ = [
+    "AdapterFailure",
+    "BenchmarkProvenance",
     "BenchmarkRunResult",
     "BenchmarkSource",
     "BenchmarkSuite",
     "BudgetEstimate",
     "DimensionResult",
+    "FailureCategory",
     "GradeResult",
     "GradeStatus",
     "RunPlan",
@@ -28,4 +35,5 @@ __all__ = [
     "TaskAttempt",
     "TaskSpec",
     "TaskStatus",
+    "validate_evidence_refs",
 ]

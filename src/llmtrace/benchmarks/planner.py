@@ -1,12 +1,55 @@
 """Planner for benchmark runs.
 
 Generates deterministic RunPlan and BudgetEstimate objects from
-a BenchmarkSuite and its TaskSpec definitions.
+a BenchmarkSuite and its TaskSpec definitions.  The plan_id is a
+SHA-256 digest of the canonicalised input parameters so that
+identical inputs always produce the same plan.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from llmtrace.benchmarks.models import BudgetEstimate, RunPlan, TaskSpec
+
+
+def _canonical_key(
+    suite_id: str,
+    suite_version: str,
+    source_id: str,
+    source_revision: str,
+    adapter_id: str,
+    adapter_version: str,
+    task_ids: list[str],
+    max_retries: int,
+    tokens_per_sample_input: int,
+    tokens_per_sample_output: int,
+    requests_per_sample: int,
+) -> bytes:
+    """Produce a deterministic canonical byte-string for the given inputs.
+
+    Every parameter that influences the plan identity is included so that
+    any change produces a different plan_id.  *task_ids* order matters.
+    """
+    data = {
+        "suite_id": suite_id,
+        "suite_version": suite_version,
+        "source_id": source_id,
+        "source_revision": source_revision,
+        "adapter_id": adapter_id,
+        "adapter_version": adapter_version,
+        "task_ids": task_ids,
+        "max_retries": max_retries,
+        "tokens_per_sample_input": tokens_per_sample_input,
+        "tokens_per_sample_output": tokens_per_sample_output,
+        "requests_per_sample": requests_per_sample,
+    }
+    return json.dumps(data, sort_keys=True).encode("utf-8")
+
+
+def _compute_plan_id(canonical_bytes: bytes) -> str:
+    return hashlib.sha256(canonical_bytes).hexdigest()
 
 
 def build_plan(
@@ -27,30 +70,13 @@ def build_plan(
 ) -> RunPlan:
     """Build a deterministic RunPlan from task specifications.
 
-    The plan is deterministic: the same inputs always produce the same plan
-    (except for plan_id and created_at, which are unique per invocation).
+    The plan is fully deterministic: identical input parameters always
+    produce an identical RunPlan, including the same plan_id.
 
-    Args:
-        suite_id: Suite identifier.
-        suite_version: Suite version string.
-        source_id: Benchmark source identifier.
-        source_revision: Source data revision.
-        adapter_id: Adapter identifier.
-        adapter_version: Adapter version.
-        tasks: List of TaskSpec objects.
-        max_retries: Maximum retry attempts per request.
-        tokens_per_sample_input: Estimated input tokens per sample.
-        tokens_per_sample_output: Estimated output tokens per sample.
-        requests_per_sample: HTTP requests per sample (default 1).
-        price_per_million_input: Price per 1M input tokens, or None if unavailable.
-        price_per_million_output: Price per 1M output tokens, or None if unavailable.
-        duration_per_sample_seconds: Estimated duration per sample in seconds.
-
-    Returns:
-        A deterministic RunPlan with BudgetEstimate.
+    *task_ids* order in the plan is the order of the *tasks* argument.
     """
-    total_samples = sum(t.num_samples for t in tasks)
     task_ids = [t.task_id for t in tasks]
+    total_samples = sum(t.num_samples for t in tasks)
 
     planned_requests = total_samples * requests_per_sample
     maximum_requests = planned_requests * (1 + max_retries)
@@ -58,7 +84,7 @@ def build_plan(
     estimated_input_tokens = total_samples * tokens_per_sample_input
     estimated_output_tokens = total_samples * tokens_per_sample_output
 
-    estimated_duration_seconds = total_samples * duration_per_sample_seconds
+    estimated_duration_seconds: float | None = total_samples * duration_per_sample_seconds
 
     # Cost calculation: only produce a value if both prices are provided
     estimated_cost: float | None = None
@@ -89,7 +115,23 @@ def build_plan(
         assumptions=assumptions,
     )
 
+    canonical = _canonical_key(
+        suite_id=suite_id,
+        suite_version=suite_version,
+        source_id=source_id,
+        source_revision=source_revision,
+        adapter_id=adapter_id,
+        adapter_version=adapter_version,
+        task_ids=task_ids,
+        max_retries=max_retries,
+        tokens_per_sample_input=tokens_per_sample_input,
+        tokens_per_sample_output=tokens_per_sample_output,
+        requests_per_sample=requests_per_sample,
+    )
+    plan_id = _compute_plan_id(canonical)
+
     return RunPlan(
+        plan_id=plan_id,
         suite_id=suite_id,
         suite_version=suite_version,
         source_id=source_id,

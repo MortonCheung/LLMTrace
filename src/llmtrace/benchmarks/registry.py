@@ -1,10 +1,10 @@
 """Registry for benchmark sources, suites, and adapters.
 
 Provides simple ID-unique registries with:
-- duplicate registration errors
+- Duplicate registration errors
 - ID-based lookup
-- listing of all registered items
-- read-only views (copies)
+- Read-only views (deep-copies for Source/Suite, tuple for Adapter list)
+- Adapter instances returned by identity (not deep-copied)
 """
 
 from __future__ import annotations
@@ -28,48 +28,31 @@ class DuplicateRegistrationError(RegistryError):
 class BenchmarkSourceRegistry:
     """Registry for BenchmarkSource objects.
 
-    Ensures unique source_id per registered source.
+    Stores deep-copies on register; returns deep-copies on get/list_all.
+    External mutation of returned objects never affects internal state.
     """
 
     def __init__(self) -> None:
         self._sources: dict[str, BenchmarkSource] = {}
 
     def register(self, source: BenchmarkSource) -> None:
-        """Register a benchmark source.
-
-        Args:
-            source: The BenchmarkSource to register.
-
-        Raises:
-            DuplicateRegistrationError: If source_id already registered.
-        """
+        """Register a benchmark source (stored as deep-copy)."""
         if source.source_id in self._sources:
             raise DuplicateRegistrationError(f"BenchmarkSource with id '{source.source_id}' is already registered")
-        self._sources[source.source_id] = source
+        self._sources[source.source_id] = deepcopy(source)
 
     def get(self, source_id: str) -> BenchmarkSource | None:
-        """Look up a source by ID.
+        """Look up a source by ID (returns deep-copy)."""
+        src = self._sources.get(source_id)
+        return deepcopy(src) if src is not None else None
 
-        Returns:
-            The BenchmarkSource, or None if not found.
-        """
-        return self._sources.get(source_id)
+    def list_ids(self) -> tuple[str, ...]:
+        """Return a tuple of all registered source IDs."""
+        return tuple(self._sources.keys())
 
-    def list_ids(self) -> list[str]:
-        """List all registered source IDs.
-
-        Returns:
-            A copy of the list of source IDs.
-        """
-        return list(self._sources.keys())
-
-    def list_all(self) -> list[BenchmarkSource]:
-        """List all registered sources.
-
-        Returns:
-            A copy of the list of registered sources.
-        """
-        return [deepcopy(s) for s in self._sources.values()]
+    def list_all(self) -> tuple[BenchmarkSource, ...]:
+        """Return a tuple of deep-copied registered sources."""
+        return tuple(deepcopy(s) for s in self._sources.values())
 
     def __len__(self) -> int:
         return len(self._sources)
@@ -81,48 +64,31 @@ class BenchmarkSourceRegistry:
 class BenchmarkSuiteRegistry:
     """Registry for BenchmarkSuite objects.
 
-    Ensures unique suite_id per registered suite.
+    Stores deep-copies on register; returns deep-copies on get/list_all.
+    External mutation of returned objects never affects internal state.
     """
 
     def __init__(self) -> None:
         self._suites: dict[str, BenchmarkSuite] = {}
 
     def register(self, suite: BenchmarkSuite) -> None:
-        """Register a benchmark suite.
-
-        Args:
-            suite: The BenchmarkSuite to register.
-
-        Raises:
-            DuplicateRegistrationError: If suite_id already registered.
-        """
+        """Register a benchmark suite (stored as deep-copy)."""
         if suite.suite_id in self._suites:
             raise DuplicateRegistrationError(f"BenchmarkSuite with id '{suite.suite_id}' is already registered")
-        self._suites[suite.suite_id] = suite
+        self._suites[suite.suite_id] = deepcopy(suite)
 
     def get(self, suite_id: str) -> BenchmarkSuite | None:
-        """Look up a suite by ID.
+        """Look up a suite by ID (returns deep-copy)."""
+        sut = self._suites.get(suite_id)
+        return deepcopy(sut) if sut is not None else None
 
-        Returns:
-            The BenchmarkSuite, or None if not found.
-        """
-        return self._suites.get(suite_id)
+    def list_ids(self) -> tuple[str, ...]:
+        """Return a tuple of all registered suite IDs."""
+        return tuple(self._suites.keys())
 
-    def list_ids(self) -> list[str]:
-        """List all registered suite IDs.
-
-        Returns:
-            A copy of the list of suite IDs.
-        """
-        return list(self._suites.keys())
-
-    def list_all(self) -> list[BenchmarkSuite]:
-        """List all registered suites.
-
-        Returns:
-            A copy of the list of registered suites.
-        """
-        return [deepcopy(s) for s in self._suites.values()]
+    def list_all(self) -> tuple[BenchmarkSuite, ...]:
+        """Return a tuple of deep-copied registered suites."""
+        return tuple(deepcopy(s) for s in self._suites.values())
 
     def __len__(self) -> int:
         return len(self._suites)
@@ -134,48 +100,32 @@ class BenchmarkSuiteRegistry:
 class BenchmarkAdapterRegistry:
     """Registry for BenchmarkAdapter instances.
 
-    Ensures unique adapter_id per registered adapter.
+    Adapters are executable service objects and are NOT deep-copied.
+    The internal collection is never exposed directly; list_all returns
+    a tuple of the registered instances, and get returns the instance
+    by identity.
     """
 
     def __init__(self) -> None:
         self._adapters: dict[str, BenchmarkAdapter] = {}
 
     def register(self, adapter: BenchmarkAdapter) -> None:
-        """Register a benchmark adapter.
-
-        Args:
-            adapter: The BenchmarkAdapter to register.
-
-        Raises:
-            DuplicateRegistrationError: If adapter_id already registered.
-        """
+        """Register a benchmark adapter."""
         if adapter.adapter_id in self._adapters:
             raise DuplicateRegistrationError(f"BenchmarkAdapter with id '{adapter.adapter_id}' is already registered")
         self._adapters[adapter.adapter_id] = adapter
 
     def get(self, adapter_id: str) -> BenchmarkAdapter | None:
-        """Look up an adapter by ID.
-
-        Returns:
-            The BenchmarkAdapter, or None if not found.
-        """
+        """Look up an adapter by ID (returns the registered instance)."""
         return self._adapters.get(adapter_id)
 
-    def list_ids(self) -> list[str]:
-        """List all registered adapter IDs.
+    def list_ids(self) -> tuple[str, ...]:
+        """Return a tuple of all registered adapter IDs."""
+        return tuple(self._adapters.keys())
 
-        Returns:
-            A copy of the list of adapter IDs.
-        """
-        return list(self._adapters.keys())
-
-    def list_all(self) -> list[BenchmarkAdapter]:
-        """List all registered adapters.
-
-        Returns:
-            A copy of the list of registered adapters.
-        """
-        return list(self._adapters.values())
+    def list_all(self) -> tuple[BenchmarkAdapter, ...]:
+        """Return a tuple of the registered adapter instances."""
+        return tuple(self._adapters.values())
 
     def __len__(self) -> int:
         return len(self._adapters)
