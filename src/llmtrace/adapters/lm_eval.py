@@ -19,6 +19,8 @@ from llmtrace.adapters.lm_eval_runner import (
 from llmtrace.benchmarks.models import (
     AdapterFailure,
     BudgetEstimate,
+    CompletionOptions,
+    CompletionProvider,
     FailureCategory,
     GradeResult,
     GradeStatus,
@@ -168,7 +170,7 @@ class LmEvalAdapter(BenchmarkAdapter):
     async def run_task(
         self,
         task_spec: TaskSpec,
-        provider: object,
+        provider: CompletionProvider,
     ) -> TaskAttempt:
         """Run a single lm-eval task via the LmEvalRunner.
 
@@ -180,7 +182,7 @@ class LmEvalAdapter(BenchmarkAdapter):
         attempt_id = str(uuid4())
         try:
             runner = LmEvalRunner(
-                provider=provider,  # type: ignore[arg-type]
+                provider=provider,
                 model_name=self._model_name,
                 task_root=self._task_root,
                 generation_kwargs=self._generation_kwargs,
@@ -197,7 +199,33 @@ class LmEvalAdapter(BenchmarkAdapter):
             evidence_refs = [str(eid) for eid in evidence_ids]
 
             # Build controlled LmEvalMetricResult from the raw output
-            metric_result = _extract_metric_result(result, self.adapter_version)
+            actual_options_raw: object = result.get("actual_options")
+            actual_options = actual_options_raw if isinstance(actual_options_raw, CompletionOptions) else None
+            metric_result = _extract_metric_result(result, self.adapter_version, actual_options)
+
+            if metric_result is None:
+                return TaskAttempt(
+                    attempt_id=attempt_id,
+                    source_id=_SMOKE_MANIFEST.source_id,
+                    source_revision=_SMOKE_MANIFEST.source_revision,
+                    suite_id=_SMOKE_MANIFEST.suite_id,
+                    suite_version=_SMOKE_MANIFEST.suite_version,
+                    task_id=task_spec.task_id,
+                    adapter_id=self.adapter_id,
+                    adapter_version=self.adapter_version,
+                    status=TaskStatus.FAILURE,
+                    evidence_refs=evidence_refs,
+                    failure=AdapterFailure(
+                        error_code="LM_EVAL_RESULT_INVALID",
+                        category=FailureCategory.ADAPTER,
+                        message="lm-eval execution produced no valid exact_match metric",
+                        retryable=False,
+                        details={
+                            "task_name": str(result.get("task_name", "unknown")),
+                            "lm_eval_version": str(result.get("version", "unknown")),
+                        },
+                    ),
+                )
 
             return TaskAttempt(
                 attempt_id=attempt_id,
@@ -388,28 +416,45 @@ def _ungradable(task_name: str, error_message: str) -> GradeResult:
 def _extract_metric_result(
     result: dict[str, object],
     adapter_version: str,
-) -> LmEvalMetricResult:
-    """Extract a controlled LmEvalMetricResult from runner output."""
+    generation_options: CompletionOptions | None,
+) -> LmEvalMetricResult | None:
+    """Extract a controlled LmEvalMetricResult from runner output.
+
+    Only accepts exact_match or exact_match,<filter> with numeric values
+    within [0, 1].  Returns None for any invalid or unparseable result.
+    """
     task_results: dict[str, object] = result.get("results", {})  # type: ignore[assignment]
     task_name = str(result.get("task_name", "unknown"))
 
-    metric_name: str = "exact_match"
-    filter_name: str = "none"
-    value: float = 0.0
+    if not isinstance(task_results, dict) or not task_results:
+        return None
 
-    if isinstance(task_results, dict):
-        for _tn, metrics in task_results.items():
-            if isinstance(metrics, dict):
-                for key, val in metrics.items():
-                    if key.startswith("exact_match"):
-                        metric_name = str(key)
-                        # lm-eval key format: "exact_match,<filter>"
-                        if "," in key:
-                            _, filter_name = key.split(",", 1)
-                        if isinstance(val, (int, float)):
-                            value = float(val)
-                        break
-                break
+    metric_name: str | None = None
+    filter_name: str = "none"
+    value: float | None = None
+
+    for _tn, metrics in task_results.items():
+        if isinstance(metrics, dict):
+            for key, val in metrics.items():
+                if key.startswith("exact_match"):
+                    metric_name = str(key)
+                    if "," in key:
+                        _, filter_name = key.split(",", 1)
+                    if isinstance(val, (int, float)):
+                        value = float(val)
+                    else:
+                        # Non-numeric exact_match value — invalid
+                        return None
+                    break
+        if metric_name is not None:
+            break
+
+    if metric_name is None or value is None:
+        return None
+
+    # Strict: value must be within [0, 1]
+    if value < 0.0 or value > 1.0:
+        return None
 
     return LmEvalMetricResult(
         task_name=task_name,
@@ -419,5 +464,5 @@ def _extract_metric_result(
         fewshot=0,
         lm_eval_version=adapter_version,
         task_revision="1.0",
-        generation_options=None,
+        generation_options=generation_options,
     )

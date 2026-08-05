@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from llmtrace.adapters.lm_eval_bridge import ProviderBackedLM
-from llmtrace.benchmarks.models import CompletionProvider
+from llmtrace.benchmarks.models import CompletionOptions, CompletionProvider
 
 try:
     import lm_eval  # noqa: F401
@@ -138,16 +138,16 @@ def _validate_task_yaml(task_dir: Path, task_name: str) -> None:
         raise LmEvalValidationError(f"Task YAML '{yaml_path}' missing data_files")
 
 
-def _prepare_task_dir(task_root: Path, task_name: str) -> tuple[str, str]:
+def _prepare_task_dir(task_root: Path, task_name: str) -> tuple[str, str, tempfile.TemporaryDirectory[str]]:
     """Rewrite task YAML with absolute path for data_files.
 
     lm-eval resolves ``data_files`` relative to CWD, not include_path.
     Since we cannot use os.chdir(), we create a temporary copy of the
-    YAML with an absolute ``data_files`` path.
+    YAML with an absolute ``data_files`` path inside a TemporaryDirectory.
 
     Returns:
-        (temp_task_dir, task_name) where temp_task_dir contains a rewritten
-        copy of the YAML with absolute data_files.
+        (temp_task_dir, task_name, tmpdir_context) — the caller MUST hold
+        the tmpdir_context alive until lm-eval execution completes.
     """
     yaml_path = task_root / f"{task_name}.yaml"
     raw = yaml_path.read_text()
@@ -158,12 +158,22 @@ def _prepare_task_dir(task_root: Path, task_name: str) -> tuple[str, str]:
         abs_data_files = (task_root / df_match.group(2)).resolve().as_posix()
         raw = raw[: df_match.start(2)] + abs_data_files + raw[df_match.end(2) :]
 
-    # Write to a temp directory that preserves the task name
-    tmp_dir = tempfile.mkdtemp(prefix="llmtrace_task_")
-    tmp_yaml = Path(tmp_dir) / f"{task_name}.yaml"
+    # Write to a TemporaryDirectory that will auto-clean
+    tmpdir = tempfile.TemporaryDirectory(prefix="llmtrace_task_")
+    tmp_yaml = Path(tmpdir.name) / f"{task_name}.yaml"
     tmp_yaml.write_text(raw)
 
-    return tmp_dir, task_name
+    return tmpdir.name, task_name, tmpdir
+
+
+def _build_actual_options(generation_kwargs: dict[str, object]) -> CompletionOptions | None:
+    """Build Controlled CompletionOptions from generation_kwargs used in this run."""
+    if not generation_kwargs:
+        return None
+    try:
+        return CompletionOptions.from_lm_eval_kwargs(generation_kwargs)
+    except (ValueError, TypeError):
+        return None
 
 
 class LmEvalRunner:
@@ -236,65 +246,69 @@ class LmEvalRunner:
         _validate_task_yaml(self._task_root, task_name)
 
         # Prepare a temp task dir with absolute data_files path.
-        # lm-eval resolves data_files relative to CWD, but we cannot
-        # use os.chdir() for security.  Instead we rewrite the YAML.
-        include_path, task_name = _prepare_task_dir(self._task_root, task_name)
+        # Uses TemporaryDirectory for auto-cleanup on both success and exception.
+        include_path, task_name, tmpdir = _prepare_task_dir(self._task_root, task_name)
 
-        # Build the LM bridge
-        self._evidence_registry.clear()
-        self._lm = ProviderBackedLM(
-            provider=self._provider,
-            model_name=self._model_name,
-            evidence_registry=self._evidence_registry,
-            generation_kwargs=self._generation_kwargs,
-        )
+        try:
+            # Build the LM bridge
+            self._evidence_registry.clear()
+            self._lm = ProviderBackedLM(
+                provider=self._provider,
+                model_name=self._model_name,
+                evidence_registry=self._evidence_registry,
+                generation_kwargs=self._generation_kwargs,
+            )
 
-        # Use lm-eval's simple_evaluate with a TaskManager for local tasks.
-        # We use absolute paths throughout — NO os.chdir().
-        from lm_eval import simple_evaluate
-        from lm_eval.tasks import TaskManager
+            # Use lm-eval's simple_evaluate with a TaskManager for local tasks.
+            # We use absolute paths throughout — NO os.chdir().
+            from lm_eval import simple_evaluate
+            from lm_eval.tasks import TaskManager
 
-        manager = TaskManager(
-            include_path=include_path,
-            include_defaults=False,
-        )
+            manager = TaskManager(
+                include_path=include_path,
+                include_defaults=False,
+            )
 
-        results = simple_evaluate(
-            model=self._lm,
-            tasks=[task_name],
-            num_fewshot=num_fewshot,
-            batch_size=str(batch_size),
-            task_manager=manager,
-            confirm_run_unsafe_code=False,
-            log_samples=False,
-            predict_only=False,
-            random_seed=1234,
-            numpy_random_seed=1234,
-            torch_random_seed=1234,
-            fewshot_random_seed=1234,
-        )
+            results = simple_evaluate(
+                model=self._lm,
+                tasks=[task_name],
+                num_fewshot=num_fewshot,
+                batch_size=str(batch_size),
+                task_manager=manager,
+                confirm_run_unsafe_code=False,
+                log_samples=False,
+                predict_only=False,
+                random_seed=1234,
+                numpy_random_seed=1234,
+                torch_random_seed=1234,
+                fewshot_random_seed=1234,
+            )
 
-        # Build controlled result dict
-        evidence_ids = list(self._evidence_registry.keys())
+            # Build controlled result dict
+            evidence_ids = list(self._evidence_registry.keys())
 
-        # Extract per-task results from the EvalResults object
-        task_results: dict[str, object] = {}
-        if results is not None and isinstance(results, dict):
-            raw_results: object = results.get("results", {})
-            if isinstance(raw_results, dict):
-                for _tn, metrics in raw_results.items():
-                    if isinstance(metrics, dict):
-                        task_results[str(_tn)] = dict(metrics)
+            # Extract per-task results from the EvalResults object
+            task_results: dict[str, object] = {}
+            if results is not None and isinstance(results, dict):
+                raw_results: object = results.get("results", {})
+                if isinstance(raw_results, dict):
+                    for _tn, metrics in raw_results.items():
+                        if isinstance(metrics, dict):
+                            task_results[str(_tn)] = dict(metrics)
 
-        import lm_eval as pkg  # noqa: F811
+            import lm_eval as pkg  # noqa: F811
 
-        return {
-            "results": task_results,
-            "version": getattr(pkg, "__version__", "unknown"),
-            "evidence_ids": evidence_ids,
-            "task_name": task_name,
-            "request_count": len(evidence_ids),
-        }
+            return {
+                "results": task_results,
+                "version": getattr(pkg, "__version__", "unknown"),
+                "evidence_ids": evidence_ids,
+                "task_name": task_name,
+                "request_count": len(evidence_ids),
+                "actual_options": _build_actual_options(self._generation_kwargs),
+            }
+        finally:
+            # Auto-clean temp directory on all paths
+            tmpdir.cleanup()
 
     @property
     def evidence_registry(self) -> dict[str, Any]:

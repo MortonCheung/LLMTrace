@@ -806,3 +806,291 @@ class TestAnthropicCompatibleProvider:
 
             request = route.calls[0].request
             assert request.headers.get("anthropic-version") == "2023-06-01"
+
+
+# ---------------------------------------------------------------------------
+# Provider CompletionOptions mapping tests (respx)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAICompletionOptionsMapping:
+    """Verifies CompletionOptions are mapped into the OpenAI request body."""
+
+    @pytest.mark.asyncio
+    async def test_maps_temperature(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(temperature=0.3)
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["temperature"] == 0.3
+
+    @pytest.mark.asyncio
+    async def test_maps_stop_sequences(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(stop=["END", "STOP"])
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["stop"] == ["END", "STOP"]
+
+    @pytest.mark.asyncio
+    async def test_maps_until_as_stop(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(until=["\n"])
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["stop"] == ["\n"]
+
+    @pytest.mark.asyncio
+    async def test_maps_max_tokens(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(max_tokens=256)
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["max_tokens"] == 256
+
+    @pytest.mark.asyncio
+    async def test_maps_max_gen_toks_as_max_tokens(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(max_gen_toks=128)
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["max_tokens"] == 128
+
+    @pytest.mark.asyncio
+    async def test_conflicting_max_tokens_raises(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(max_tokens=100, max_gen_toks=200)
+
+        async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+            with pytest.raises(ValueError, match="Conflicting token limits"):
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+    @pytest.mark.asyncio
+    async def test_do_sample_false_accepted(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(do_sample=False)
+
+        with respx.mock as mock:
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                evidence = await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            assert evidence.http_status == 200
+
+    @pytest.mark.asyncio
+    async def test_do_sample_true_raises(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(do_sample=True)
+
+        async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+            with pytest.raises(ValueError, match="do_sample=True is not supported"):
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+    @pytest.mark.asyncio
+    async def test_combines_stop_and_until(self, config_openai: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(stop=["END"], until=["\n", "END"])
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["stop"] == ["END", "\n"]  # deduplicated: END not repeated
+
+    @pytest.mark.asyncio
+    async def test_no_options_unchanged_body(self, config_openai: AuditConfig) -> None:
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+            async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+                await provider.complete("gpt-4", [{"role": "user", "content": "Hi"}])
+
+            body = json.loads(route.calls[0].request.content)
+            assert "stop" not in body  # no stop without options
+            assert "temperature" not in body
+
+
+class TestAnthropicCompletionOptionsMapping:
+    """Verifies CompletionOptions are mapped into the Anthropic request body."""
+
+    @pytest.mark.asyncio
+    async def test_maps_temperature(self, config_anthropic: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(temperature=0.5)
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/messages").respond(
+                status_code=200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-3-opus-20240229",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            )
+
+            async with AnthropicCompatibleProvider(config_anthropic, API_KEY) as provider:
+                await provider.complete("claude-3-opus-20240229", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["temperature"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_maps_stop_to_stop_sequences(self, config_anthropic: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(stop=["END"])
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/messages").respond(
+                status_code=200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-3-opus-20240229",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            )
+
+            async with AnthropicCompatibleProvider(config_anthropic, API_KEY) as provider:
+                await provider.complete("claude-3-opus-20240229", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["stop_sequences"] == ["END"]
+
+    @pytest.mark.asyncio
+    async def test_maps_max_tokens(self, config_anthropic: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(max_tokens=512)
+
+        with respx.mock as mock:
+            route = mock.post("http://test.example.com/v1/messages").respond(
+                status_code=200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-3-opus-20240229",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            )
+
+            async with AnthropicCompatibleProvider(config_anthropic, API_KEY) as provider:
+                await provider.complete("claude-3-opus-20240229", [{"role": "user", "content": "Hi"}], options=options)
+
+            body = json.loads(route.calls[0].request.content)
+            assert body["max_tokens"] == 512
+
+    @pytest.mark.asyncio
+    async def test_do_sample_false_accepted(self, config_anthropic: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(do_sample=False)
+
+        with respx.mock as mock:
+            mock.post("http://test.example.com/v1/messages").respond(
+                status_code=200,
+                json={
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-3-opus-20240229",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                },
+            )
+
+            async with AnthropicCompatibleProvider(config_anthropic, API_KEY) as provider:
+                evidence = await provider.complete(
+                    "claude-3-opus-20240229", [{"role": "user", "content": "Hi"}], options=options
+                )
+
+            assert evidence.http_status == 200
+
+    @pytest.mark.asyncio
+    async def test_do_sample_true_raises(self, config_anthropic: AuditConfig) -> None:
+        from llmtrace.benchmarks.models import CompletionOptions
+
+        options = CompletionOptions(do_sample=True)
+
+        async with AnthropicCompatibleProvider(config_anthropic, API_KEY) as provider:
+            with pytest.raises(ValueError, match="do_sample=True is not supported"):
+                await provider.complete("claude-3-opus-20240229", [{"role": "user", "content": "Hi"}], options=options)
