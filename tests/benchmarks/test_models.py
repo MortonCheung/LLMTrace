@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -18,6 +19,7 @@ from llmtrace.benchmarks.models import (
     FailureCategory,
     GradeResult,
     GradeStatus,
+    RunPlan,
     SuiteVersion,
     TaskAttempt,
     TaskSpec,
@@ -779,3 +781,182 @@ class TestBudgetEstimateValidation:
         data = budget.model_dump_json()
         restored = BudgetEstimate.model_validate_json(data)
         assert restored == budget
+
+
+# ============================================================================
+# RunPlan plan_id is required
+# ============================================================================
+
+
+def _make_run_plan(plan_id: str) -> RunPlan:
+    return RunPlan(
+        plan_id=plan_id,
+        suite_id="s",
+        suite_version="v",
+        source_id="src",
+        source_revision="rev",
+        adapter_id="a",
+        adapter_version="v",
+        task_ids=["t1"],
+        total_samples=1,
+        budget=BudgetEstimate(planned_requests=1, maximum_requests=1),
+    )
+
+
+class TestRunPlanRequiredPlanId:
+    def test_missing_plan_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_run_plan("missing").__class__.model_validate(_make_run_plan("x").model_dump(exclude={"plan_id"}))
+
+    def test_empty_plan_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_run_plan("")
+
+    def test_whitespace_only_plan_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_run_plan("   ")
+
+
+# ============================================================================
+# Unified evidence_refs validation (BenchmarkRunResult included)
+# ============================================================================
+
+
+class TestUnifiedEvidenceRefs:
+    def test_run_result_rejects_non_uuid_ref(self) -> None:
+        with pytest.raises(ValidationError):
+            BenchmarkRunResult(
+                run_id=_valid_uuid(),
+                source_id="s",
+                source_revision="r",
+                suite_id="s",
+                suite_version="v",
+                adapter_id="a",
+                adapter_version="v",
+                evidence_refs=["not-a-uuid"],
+            )
+
+    def test_run_result_dedupes_refs(self) -> None:
+        uid = _valid_uuid()
+        result = BenchmarkRunResult(
+            run_id=_valid_uuid(),
+            source_id="s",
+            source_revision="r",
+            suite_id="s",
+            suite_version="v",
+            adapter_id="a",
+            adapter_version="v",
+            evidence_refs=[uid, uid],
+        )
+        assert result.evidence_refs == [uid]
+
+    def test_run_result_preserves_first_seen_order(self) -> None:
+        u1, u2, u3 = _valid_uuid(), _valid_uuid(), _valid_uuid()
+        result = BenchmarkRunResult(
+            run_id=_valid_uuid(),
+            source_id="s",
+            source_revision="r",
+            suite_id="s",
+            suite_version="v",
+            adapter_id="a",
+            adapter_version="v",
+            evidence_refs=[u3, u1, u2, u1],
+        )
+        assert result.evidence_refs == [u3, u1, u2]
+
+
+# ============================================================================
+# Time fields are typed datetime | None
+# ============================================================================
+
+
+class TestTimeFields:
+    def test_suite_version_released_at_defaults_utc(self) -> None:
+        sv = SuiteVersion(version="1.0.0")
+        assert sv.released_at is not None
+        assert sv.released_at.tzinfo is not None
+
+    def test_suite_version_released_at_invalid_string_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SuiteVersion(version="1.0.0", released_at="not-a-date")
+
+    def test_suite_version_released_at_iso_roundtrip(self) -> None:
+        sv = SuiteVersion(version="1.0.0", released_at=datetime(2026, 8, 6, 1, 0, 0, tzinfo=UTC))
+        data = sv.model_dump_json()
+        restored = SuiteVersion.model_validate_json(data)
+        assert restored.released_at == sv.released_at
+
+    def test_suite_version_released_at_preserves_timezone(self) -> None:
+        sv = SuiteVersion(
+            version="1.0.0",
+            released_at=datetime(2026, 8, 6, 9, 30, 0, tzinfo=timezone(timedelta(hours=8))),
+        )
+        data = sv.model_dump_json()
+        restored = SuiteVersion.model_validate_json(data)
+        assert restored.released_at is not None
+        assert restored.released_at.utcoffset() == timedelta(hours=8)
+
+    def test_task_attempt_times_default_none(self) -> None:
+        ta = TaskAttempt(
+            attempt_id=_valid_uuid(),
+            source_id="s",
+            source_revision="r",
+            suite_id="s",
+            suite_version="v",
+            task_id="t",
+            adapter_id="a",
+            adapter_version="v",
+        )
+        assert ta.started_at is None
+        assert ta.finished_at is None
+
+    def test_task_attempt_invalid_started_at_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskAttempt(
+                attempt_id=_valid_uuid(),
+                source_id="s",
+                source_revision="r",
+                suite_id="s",
+                suite_version="v",
+                task_id="t",
+                adapter_id="a",
+                adapter_version="v",
+                started_at="not-a-date",
+            )
+
+    def test_task_attempt_times_iso_roundtrip(self) -> None:
+        start = datetime(2026, 8, 6, 1, 0, 0, tzinfo=UTC)
+        finish = datetime(2026, 8, 6, 1, 5, 30, tzinfo=UTC)
+        ta = TaskAttempt(
+            attempt_id=_valid_uuid(),
+            source_id="s",
+            source_revision="r",
+            suite_id="s",
+            suite_version="v",
+            task_id="t",
+            adapter_id="a",
+            adapter_version="v",
+            started_at=start,
+            finished_at=finish,
+        )
+        data = ta.model_dump_json()
+        restored = TaskAttempt.model_validate_json(data)
+        assert restored.started_at == start
+        assert restored.finished_at == finish
+
+    def test_run_result_times_iso_roundtrip(self) -> None:
+        start = datetime(2026, 8, 6, 1, 0, 0, tzinfo=UTC)
+        result = BenchmarkRunResult(
+            run_id=_valid_uuid(),
+            source_id="s",
+            source_revision="r",
+            suite_id="s",
+            suite_version="v",
+            adapter_id="a",
+            adapter_version="v",
+            started_at=start,
+        )
+        data = result.model_dump_json()
+        restored = BenchmarkRunResult.model_validate_json(data)
+        assert restored.started_at == start
+        assert restored.finished_at is None

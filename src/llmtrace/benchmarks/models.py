@@ -7,15 +7,16 @@ benchmark harnesses (lm-eval, LiveBench, EvalPlus, Inspect AI, etc.).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     Field,
     StringConstraints,
-    field_validator,
     model_validator,
 )
 
@@ -104,6 +105,11 @@ def _normalize_evidence_refs(refs: list[str]) -> list[str]:
     return out
 
 
+# Shared evidence-reference field type: UUID validation + normalisation + dedup
+# applied consistently to every model that carries evidence references.
+EvidenceRefs = Annotated[list[str], AfterValidator(_normalize_evidence_refs)]
+
+
 def validate_evidence_refs(
     refs: Sequence[str],
     available_evidence_ids: set[UUID] | frozenset[UUID],
@@ -147,7 +153,10 @@ class SuiteVersion(BaseModel):
     """Immutable version identifier for a benchmark suite."""
 
     version: NonEmptyStr = Field(..., description="Semantic version string, e.g. '1.0.0'")
-    released_at: str = Field(default="", description="Release timestamp in ISO-8601")
+    released_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Release timestamp in ISO-8601 (UTC)",
+    )
     notes: str = Field(default="", description="Release notes for this version")
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -247,7 +256,7 @@ class RunPlan(BaseModel):
     """
 
     plan_id: NonEmptyStr = Field(
-        default="",
+        ...,
         description="Deterministic SHA-256 plan identifier (set by planner)",
     )
     suite_id: NonEmptyStr = Field(..., description="Suite this plan targets")
@@ -275,21 +284,16 @@ class TaskAttempt(BenchmarkProvenance):
     attempt_id: NonEmptyStr = Field(..., description="Unique attempt identifier")
     task_id: NonEmptyStr = Field(..., description="Task identifier")
     status: TaskStatus = Field(default=TaskStatus.PENDING, description="Attempt status")
-    evidence_refs: list[str] = Field(
+    evidence_refs: EvidenceRefs = Field(
         default_factory=list,
         description="Evidence UUIDs (as strings) collected during this attempt",
     )
     failure: AdapterFailure | None = Field(default=None, description="Structured failure information on failure")
-    started_at: str = Field(default="", description="Attempt start time ISO-8601")
-    finished_at: str = Field(default="", description="Attempt finish time ISO-8601")
+    started_at: datetime | None = Field(default=None, description="Attempt start time")
+    finished_at: datetime | None = Field(default=None, description="Attempt finish time")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional attempt metadata")
 
     model_config = {"extra": "forbid"}
-
-    @field_validator("evidence_refs")
-    @classmethod
-    def _validate_evidence_refs(cls, v: list[str]) -> list[str]:
-        return _normalize_evidence_refs(v)
 
     @model_validator(mode="after")
     def _check_failure_consistency(self) -> TaskAttempt:
@@ -322,7 +326,7 @@ class GradeResult(BenchmarkProvenance):
         le=1.0,
         description="Normalized score in [0, 1]",
     )
-    evidence_refs: list[str] = Field(
+    evidence_refs: EvidenceRefs = Field(
         default_factory=list,
         description="Evidence UUIDs referenced for grading",
     )
@@ -330,11 +334,6 @@ class GradeResult(BenchmarkProvenance):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional grading metadata")
 
     model_config = {"extra": "forbid"}
-
-    @field_validator("evidence_refs")
-    @classmethod
-    def _validate_evidence_refs(cls, v: list[str]) -> list[str]:
-        return _normalize_evidence_refs(v)
 
 
 class DimensionResult(BaseModel):
@@ -370,9 +369,9 @@ class BenchmarkRunResult(BenchmarkProvenance):
     task_attempts: list[TaskAttempt] = Field(default_factory=list, description="All task attempts")
     grade_results: list[GradeResult] = Field(default_factory=list, description="All grading results")
     dimensions: list[DimensionResult] = Field(default_factory=list, description="Per-dimension aggregate results")
-    started_at: str = Field(default="", description="Run start time ISO-8601")
-    finished_at: str = Field(default="", description="Run finish time ISO-8601")
-    evidence_refs: list[str] = Field(
+    started_at: datetime | None = Field(default=None, description="Run start time")
+    finished_at: datetime | None = Field(default=None, description="Run finish time")
+    evidence_refs: EvidenceRefs = Field(
         default_factory=list,
         description="All evidence UUIDs referenced across this run",
     )

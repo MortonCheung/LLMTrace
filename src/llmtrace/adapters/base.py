@@ -112,8 +112,8 @@ class BenchmarkAdapter(ABC):
 
         Returns:
             A TaskAttempt recording the execution result.
-            On failure, the TaskAttempt MUST have status=FAILURE
-            and a non-empty error_message.
+            On failure, the TaskAttempt MUST have status=FAILURE and
+            provide a structured AdapterFailure in its `failure` field.
         """
         ...
 

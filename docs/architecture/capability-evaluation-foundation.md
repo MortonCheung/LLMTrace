@@ -96,7 +96,9 @@ normalize_result(…) → GradeResult
 
 `build_plan()` 函数根据 Suite/TaskSpec 生成确定性的 RunPlan：
 
-- 同一输入 → 同一计划（plan_id 和 created_at 除外）
+- 同一输入 → 完全相同的计划，包括相同的 `plan_id`
+- `plan_id` 是规范化输入（suite/source/adapter 标识、结构化任务列表、预算与价格参数）的 SHA-256 摘要；任一关键参数变化都会产生不同的 `plan_id`
+- 任务顺序是计划身份的一部分：`tasks` 参数的顺序影响 `plan_id`，语义为"任务列表顺序即执行顺序"
 - 重试次数明确计入最大请求数：`maximum_requests = planned_requests * (1 + max_retries)`
 - 未提供价格时 `estimated_cost = None`
 

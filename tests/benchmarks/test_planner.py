@@ -163,6 +163,82 @@ class TestRunPlanDeterminism:
         )
         assert plan1.plan_id != plan2.plan_id
 
+    def test_num_samples_change_affects_plan_id(self) -> None:
+        """Changing task num_samples changes the plan_id."""
+        tasks1 = _make_tasks(("t1", 10))
+        tasks2 = _make_tasks(("t1", 20))
+        plan1 = build_plan(
+            suite_id="s",
+            suite_version="v",
+            source_id="src",
+            source_revision="r",
+            adapter_id="a",
+            adapter_version="v",
+            tasks=tasks1,
+        )
+        plan2 = build_plan(
+            suite_id="s",
+            suite_version="v",
+            source_id="src",
+            source_revision="r",
+            adapter_id="a",
+            adapter_version="v",
+            tasks=tasks2,
+        )
+        assert plan1.plan_id != plan2.plan_id
+
+    def test_price_change_affects_plan_id(self) -> None:
+        """Changing pricing parameters changes the plan_id."""
+        tasks = _make_tasks(("t1", 10))
+        plan1 = build_plan(
+            suite_id="s",
+            suite_version="v",
+            source_id="src",
+            source_revision="r",
+            adapter_id="a",
+            adapter_version="v",
+            tasks=tasks,
+            price_per_million_input=3.0,
+            price_per_million_output=15.0,
+        )
+        plan2 = build_plan(
+            suite_id="s",
+            suite_version="v",
+            source_id="src",
+            source_revision="r",
+            adapter_id="a",
+            adapter_version="v",
+            tasks=tasks,
+            price_per_million_input=4.0,
+            price_per_million_output=15.0,
+        )
+        assert plan1.plan_id != plan2.plan_id
+
+    def test_duration_change_affects_plan_id(self) -> None:
+        """Changing duration_per_sample_seconds changes the plan_id."""
+        tasks = _make_tasks(("t1", 10))
+        plan1 = build_plan(
+            suite_id="s",
+            suite_version="v",
+            source_id="src",
+            source_revision="r",
+            adapter_id="a",
+            adapter_version="v",
+            tasks=tasks,
+            duration_per_sample_seconds=2.0,
+        )
+        plan2 = build_plan(
+            suite_id="s",
+            suite_version="v",
+            source_id="src",
+            source_revision="r",
+            adapter_id="a",
+            adapter_version="v",
+            tasks=tasks,
+            duration_per_sample_seconds=3.0,
+        )
+        assert plan1.plan_id != plan2.plan_id
+
     def test_plan_has_no_created_at(self) -> None:
         tasks = _make_tasks(("t1", 1))
         plan = build_plan(

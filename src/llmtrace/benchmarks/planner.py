@@ -21,16 +21,21 @@ def _canonical_key(
     source_revision: str,
     adapter_id: str,
     adapter_version: str,
-    task_ids: list[str],
+    tasks: list[TaskSpec],
     max_retries: int,
     tokens_per_sample_input: int,
     tokens_per_sample_output: int,
     requests_per_sample: int,
+    price_per_million_input: float | None,
+    price_per_million_output: float | None,
+    duration_per_sample_seconds: float,
 ) -> bytes:
     """Produce a deterministic canonical byte-string for the given inputs.
 
     Every parameter that influences the plan identity is included so that
-    any change produces a different plan_id.  *task_ids* order matters.
+    any change produces a different plan_id.  Tasks are hashed as a
+    structured list of {task_id, num_samples} (order matters) rather than
+    bare task_ids, so changes to sample counts also change the plan_id.
     """
     data = {
         "suite_id": suite_id,
@@ -39,11 +44,14 @@ def _canonical_key(
         "source_revision": source_revision,
         "adapter_id": adapter_id,
         "adapter_version": adapter_version,
-        "task_ids": task_ids,
+        "tasks": [{"task_id": t.task_id, "num_samples": t.num_samples} for t in tasks],
         "max_retries": max_retries,
         "tokens_per_sample_input": tokens_per_sample_input,
         "tokens_per_sample_output": tokens_per_sample_output,
         "requests_per_sample": requests_per_sample,
+        "price_per_million_input": price_per_million_input,
+        "price_per_million_output": price_per_million_output,
+        "duration_per_sample_seconds": duration_per_sample_seconds,
     }
     return json.dumps(data, sort_keys=True).encode("utf-8")
 
@@ -122,11 +130,14 @@ def build_plan(
         source_revision=source_revision,
         adapter_id=adapter_id,
         adapter_version=adapter_version,
-        task_ids=task_ids,
+        tasks=tasks,
         max_retries=max_retries,
         tokens_per_sample_input=tokens_per_sample_input,
         tokens_per_sample_output=tokens_per_sample_output,
         requests_per_sample=requests_per_sample,
+        price_per_million_input=price_per_million_input,
+        price_per_million_output=price_per_million_output,
+        duration_per_sample_seconds=duration_per_sample_seconds,
     )
     plan_id = _compute_plan_id(canonical)
 
