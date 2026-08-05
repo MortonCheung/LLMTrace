@@ -18,9 +18,12 @@ def analyze_risk(findings: list[FindingResult]) -> RiskLevel:
 
     # 检查是否有高风险证据
     for f in high_failures:
-        if "无效模型名称仍成功生成内容" in " ".join(f.inferences):
+        inferences_text = " ".join(f.inferences)
+        # fallback: 无效模型成功生成有效内容 -> HIGH
+        if "无效模型名称仍成功生成内容" in inferences_text:
             return RiskLevel.HIGH
-        if "同一会话中返回了多个不同的模型标识" in " ".join(f.inferences):
+        # inconsistent: 同一会话中返回了多个不同的模型标识 -> HIGH
+        if "同一会话中返回了多个不同的模型标识" in inferences_text:
             return RiskLevel.HIGH
 
     # 检查是否有连接失败
