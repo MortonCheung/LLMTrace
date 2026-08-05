@@ -1,0 +1,295 @@
+"""Integration tests for JSON report with benchmark sections (schema 1.1)."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+from llmtrace.benchmarks.models import (
+    AdapterFailure,
+    BenchmarkRunResult,
+    BudgetEstimate,
+    FailureCategory,
+    GradeResult,
+    RunPlan,
+    TaskAttempt,
+    TaskStatus,
+)
+from llmtrace.config import AuditConfig, AuthStyle, Protocol
+from llmtrace.models.audit import AuditResult, RiskLevel
+from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
+from llmtrace.reporting.benchmark_models import BenchmarkReportSection
+from llmtrace.reporting.json_report import generate_json_report
+
+
+def _provenance() -> dict[str, str]:
+    return {
+        "suite_id": "test-suite",
+        "suite_version": "1.0.0",
+        "source_id": "test-source",
+        "source_revision": "abc123",
+        "adapter_id": "lm-eval",
+        "adapter_version": "0.4.12",
+    }
+
+
+def _make_minimal_audit_result() -> AuditResult:
+    """Build a minimal valid AuditResult for testing."""
+    return AuditResult(
+        config=AuditConfig(
+            protocol=Protocol.OPENAI,
+            base_url="https://api.example.com",
+            model="test-model",
+            api_key_env="TEST_KEY",
+            auth_style=AuthStyle.BEARER,
+            repeat_count=1,
+            timeout=30.0,
+            max_output_tokens=100,
+            check_streaming=False,
+        ),
+        evidence=[],
+        findings=[],
+        risk_level=RiskLevel.INCONCLUSIVE,
+        schema_fingerprints=[],
+        model_list=[],
+        start_time=datetime(2026, 1, 1, tzinfo=UTC),
+        end_time=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        llmtrace_version="0.2.0",
+        python_version="3.12",
+        platform="darwin",
+        report_id="test-report-id",
+        content_hash="",
+    )
+
+
+def _make_benchmark_section(
+    run_id: str = "11111111-1111-1111-1111-111111111111",
+    smoke: bool = False,
+) -> BenchmarkReportSection:
+    p = _provenance()
+    plan = RunPlan(
+        plan_id="test-plan",
+        task_ids=["task_a"],
+        total_samples=4,
+        budget=BudgetEstimate(planned_requests=4, maximum_requests=4, estimated_cost=None),
+        **{k: v for k, v in p.items() if k in RunPlan.model_fields},
+    )
+
+    meta = {"llmtrace_smoke_task": True} if smoke else {}
+    attempt = TaskAttempt(
+        attempt_id="att-1",
+        task_id="task_a",
+        status=TaskStatus.SUCCESS,
+        evidence_refs=[str(uuid4())],
+        metadata=meta,
+        **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+    )
+
+    grade = GradeResult(
+        grade_id="grade-1",
+        attempt_id="att-1",
+        task_id="task_a",
+        grader_id="exact_match",
+        raw_score=0.8,
+        normalized_score=0.8,
+        **{k: v for k, v in p.items() if k in GradeResult.model_fields},
+    )
+
+    run_result = BenchmarkRunResult(
+        run_id=run_id,
+        task_attempts=[attempt],
+        grade_results=[grade],
+        evidence_refs=[str(uuid4())],
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
+    )
+
+    return build_benchmark_report_section(plan, run_result)
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+class TestJsonReportNoBenchmarks:
+    def test_legacy_report_no_benchmarks(self) -> None:
+        """Audit report without benchmark sections still works."""
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path)
+            data = json.loads(output_path.read_text())
+
+        assert data["schema_version"] == "1.1"
+        assert data["benchmarks"] == []
+        assert "content_hash" in data
+        assert data["meta"]["schema_version"] == "1.1"
+
+    def test_none_benchmark_sections_produces_empty_list(self) -> None:
+        """Passing None for benchmark_sections produces empty list."""
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=None)
+            data = json.loads(output_path.read_text())
+
+        assert data["benchmarks"] == []
+
+
+class TestJsonReportWithBenchmarks:
+    def test_single_benchmark_section(self) -> None:
+        """Report with one benchmark section."""
+        result = _make_minimal_audit_result()
+        section = _make_benchmark_section()
+        bm: Sequence[BenchmarkReportSection] = [section]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=bm)
+            data = json.loads(output_path.read_text())
+
+        assert len(data["benchmarks"]) == 1
+        bm_data = data["benchmarks"][0]
+        assert isinstance(bm_data, dict)
+        assert bm_data["plan_id"] == "test-plan"
+        assert bm_data["status"] == "success"
+        assert "tasks" in bm_data
+
+    def test_multiple_benchmark_sections(self) -> None:
+        """Report with multiple benchmark sections."""
+        result = _make_minimal_audit_result()
+        sections: Sequence[BenchmarkReportSection] = [
+            _make_benchmark_section(run_id="11111111-1111-1111-1111-111111111111"),
+            _make_benchmark_section(run_id="22222222-2222-2222-2222-222222222222"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=sections)
+            data = json.loads(output_path.read_text())
+
+        assert len(data["benchmarks"]) == 2
+
+    def test_content_hash_changes_with_benchmarks(self) -> None:
+        """Content hash varies when benchmark sections are added."""
+        result = _make_minimal_audit_result()
+
+        # Without benchmarks
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p1 = Path(tmpdir) / "r1.json"
+            generate_json_report(result, p1)
+            h1 = json.loads(p1.read_text())["content_hash"]
+
+        # With one benchmark
+        section = _make_benchmark_section()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p2 = Path(tmpdir) / "r2.json"
+            generate_json_report(result, p2, benchmark_sections=[section])
+            h2 = json.loads(p2.read_text())["content_hash"]
+
+        assert h1 != h2, "Content hash should change when benchmarks are included"
+
+    def test_schema_version_is_1_1(self) -> None:
+        """Both top-level and meta.schema_version equal 1.1."""
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path)
+            data = json.loads(output_path.read_text())
+
+        assert data["schema_version"] == "1.1"
+        assert data["meta"]["schema_version"] == "1.1"
+
+    def test_benchmark_failure_json(self) -> None:
+        """Report correctly serializes a benchmark section with failures."""
+        result = _make_minimal_audit_result()
+        p = _provenance()
+        plan = RunPlan(
+            plan_id="fail-plan",
+            task_ids=["task_a"],
+            total_samples=2,
+            budget=BudgetEstimate(planned_requests=2, maximum_requests=2, estimated_cost=None),
+            **{k: v for k, v in p.items() if k in RunPlan.model_fields},
+        )
+        attempt = TaskAttempt(
+            attempt_id="att-fail",
+            task_id="task_a",
+            status=TaskStatus.FAILURE,
+            evidence_refs=[str(uuid4())],
+            failure=AdapterFailure(
+                error_code="TEST_ERROR",
+                category=FailureCategory.PROVIDER,
+                message="Provider rejected request",
+                retryable=True,
+            ),
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        rr = BenchmarkRunResult(
+            run_id=str(uuid4()),
+            task_attempts=[attempt],
+            grade_results=[],
+            evidence_refs=[str(uuid4())],
+            **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
+        )
+        section = build_benchmark_report_section(plan, rr)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=[section])
+            data = json.loads(output_path.read_text())
+
+        bm_data = data["benchmarks"][0]
+        assert bm_data["status"] == "failure"
+        task_data = bm_data["tasks"][0]
+        assert task_data["failure"] is not None
+        assert task_data["failure"]["error_code"] == "TEST_ERROR"
+
+    def test_smoke_task_capability_score_eligible_false(self) -> None:
+        """Smoke tasks are serialized with capability_score_eligible=false."""
+        result = _make_minimal_audit_result()
+        section = _make_benchmark_section(smoke=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=[section])
+            data = json.loads(output_path.read_text())
+
+        task = data["benchmarks"][0]["tasks"][0]
+        assert task["capability_score_eligible"] is False
+
+    def test_estimated_cost_null(self) -> None:
+        """estimated_cost=None serializes as null in JSON."""
+        result = _make_minimal_audit_result()
+        section = _make_benchmark_section()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=[section])
+            data = json.loads(output_path.read_text())
+
+        bm = data["benchmarks"][0]
+        assert bm["estimated_cost"] is None
+        assert bm["summary"]["estimated_cost"] is None
+
+
+class TestSchemaVersionConstant:
+    def test_schema_version_is_single_constant(self) -> None:
+        """SCHEMA_VERSION is a single constant used everywhere."""
+        from llmtrace.reporting import json_report
+
+        assert isinstance(json_report.SCHEMA_VERSION, str)
+        # Verify both usages use the same constant
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path)
+            data = json.loads(output_path.read_text())
+
+        assert data["schema_version"] == json_report.SCHEMA_VERSION
+        assert data["meta"]["schema_version"] == json_report.SCHEMA_VERSION

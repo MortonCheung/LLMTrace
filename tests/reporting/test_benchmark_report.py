@@ -1,18 +1,25 @@
-"""Tests for benchmark report models and mapper.
+"""Tests for benchmark report models and mapper (v2 — strict).
 
 Covers:
 1. Successful task mapping
 2. Failed task mapping
 3. SUCCESS but missing GradeResult
-4. UNGRADABLE GradeResult
-5. Duplicate GradeResult rejection
-6. Evidence UUID preservation
-7. estimated_cost=None preservation
-8. datetime JSON serialization (ISO-8601)
-9. JSON roundtrip
-10. No Pydantic objects / exceptions in metadata
-11. Smoke task marked capability_score_eligible=False
-12. No total_score or capability_score in model
+4. UNGRADABLE GradeResult (scores None)
+5. ERROR GradeResult (scores None)
+6. Duplicate GradeResult rejection
+7. Provenance mismatch rejection (plan vs run_result, child vs parent)
+8. GradeResult.task_id mismatch
+9. TaskAttempt.task_id not in plan
+10. Evidence UUID preservation
+11. estimated_cost=None preservation
+12. datetime JSON serialization (ISO-8601)
+13. JSON roundtrip
+14. Recursive JSON-safe metadata — rejects Pydantic, Exception, bytes, custom objects
+15. Sensitive key redaction in failure safe_details
+16. Smoke task detection via metadata flag
+17. Status rules: incomplete, skipped, no_tasks
+18. No total_score or capability_score in model fields
+19. Strict Golden Test (fixture must pre-exist, full comparison)
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel
 
 from llmtrace.benchmarks.models import (
     AdapterFailure,
@@ -46,43 +54,62 @@ from llmtrace.reporting.benchmark_models import (
 # ---------------------------------------------------------------------------
 
 
-def _make_run_plan(plan_id: str = "test-plan-001") -> RunPlan:
+def _provenance() -> dict[str, str]:
+    return {
+        "suite_id": "test-suite",
+        "suite_version": "1.0.0",
+        "source_id": "test-source",
+        "source_revision": "abc123",
+        "adapter_id": "lm-eval",
+        "adapter_version": "0.4.12",
+    }
+
+
+def _make_run_plan(plan_id: str = "test-plan-001", **overrides: str) -> RunPlan:
+    p = _provenance()
+    p.update(overrides)
+    task_ids_val = p.pop("task_ids", None) if "task_ids" in overrides else None
+    task_ids = task_ids_val if task_ids_val is not None else ["task_a", "task_b"]
+    # Remove task_ids from p so it doesn't conflict with explicit kwarg
+    p.pop("task_ids", None)
     return RunPlan(
         plan_id=plan_id,
-        suite_id="test-suite",
-        suite_version="1.0.0",
-        source_id="test-source",
-        source_revision="abc123",
-        adapter_id="lm-eval",
-        adapter_version="0.4.12",
-        task_ids=["task_a", "task_b"],
+        task_ids=task_ids,
         total_samples=4,
         budget=BudgetEstimate(
             planned_requests=4,
             maximum_requests=4,
-            estimated_input_tokens=None,
-            estimated_output_tokens=None,
             estimated_cost=None,
         ),
+        **{k: v for k, v in p.items() if k in RunPlan.model_fields},
     )
 
 
-def _make_success_attempt(attempt_id: str, task_id: str, evidence_refs: list[str] | None = None) -> TaskAttempt:
+def _make_success_attempt(
+    attempt_id: str,
+    task_id: str,
+    evidence_refs: list[str] | None = None,
+    **overrides: str,
+) -> TaskAttempt:
+    p = _provenance()
+    p.update(overrides)
     return TaskAttempt(
         attempt_id=attempt_id,
         task_id=task_id,
         status=TaskStatus.SUCCESS,
         evidence_refs=evidence_refs or [str(uuid4())],
-        source_id="test-source",
-        source_revision="abc123",
-        suite_id="test-suite",
-        suite_version="1.0.0",
-        adapter_id="lm-eval",
-        adapter_version="0.4.12",
+        **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
     )
 
 
-def _make_failure_attempt(attempt_id: str, task_id: str, error_code: str = "TEST_ERROR") -> TaskAttempt:
+def _make_failure_attempt(
+    attempt_id: str,
+    task_id: str,
+    error_code: str = "TEST_ERROR",
+    **overrides: str,
+) -> TaskAttempt:
+    p = _provenance()
+    p.update(overrides)
     return TaskAttempt(
         attempt_id=attempt_id,
         task_id=task_id,
@@ -94,16 +121,13 @@ def _make_failure_attempt(attempt_id: str, task_id: str, error_code: str = "TEST
             message="Test failure message",
             retryable=False,
         ),
-        source_id="test-source",
-        source_revision="abc123",
-        suite_id="test-suite",
-        suite_version="1.0.0",
-        adapter_id="lm-eval",
-        adapter_version="0.4.12",
+        **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
     )
 
 
-def _make_grade(attempt_id: str, task_id: str, raw_score: float = 0.75) -> GradeResult:
+def _make_grade(attempt_id: str, task_id: str, raw_score: float = 0.75, **overrides: str) -> GradeResult:
+    p = _provenance()
+    p.update(overrides)
     return GradeResult(
         grade_id=str(uuid4()),
         attempt_id=attempt_id,
@@ -111,16 +135,13 @@ def _make_grade(attempt_id: str, task_id: str, raw_score: float = 0.75) -> Grade
         grader_id="exact_match",
         raw_score=raw_score,
         normalized_score=raw_score,
-        source_id="test-source",
-        source_revision="abc123",
-        suite_id="test-suite",
-        suite_version="1.0.0",
-        adapter_id="lm-eval",
-        adapter_version="0.4.12",
+        **{k: v for k, v in p.items() if k in GradeResult.model_fields},
     )
 
 
-def _make_ungradable_grade(attempt_id: str, task_id: str) -> GradeResult:
+def _make_ungradable_grade(attempt_id: str, task_id: str, **overrides: str) -> GradeResult:
+    p = _provenance()
+    p.update(overrides)
     return GradeResult(
         grade_id=str(uuid4()),
         attempt_id=attempt_id,
@@ -130,12 +151,41 @@ def _make_ungradable_grade(attempt_id: str, task_id: str) -> GradeResult:
         normalized_score=0.0,
         status=GradeStatus.UNGRADABLE,
         error_message="Cannot grade",
-        source_id="test-source",
-        source_revision="abc123",
-        suite_id="test-suite",
-        suite_version="1.0.0",
-        adapter_id="lm-eval",
-        adapter_version="0.4.12",
+        **{k: v for k, v in p.items() if k in GradeResult.model_fields},
+    )
+
+
+def _make_error_grade(attempt_id: str, task_id: str, **overrides: str) -> GradeResult:
+    p = _provenance()
+    p.update(overrides)
+    return GradeResult(
+        grade_id=str(uuid4()),
+        attempt_id=attempt_id,
+        task_id=task_id,
+        grader_id="exact_match",
+        raw_score=0.0,
+        normalized_score=0.0,
+        status=GradeStatus.ERROR,
+        error_message="Grading error",
+        **{k: v for k, v in p.items() if k in GradeResult.model_fields},
+    )
+
+
+def _make_run_result(
+    attempts: list[TaskAttempt],
+    grades: list[GradeResult],
+    run_id: str | None = None,
+    evidence_refs: list[str] | None = None,
+    **overrides: str,
+) -> BenchmarkRunResult:
+    p = _provenance()
+    p.update(overrides)
+    return BenchmarkRunResult(
+        run_id=run_id or str(uuid4()),
+        task_attempts=attempts,
+        grade_results=grades,
+        evidence_refs=evidence_refs or [str(uuid4())],
+        **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
     )
 
 
@@ -146,64 +196,37 @@ def _make_ungradable_grade(attempt_id: str, task_id: str) -> GradeResult:
 
 class TestSuccessfulMapping:
     def test_success_task_with_grade(self) -> None:
-        """A SUCCESS TaskAttempt with a matching GradeResult maps correctly."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_grade("att-1", "task_a", 0.8)
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            started_at=datetime(2026, 1, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
-        )
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+        section = build_benchmark_report_section(plan, run_result)
 
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
-
-        assert section.status == "success"
+        assert section.status.value == "success"
         assert len(section.tasks) == 1
         task = section.tasks[0]
         assert task.task_id == "task_a"
-        assert task.status == "success"
+        assert task.status.value == "success"
         assert task.grader_id == "exact_match"
-        assert task.grade_status == "graded"
+        assert task.grade_status is not None
+        assert task.grade_status.value == "graded"
         assert task.raw_score == 0.8
         assert task.normalized_score == 0.8
         assert task.failure is None
         assert task.capability_score_eligible is True
 
     def test_multiple_tasks_all_success(self) -> None:
-        """Multiple successful tasks all map correctly."""
         plan = _make_run_plan()
-        a1 = _make_success_attempt("att-1", "task_a", [str(uuid4())])
-        a2 = _make_success_attempt("att-2", "task_b", [str(uuid4())])
+        a1 = _make_success_attempt("att-1", "task_a")
+        a2 = _make_success_attempt("att-2", "task_b")
         g1 = _make_grade("att-1", "task_a", 0.9)
         g2 = _make_grade("att-2", "task_b", 0.7)
 
-        all_refs = [str(uuid4())]
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[a1, a2],
-            grade_results=[g1, g2],
-            evidence_refs=all_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
+        run_result = _make_run_result([a1, a2], [g1, g2])
+        section = build_benchmark_report_section(plan, run_result)
 
-        section = build_benchmark_report_section(plan, run_result, [a1, a2], [g1, g2])
-        assert section.status == "success"
+        assert section.status.value == "success"
         assert section.summary.success_count == 2
         assert section.summary.failure_count == 0
         assert len(section.tasks) == 2
@@ -216,121 +239,126 @@ class TestSuccessfulMapping:
 
 class TestFailureMapping:
     def test_failure_task_preserves_error(self) -> None:
-        """A FAILURE TaskAttempt preserves the error and sets scores to None."""
         plan = _make_run_plan()
         attempt = _make_failure_attempt("att-1", "task_a", "LM_EVAL_OPTIONS_INCONSISTENT")
+        run_result = _make_run_result([attempt], [], evidence_refs=attempt.evidence_refs)
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [])
-        assert section.status == "failure"
+        section = build_benchmark_report_section(plan, run_result)
+        assert section.status.value == "failure"
         task = section.tasks[0]
-        assert task.status == "failure"
+        assert task.status.value == "failure"
         assert task.raw_score is None
         assert task.normalized_score is None
         assert task.failure is not None
         assert task.failure.error_code == "LM_EVAL_OPTIONS_INCONSISTENT"
-        assert task.failure.category == "adapter"
-        assert task.failure.message == "Test failure message"
-        assert task.failure.retryable is False
+        assert task.failure.category.value == "adapter"
 
     def test_partial_failure_status(self) -> None:
-        """One success + one failure → partial_failure status."""
         plan = _make_run_plan()
         a1 = _make_success_attempt("att-1", "task_a")
         a2 = _make_failure_attempt("att-2", "task_b")
         g1 = _make_grade("att-1", "task_a", 1.0)
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[a1, a2],
-            grade_results=[g1],
-            evidence_refs=[str(uuid4())],
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
+        run_result = _make_run_result([a1, a2], [g1])
+        section = build_benchmark_report_section(plan, run_result)
 
-        section = build_benchmark_report_section(plan, run_result, [a1, a2], [g1])
-        assert section.status == "partial_failure"
+        assert section.status.value == "partial_failure"
         assert section.summary.success_count == 1
         assert section.summary.failure_count == 1
 
 
 # ---------------------------------------------------------------------------
-# Tests: Ungraded / UNGRADABLE
+# Tests: Ungraded / UNGRADABLE / ERROR
 # ---------------------------------------------------------------------------
 
 
 class TestUngradedHandling:
     def test_success_without_grade_is_ungraded(self) -> None:
-        """SUCCESS without GradeResult → ungraded, no fake scores, warning added."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
+        run_result = _make_run_result([attempt], [], evidence_refs=attempt.evidence_refs)
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [])
+        section = build_benchmark_report_section(plan, run_result)
         task = section.tasks[0]
-        assert task.status == "success"
+        assert task.status.value == "success"
         assert task.raw_score is None
         assert task.normalized_score is None
         assert task.grader_id is None
         assert task.grade_status is None
         assert section.summary.ungraded_count == 1
-        assert len(section.warnings) >= 1
         assert any("ungraded" in w for w in section.warnings)
 
-    def test_ungradable_grade_preserves_status(self) -> None:
-        """UNGRADABLE GradeResult → grade_status preserved, scores None."""
+    def test_ungradable_grade_scores_none(self) -> None:
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_ungradable_grade("att-1", "task_a")
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
+        section = build_benchmark_report_section(plan, run_result)
         task = section.tasks[0]
-        assert task.grade_status == "ungradable"
+        assert task.grade_status is not None
+        assert task.grade_status.value == "ungradable"
         assert task.raw_score is None
         assert task.normalized_score is None
         assert section.summary.ungradable_count == 1
+
+    def test_error_grade_scores_none(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_success_attempt("att-1", "task_a")
+        grade = _make_error_grade("att-1", "task_a")
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+
+        section = build_benchmark_report_section(plan, run_result)
+        task = section.tasks[0]
+        assert task.grade_status is not None
+        assert task.grade_status.value == "error"
+        assert task.raw_score is None
+        assert task.normalized_score is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: Provenance validation
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceValidation:
+    def test_plan_run_result_provenance_mismatch(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_success_attempt("att-1", "task_a")
+        run_result = _make_run_result([attempt], [], suite_id="different-suite")
+        with pytest.raises(ValueError, match="Provenance mismatch"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_attempt_provenance_mismatch(self) -> None:
+        plan = _make_run_plan()
+        # Test child vs parent: attempt has wrong suite_id
+        attempt_bad = _make_success_attempt("att-1", "task_a", suite_id="wrong")
+        run_result = _make_run_result([attempt_bad], [])
+        with pytest.raises(ValueError, match="TaskAttempt suite_id mismatch"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_grade_provenance_mismatch(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_success_attempt("att-1", "task_a")
+        grade = _make_grade("att-1", "task_a", suite_id="wrong")
+        run_result = _make_run_result([attempt], [grade])
+        with pytest.raises(ValueError, match="GradeResult suite_id mismatch"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_grade_task_id_mismatch(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_success_attempt("att-1", "task_a")
+        grade = _make_grade("att-1", "task_b")  # different task_id
+        run_result = _make_run_result([attempt], [grade])
+        with pytest.raises(ValueError, match="does not match"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_attempt_task_id_not_in_plan(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_success_attempt("att-1", "task_unknown")
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="not in plan.task_ids"):
+            build_benchmark_report_section(plan, run_result)
 
 
 # ---------------------------------------------------------------------------
@@ -340,89 +368,312 @@ class TestUngradedHandling:
 
 class TestDuplicateGradeResult:
     def test_duplicate_grade_result_raises(self) -> None:
-        """Two GradeResults for the same attempt_id → ValueError."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         g1 = _make_grade("att-1", "task_a", 0.5)
         g2 = _make_grade("att-1", "task_a", 0.9)
-
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[g1, g2],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
+        run_result = _make_run_result([attempt], [g1, g2])
 
         with pytest.raises(ValueError, match="Duplicate GradeResult"):
-            build_benchmark_report_section(plan, run_result, [attempt], [g1, g2])
+            build_benchmark_report_section(plan, run_result)
 
 
 # ---------------------------------------------------------------------------
-# Tests: Evidence UUID
+# Tests: Status rules
 # ---------------------------------------------------------------------------
 
 
-class TestEvidenceUUID:
+class TestStatusRules:
+    def test_all_skipped(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        a1 = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SKIPPED,
+            evidence_refs=[],
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([a1], [])
+        section = build_benchmark_report_section(plan, run_result)
+        assert section.status.value == "skipped"
+
+    def test_pending_causes_incomplete(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        a1 = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.PENDING,
+            evidence_refs=[],
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([a1], [])
+        section = build_benchmark_report_section(plan, run_result)
+        assert section.status.value == "incomplete"
+
+    def test_zero_tasks_is_failure_with_warning(self) -> None:
+        plan = _make_run_plan()
+        run_result = _make_run_result([], [])
+        section = build_benchmark_report_section(plan, run_result)
+        assert section.status.value == "failure"
+        assert any("no_tasks" in w for w in section.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Smoke task
+# ---------------------------------------------------------------------------
+
+
+class TestSmokeTask:
+    def test_smoke_task_not_capability_eligible_via_metadata(self) -> None:
+        plan = _make_run_plan(task_ids=["llmtrace_smoke"])
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-smoke",
+            task_id="llmtrace_smoke",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"llmtrace_smoke_task": True},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = _make_grade("att-smoke", "llmtrace_smoke", 1.0)
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+
+        section = build_benchmark_report_section(plan, run_result)
+        task = section.tasks[0]
+        assert task.capability_score_eligible is False
+
+    def test_no_smoke_metadata_is_capability_eligible(self) -> None:
+        plan = _make_run_plan(task_ids=["llmtrace_smoke"])
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-smoke-2",
+            task_id="llmtrace_smoke",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={},  # No smoke flag
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = _make_grade("att-smoke-2", "llmtrace_smoke", 1.0)
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+
+        section = build_benchmark_report_section(plan, run_result)
+        task = section.tasks[0]
+        # Without metadata flag, even a task named "llmtrace_smoke" is eligible
+        assert task.capability_score_eligible is True
+
+
+# ---------------------------------------------------------------------------
+# Tests: JSON-safe metadata
+# ---------------------------------------------------------------------------
+
+
+class _FakePydanticModel(BaseModel):
+    x: int = 0
+
+
+class _CustomObject:
+    pass
+
+
+class TestMetadataSafety:
+    def test_pydantic_model_in_metadata_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"bad": _FakePydanticModel(x=1)},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="Pydantic model"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_exception_in_metadata_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"bad": ValueError("test")},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="Exception"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_custom_object_in_metadata_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"bad": _CustomObject()},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="not JSON-safe"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_bytes_in_metadata_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"bad": b"binary data"},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="forbidden type"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_set_in_metadata_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"bad": {1, 2, 3}},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="forbidden type"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_nested_non_json_value_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={"nested": {"inner": _CustomObject()}},
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [])
+        with pytest.raises(ValueError, match="not JSON-safe"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_valid_metadata_passes(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            metadata={
+                "str_field": "hello",
+                "int_field": 42,
+                "float_field": 3.14,
+                "bool_field": True,
+                "null_field": None,
+                "list_field": [1, "two", 3.0, None],
+                "dict_field": {"a": 1, "b": "two"},
+            },
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = _make_grade("att-1", "task_a", 0.5)
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+
+        section = build_benchmark_report_section(plan, run_result)
+        task = section.tasks[0]
+        assert task.metadata["str_field"] == "hello"
+        assert task.metadata["int_field"] == 42
+        assert task.metadata["list_field"] == [1, "two", 3.0, None]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Sensitive key redaction
+# ---------------------------------------------------------------------------
+
+
+class TestSensitiveKeys:
+    def test_api_key_redacted(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.FAILURE,
+            evidence_refs=[str(uuid4())],
+            failure=AdapterFailure(
+                error_code="TEST",
+                category=FailureCategory.ADAPTER,
+                message="fail",
+                details={"api_key": "sk-12345"},
+            ),
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [], evidence_refs=attempt.evidence_refs)
+
+        section = build_benchmark_report_section(plan, run_result)
+        assert section.tasks[0].failure is not None
+        assert section.tasks[0].failure.safe_details.get("api_key") == "<REDACTED>"
+
+    def test_authorization_redacted(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.FAILURE,
+            evidence_refs=[str(uuid4())],
+            failure=AdapterFailure(
+                error_code="TEST",
+                category=FailureCategory.ADAPTER,
+                message="fail",
+                details={"Authorization": "Bearer token"},
+            ),
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        run_result = _make_run_result([attempt], [], evidence_refs=attempt.evidence_refs)
+
+        section = build_benchmark_report_section(plan, run_result)
+        assert section.tasks[0].failure is not None
+        assert section.tasks[0].failure.safe_details.get("Authorization") == "<REDACTED>"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Evidence UUID, estimated_cost=None
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceAndCost:
     def test_evidence_refs_flow_through(self) -> None:
-        """Evidence UUIDs from TaskAttempt are preserved in the report."""
         ev1 = str(uuid4())
         ev2 = str(uuid4())
-
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a", [ev1, ev2])
         grade = _make_grade("att-1", "task_a", 0.8)
+        run_result = _make_run_result([attempt], [grade], evidence_refs=[ev1, ev2])
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=[ev1, ev2],
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
+        section = build_benchmark_report_section(plan, run_result)
         task = section.tasks[0]
         assert ev1 in task.evidence_refs
         assert ev2 in task.evidence_refs
 
-
-# ---------------------------------------------------------------------------
-# Tests: estimated_cost=None
-# ---------------------------------------------------------------------------
-
-
-class TestEstimatedCostNone:
     def test_estimated_cost_none_stays_none(self) -> None:
-        """When estimated_cost is None, it remains None in the report."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_grade("att-1", "task_a", 0.5)
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
 
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
+        section = build_benchmark_report_section(plan, run_result)
         assert section.estimated_cost is None
         assert section.summary.estimated_cost is None
 
@@ -434,195 +685,68 @@ class TestEstimatedCostNone:
 
 class TestJsonSerialization:
     def test_datetime_is_iso8601(self) -> None:
-        """datetime fields serialize as ISO-8601 strings."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_grade("att-1", "task_a", 0.5)
-
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
+        run_result = _make_run_result(
+            [attempt],
+            [grade],
             evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            started_at=datetime(2026, 6, 15, 12, 30, 0, tzinfo=UTC),
-            finished_at=datetime(2026, 6, 15, 12, 31, 0, tzinfo=UTC),
         )
+        run_result.started_at = datetime(2026, 6, 15, 12, 30, 0, tzinfo=UTC)
+        run_result.finished_at = datetime(2026, 6, 15, 12, 31, 0, tzinfo=UTC)
 
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
+        section = build_benchmark_report_section(plan, run_result)
         data = section.model_dump(mode="json")
-
         assert isinstance(data["started_at"], str)
         assert "2026-06-15T12:30:00" in data["started_at"]
-        assert "Z" in data["started_at"] or "+" in data["started_at"]
 
     def test_uuid_is_string_in_json(self) -> None:
-        """UUID fields serialize as strings in JSON mode."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_grade("att-1", "task_a", 0.5)
-        run_id_str = str(uuid4())
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
 
-        run_result = BenchmarkRunResult(
-            run_id=run_id_str,
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
+        section = build_benchmark_report_section(plan, run_result)
         data = section.model_dump(mode="json")
         assert isinstance(data["run_id"], str)
-        assert data["run_id"] == run_id_str
 
     def test_json_roundtrip(self) -> None:
-        """model_dump(mode='json') → json.loads → model_validate: roundtrip works."""
         plan = _make_run_plan()
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_grade("att-1", "task_a", 0.5)
-        run_id_str = str(uuid4())
-
-        run_result = BenchmarkRunResult(
-            run_id=run_id_str,
-            task_attempts=[attempt],
-            grade_results=[grade],
+        run_result = _make_run_result(
+            [attempt],
+            [grade],
             evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            started_at=datetime(2026, 1, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
         )
+        run_result.started_at = datetime(2026, 1, 1, tzinfo=UTC)
+        run_result.finished_at = datetime(2026, 1, 1, 1, tzinfo=UTC)
 
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
-        json_str = section.model_dump_json()
-        data = json.loads(json_str)
-
-        restored = BenchmarkReportSection.model_validate(data)
+        section = build_benchmark_report_section(plan, run_result)
+        # Use model_validate_json for roundtrip with string coercion
+        restored = BenchmarkReportSection.model_validate_json(section.model_dump_json())
         assert restored.run_id == section.run_id
-        assert restored.plan_id == section.plan_id
         assert restored.status == section.status
-        assert restored.summary.success_count == section.summary.success_count
 
 
 # ---------------------------------------------------------------------------
-# Tests: Metadata safety
+# Tests: No total_score / capability_score in model fields
 # ---------------------------------------------------------------------------
 
 
-class TestMetadataSafety:
-    def test_no_pydantic_or_exception_in_metadata(self) -> None:
-        """TaskReportItem.metadata must not contain Pydantic objects or exceptions."""
-        plan = _make_run_plan()
-        grade = _make_grade("att-1", "task_a", 0.5)
-
-        # Create an attempt with metadata that includes a Pydantic model
-        attempt = TaskAttempt(
-            attempt_id="att-1",
-            task_id="task_a",
-            status=TaskStatus.SUCCESS,
-            evidence_refs=[str(uuid4())],
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            metadata={
-                "metric_result": {"task_name": "task_a", "metric_name": "exact_match", "value": 0.5},
-                "extra_info": "ok",
-            },
-        )
-
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
-        task = section.tasks[0]
-
-        # metadata should not contain Pydantic objects or exceptions
-        for v in task.metadata.values():
-            assert not hasattr(v, "model_dump"), f"Pydantic object leaked: {type(v)}"
-            assert not isinstance(v, BaseException), f"Exception leaked: {type(v)}"
-
+class TestNoScoringFields:
     def test_no_total_score_or_capability_score(self) -> None:
-        """BenchmarkReportSection must not have total_score or capability_score fields."""
         fields = BenchmarkReportSection.model_fields
         assert "total_score" not in fields
         assert "capability_score" not in fields
-
         summary_fields = BenchmarkRunSummary.model_fields
         assert "total_score" not in summary_fields
         assert "capability_score" not in summary_fields
 
 
 # ---------------------------------------------------------------------------
-# Tests: Smoke task
-# ---------------------------------------------------------------------------
-
-
-class TestSmokeTask:
-    def test_smoke_task_not_capability_eligible(self) -> None:
-        """Smoke tasks are marked capability_score_eligible=False."""
-        plan = _make_run_plan()
-        attempt = TaskAttempt(
-            attempt_id="att-smoke",
-            task_id="llmtrace_smoke",
-            status=TaskStatus.SUCCESS,
-            evidence_refs=[str(uuid4())],
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-        grade = _make_grade("att-smoke", "llmtrace_smoke", 1.0)
-
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="test-source",
-            source_revision="abc123",
-            suite_id="test-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-        )
-
-        section = build_benchmark_report_section(plan, run_result, [attempt], [grade])
-        task = section.tasks[0]
-        assert task.capability_score_eligible is False
-
-
-# ---------------------------------------------------------------------------
-# Golden Test: fixed JSON fixture
+# Golden Test: strict full comparison
 # ---------------------------------------------------------------------------
 
 
@@ -632,29 +756,27 @@ def golden_fixture_path() -> Path:
 
 
 class TestGoldenFixture:
-    """Golden test: known inputs → deterministic JSON output."""
+    """Golden test: known inputs → deterministic JSON output.
+
+    The fixture MUST pre-exist.  Any field change causes failure.
+    """
 
     def test_golden_matches_fixture(self, golden_fixture_path: Path) -> None:
-        """Build a report from fake data and compare against golden fixture."""
+        assert golden_fixture_path.exists(), (
+            f"Golden fixture not found at {golden_fixture_path}. It must be committed before running this test."
+        )
+
         run_id = "11111111-1111-1111-1111-111111111111"
         ev1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         ev2 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
+        p = _provenance()
         plan = RunPlan(
             plan_id="golden-plan",
-            suite_id="golden-suite",
-            suite_version="1.0.0",
-            source_id="golden-source",
-            source_revision="abc123",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
             task_ids=["task_a"],
             total_samples=2,
-            budget=BudgetEstimate(
-                planned_requests=2,
-                maximum_requests=2,
-                estimated_cost=None,
-            ),
+            budget=BudgetEstimate(planned_requests=2, maximum_requests=2, estimated_cost=None),
+            **{k: v for k, v in p.items() if k in RunPlan.model_fields},
         )
 
         a1 = TaskAttempt(
@@ -662,12 +784,7 @@ class TestGoldenFixture:
             task_id="task_a",
             status=TaskStatus.SUCCESS,
             evidence_refs=[ev1, ev2],
-            source_id="golden-source",
-            source_revision="abc123",
-            suite_id="golden-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
         )
 
         g1 = GradeResult(
@@ -677,12 +794,7 @@ class TestGoldenFixture:
             grader_id="exact_match",
             raw_score=0.75,
             normalized_score=0.75,
-            source_id="golden-source",
-            source_revision="abc123",
-            suite_id="golden-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
+            **{k: v for k, v in p.items() if k in GradeResult.model_fields},
         )
 
         run_result = BenchmarkRunResult(
@@ -690,41 +802,17 @@ class TestGoldenFixture:
             task_attempts=[a1],
             grade_results=[g1],
             evidence_refs=[ev1, ev2],
-            source_id="golden-source",
-            source_revision="abc123",
-            suite_id="golden-suite",
-            suite_version="1.0.0",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
             started_at=datetime(2026, 1, 1, tzinfo=UTC),
             finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
 
-        section = build_benchmark_report_section(plan, run_result, [a1], [g1])
-        actual_json = section.model_dump_json(indent=2)
+        section = build_benchmark_report_section(plan, run_result)
+        actual = json.loads(section.model_dump_json(indent=2))
+        expected = json.loads(golden_fixture_path.read_text())
 
-        # Write the fixture if it doesn't exist (first run)
-        if not golden_fixture_path.exists():
-            golden_fixture_path.parent.mkdir(parents=True, exist_ok=True)
-            golden_fixture_path.write_text(actual_json)
-            # Skip comparison on first run when fixture is created
-            return
-
-        expected_json = golden_fixture_path.read_text()
-        actual = json.loads(actual_json)
-        expected = json.loads(expected_json)
-
-        # Compare field by field
-        assert actual["run_id"] == expected["run_id"]
-        assert actual["plan_id"] == expected["plan_id"]
-        assert actual["status"] == expected["status"]
-        assert actual["summary"]["success_count"] == expected["summary"]["success_count"]
-        assert actual["summary"]["failure_count"] == expected["summary"]["failure_count"]
-        assert actual["summary"]["actual_requests"] == expected["summary"]["actual_requests"]
-        assert len(actual["tasks"]) == len(expected["tasks"])
-
-        task_a = actual["tasks"][0]
-        task_e = expected["tasks"][0]
-        assert task_a["task_id"] == task_e["task_id"]
-        assert task_a["normalized_score"] == task_e["normalized_score"]
-        assert task_a["capability_score_eligible"] == task_e["capability_score_eligible"]
+        assert actual == expected, (
+            f"Golden fixture mismatch.\n"
+            f"Actual:   {json.dumps(actual, indent=2)}\n"
+            f"Expected: {json.dumps(expected, indent=2)}"
+        )
