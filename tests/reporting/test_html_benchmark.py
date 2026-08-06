@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,6 +19,8 @@ from llmtrace.benchmarks.models import (
     TaskAttempt,
     TaskStatus,
 )
+from llmtrace.config import AuditConfig, AuthStyle, Protocol
+from llmtrace.models.audit import AuditResult, RiskLevel
 from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
 from llmtrace.reporting.html_report import generate_html_report
 from tests.reporting.test_json_report_integration import (
@@ -487,3 +490,62 @@ class TestHtmlWithBenchmarks:
         # Escaped versions must appear
         assert "&lt;img" in html
         assert "&lt;svg" in html
+
+    # --- XSS: warning field ---
+
+    def test_xss_in_warning_field(self) -> None:
+        """XSS in 'warnings' list is escaped."""
+        result = _make_minimal_audit_result()
+        section = _make_benchmark_section()
+        xss = '<script>alert("warning")</script>'
+        section_xss = section.model_copy(update={"warnings": [xss]})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section_xss])
+            html = output_path.read_text()
+
+        assert "<script>alert" not in html
+        assert "&lt;script&gt;" in html
+        assert "&amp;lt;script&amp;gt;" not in html
+
+    # --- XSS: report_id field ---
+
+    def test_xss_in_report_id_field(self) -> None:
+        """XSS in AuditResult.report_id is escaped."""
+        xss = '<img src=x onerror=alert("report")>'
+        result = AuditResult(
+            config=AuditConfig(
+                protocol=Protocol.OPENAI,
+                base_url="https://api.example.com",
+                model="test-model",
+                api_key_env="TEST_KEY",
+                auth_style=AuthStyle.BEARER,
+                repeat_count=1,
+                timeout=30.0,
+                max_output_tokens=100,
+                check_streaming=False,
+            ),
+            evidence=[],
+            findings=[],
+            risk_level=RiskLevel.INCONCLUSIVE,
+            schema_fingerprints=[],
+            model_list=[],
+            start_time=datetime(2026, 1, 1, tzinfo=UTC),
+            end_time=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            llmtrace_version="0.2.0",
+            python_version="3.12",
+            platform="darwin",
+            report_id=xss,
+            content_hash="",
+        )
+        section = _make_benchmark_section()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            html = output_path.read_text()
+
+        assert "<img src=x" not in html
+        assert "&lt;img" in html
+        assert "&amp;lt;img" not in html

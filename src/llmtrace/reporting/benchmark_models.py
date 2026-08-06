@@ -171,13 +171,18 @@ class TaskReportItem(BaseModel):
     @field_validator("metadata", mode="before")
     @classmethod
     def _validate_metadata_json_safe(cls, v: object) -> object:
-        """Validate metadata values through the shared json_safety module."""
+        """Validate metadata values through the shared json_safety module.
+
+        Accepts any Mapping (e.g. dict, MappingProxyType) and returns a plain dict.
+        """
+        from collections.abc import Mapping
+
         from llmtrace.reporting.json_safety import validate_json_mapping
 
-        if not isinstance(v, dict):
-            raise ValueError(f"metadata must be a dict, got {type(v).__name__}")
+        if not isinstance(v, Mapping):
+            raise ValueError(f"metadata must be a Mapping, got {type(v).__name__}")
         validate_json_mapping(v)
-        return v
+        return dict(v)
 
 
 # ---------------------------------------------------------------------------
