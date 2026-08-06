@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from jinja2 import Environment, PackageLoader, select_autoescape
@@ -9,6 +10,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 from llmtrace.analysis.risk import risk_explanation
 from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
+from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.security.redaction import sanitize_for_html
 
 
@@ -40,7 +42,11 @@ def _escape_evidence(ev: HTTPEvidence) -> dict[str, object]:
     }
 
 
-def generate_html_report(result: AuditResult, output_path: Path) -> Path:
+def generate_html_report(
+    result: AuditResult,
+    output_path: Path,
+    benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
+) -> Path:
     """生成 HTML 报告."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -55,6 +61,78 @@ def generate_html_report(result: AuditResult, output_path: Path) -> Path:
     token_evidence = [e for e in evidence if e.input_tokens is not None and e.output_tokens is not None]
     rid_evidence = [e for e in evidence if e.response_id is not None]
     models = {e.response_model for e in evidence if e.response_model}
+
+    # 构建 Benchmark 数据
+    benchmark_data: list[dict[str, object]] = []
+    if benchmark_sections:
+        _status_class_map = {
+            "success": "status-pass",
+            "partial_failure": "status-warn",
+            "failure": "status-fail",
+            "incomplete": "status-warn",
+            "skipped": "status-warn",
+        }
+        for section in benchmark_sections:
+            section_dict = section.model_dump(mode="json")
+
+            # Computed display fields
+            section_dict["status_class"] = _status_class_map.get(section.status.value, "status-warn")
+            section_dict["started_at_display"] = (
+                sanitize_for_html(section.started_at.isoformat()) if section.started_at else "N/A"
+            )
+            section_dict["finished_at_display"] = (
+                sanitize_for_html(section.finished_at.isoformat()) if section.finished_at else "N/A"
+            )
+            if section.estimated_cost is not None:
+                section_dict["estimated_cost_display"] = sanitize_for_html(f"${section.estimated_cost:.6f}")
+            else:
+                section_dict["estimated_cost_display"] = "未估算"
+
+            # Sanitize text fields on the section
+            for _field in (
+                "suite_id",
+                "suite_version",
+                "source_id",
+                "source_revision",
+                "adapter_id",
+                "adapter_version",
+            ):
+                section_dict[_field] = sanitize_for_html(str(section_dict[_field]))
+
+            # Build per-task display data
+            tasks_display: list[dict[str, object]] = []
+            for task in section.tasks:
+                task_dict: dict[str, object] = task.model_dump(mode="json")
+
+                task_dict["status_class"] = _status_class_map.get(task.status.value, "status-warn")
+
+                if task.raw_score is not None:
+                    task_dict["score_display"] = task.raw_score
+                else:
+                    task_dict["score_display"] = "N/A"
+
+                if task.failure:
+                    task_dict["failure_display"] = sanitize_for_html(
+                        f"[{task.failure.error_code}] {task.failure.message}"
+                    )
+                else:
+                    task_dict["failure_display"] = None
+
+                if task.evidence_refs:
+                    task_dict["evidence_refs_display"] = sanitize_for_html(", ".join(task.evidence_refs))
+                else:
+                    task_dict["evidence_refs_display"] = "N/A"
+
+                task_dict["is_smoke"] = not task.capability_score_eligible
+
+                # Sanitize task text fields
+                task_dict["task_id"] = sanitize_for_html(task.task_id)
+                task_dict["grader_id"] = sanitize_for_html(task.grader_id or "")
+
+                tasks_display.append(task_dict)
+
+            section_dict["tasks"] = tasks_display
+            benchmark_data.append(section_dict)
 
     html = template.render(
         report_id=result.report_id,
@@ -88,6 +166,7 @@ def generate_html_report(result: AuditResult, output_path: Path) -> Path:
         fingerprints=result.schema_fingerprints,
         token_rate=f"{len(token_evidence)}/{len(evidence)}" if evidence else "N/A",
         rid_rate=f"{len(rid_evidence)}/{len(evidence)}" if evidence else "N/A",
+        benchmarks=benchmark_data,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:

@@ -120,7 +120,58 @@
 </details>
 {% endfor %}
 
+{% if benchmarks %}
+<h2>7. 能力评测</h2>
+{% for bm in benchmarks %}
+  <div class="benchmark-section">
+    <h3>{{ bm.suite_id }} {{ bm.suite_version }}</h3>
+    <div class="meta">
+      <p>Source: {{ bm.source_id }} / {{ bm.source_revision }}</p>
+      <p>Adapter: {{ bm.adapter_id }} {{ bm.adapter_version }}</p>
+      <p>Started: {{ bm.started_at_display }} | Finished: {{ bm.finished_at_display }}</p>
+    </div>
+    <table>
+      <tr><th>项目</th><th>值</th></tr>
+      <tr><td>Status</td><td class="{{ bm.status_class }}">[{{ bm.status }}]</td></tr>
+      <tr><td>Planned Requests</td><td>{{ bm.planned_requests }}</td></tr>
+      <tr><td>Maximum Requests</td><td>{{ bm.maximum_requests }}</td></tr>
+      <tr><td>Actual Requests</td><td>{{ bm.actual_requests }}</td></tr>
+      <tr><td>Estimated Cost</td><td>{{ bm.estimated_cost_display }}</td></tr>
+    </table>
+
+    <h4>Tasks</h4>
+    <table>
+      <tr><th>Task ID</th><th>Status</th><th>Grader</th><th>Score</th><th>Evidence</th><th>Failure</th></tr>
+      {% for task in bm.tasks %}
+      <tr>
+        <td>{{ task.task_id }}{% if task.is_smoke %} <span style="color:#757575;">(smoke)</span>{% endif %}</td>
+        <td class="{{ task.status_class }}">{{ task.status }}</td>
+        <td>{{ task.grader_id or 'N/A' }}</td>
+        <td>{{ task.score_display }}</td>
+        <td><span title="{{ task.evidence_refs_display }}">{{ task.evidence_refs | length }}</span></td>
+        <td>{{ task.failure_display or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <div class="disclaimer" style="margin-top:8px;">
+      <strong>注意：</strong>本能力评测基于受控测试执行，不构成模型身份结论或模型排名。综合能力分数尚未计算。
+      {% if bm.warnings %}
+      <br><strong>Warnings:</strong> {{ bm.warnings | join('; ') }}
+      {% endif %}
+    </div>
+    {% for task in bm.tasks %}
+      {% if task.is_smoke %}
+      <p style="font-size:0.85em;color:#757575;">适配器集成验证，不计入正式能力评分</p>
+      {% endif %}
+    {% endfor %}
+  </div>
+{% endfor %}
+
+<h2>8. 限制和免责声明</h2>
+{% else %}
 <h2>7. 限制和免责声明</h2>
+{% endif %}
 <div class="disclaimer">
   <h3>重要限制</h3>
   <ul>

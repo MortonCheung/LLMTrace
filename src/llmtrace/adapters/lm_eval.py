@@ -63,6 +63,13 @@ _KNOWN_TASKS: dict[str, TaskSpec] = {
 }
 
 
+def _make_smoke_metadata(**extra: object) -> dict[str, object]:
+    """Build metadata dict with mandatory smoke task flag."""
+    meta: dict[str, object] = {"llmtrace_smoke_task": True}
+    meta.update(extra)
+    return meta
+
+
 class LmEvalAdapter(BenchmarkAdapter):
     """Adapter for lm-evaluation-harness tasks.
 
@@ -215,6 +222,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                     adapter_version=self.adapter_version,
                     status=TaskStatus.FAILURE,
                     evidence_refs=evidence_refs,
+                    metadata=_make_smoke_metadata(),
                     failure=AdapterFailure(
                         error_code="LM_EVAL_OPTIONS_INCONSISTENT",
                         category=FailureCategory.ADAPTER,
@@ -241,6 +249,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                     adapter_version=self.adapter_version,
                     status=TaskStatus.FAILURE,
                     evidence_refs=evidence_refs,
+                    metadata=_make_smoke_metadata(),
                     failure=AdapterFailure(
                         error_code="LM_EVAL_RESULT_INVALID",
                         category=FailureCategory.ADAPTER,
@@ -264,9 +273,9 @@ class LmEvalAdapter(BenchmarkAdapter):
                 adapter_version=self.adapter_version,
                 status=TaskStatus.SUCCESS,
                 evidence_refs=evidence_refs,
-                metadata={
-                    "metric_result": metric_result.model_dump(),
-                },
+                metadata=_make_smoke_metadata(
+                    metric_result=metric_result.model_dump(),
+                ),
             )
 
         except ProviderEvidenceError as exc:
@@ -282,6 +291,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
                 evidence_refs=evidence_refs,
+                metadata=_make_smoke_metadata(),
                 failure=AdapterFailure(
                     error_code=exc.error_code,
                     category=exc.category,
@@ -306,6 +316,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
+                metadata=_make_smoke_metadata(),
                 failure=AdapterFailure(
                     error_code="LM_EVAL_SETUP_ERROR",
                     category=FailureCategory.ADAPTER,
@@ -326,6 +337,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
+                metadata=_make_smoke_metadata(),
                 failure=AdapterFailure(
                     error_code="LM_EVAL_RUN_ERROR",
                     category=FailureCategory.ADAPTER,

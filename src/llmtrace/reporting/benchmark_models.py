@@ -23,7 +23,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Report-specific enums
@@ -167,6 +167,15 @@ class TaskReportItem(BaseModel):
     failure: FailureReportItem | None = Field(default=None)
     capability_score_eligible: bool = Field(default=True, description="False for smoke/infrastructure tasks")
     metadata: dict[str, Any] = Field(default_factory=dict, description="JSON-safe metadata (validated at runtime)")
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata_json_safe(cls, v: dict[str, Any]) -> dict[str, Any]:
+        """Validate metadata values through the shared json_safety module."""
+        from llmtrace.reporting.json_safety import validate_json_mapping
+
+        validate_json_mapping(v)
+        return v
 
 
 # ---------------------------------------------------------------------------
