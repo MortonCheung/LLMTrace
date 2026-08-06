@@ -7,17 +7,20 @@ that is ready for JSON serialization.
 Mapping rules:
 1. GradeResult is joined to TaskAttempt by attempt_id (1:1).
 2. Duplicate GradeResult for the same attempt_id raises ValueError.
-3. Only GRADE == GRADED allows raw_score / normalized_score.
-4. SUCCESS attempt without GradeResult → ungraded (no fake scores).
-5. FAILURE attempt → raw_score=None, normalized_score=None, failure preserved.
-6. UNGRADABLE/ERROR GradeResult → scores None, grade_status preserved.
-7. Evidence UUIDs flow through as strings.
-8. actual_requests prioritizes run_result.evidence_refs count.
-9. planned/maximum_requests come from plan.budget.
-10. estimated_cost=None stays None.
-11. No total_score, capability_score, or dimension aggregation.
-12. Provenance must be consistent across plan, run_result, and all children.
-13. Task IDs must exist in plan.task_ids.
+3. ONLY TaskStatus.SUCCESS may carry a GradeResult; anything else
+   (FAILURE/SKIPPED/PENDING/RUNNING) with a GradeResult → ValueError.
+4. Only GradeStatus.GRADED allows raw_score / normalized_score.
+5. SUCCESS without GradeResult → ungraded (no fake scores).
+6. FAILURE attempt → raw_score=None, normalized_score=None.
+7. UNGRADABLE/ERROR GradeResult → scores None, grade_status preserved.
+8. Orphan GradeResult (no matching TaskAttempt) → ValueError.
+9. Evidence UUIDs flow through as strings.
+10. actual_requests prioritizes run_result.evidence_refs count.
+11. planned/maximum_requests come from plan.budget.
+12. estimated_cost=None stays None.
+13. No total_score, capability_score, or dimension aggregation.
+14. Provenance must be consistent across plan, run_result, and all children.
+15. Task IDs must exist in plan.task_ids.
 """
 
 from __future__ import annotations
@@ -39,12 +42,12 @@ from llmtrace.reporting.benchmark_models import (
     BenchmarkReportStatus,
     BenchmarkRunSummary,
     FailureReportItem,
-    JsonSafeScalar,
     ReportFailureCategory,
     ReportGradeStatus,
     TaskReportItem,
     TaskReportStatus,
 )
+from llmtrace.reporting.json_safety import validate_json_mapping
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -69,7 +72,8 @@ def build_benchmark_report_section(
         A fully populated BenchmarkReportSection.
 
     Raises:
-        ValueError: On provenance mismatch, duplicate grades, missing task IDs, etc.
+        ValueError: On provenance mismatch, duplicate grades, missing task IDs,
+                    orphan GradeResult, grading a non-SUCCESS attempt, etc.
     """
     # ---------- Provenance validation ----------
     _validate_plan_run_result_provenance(plan, run_result)
@@ -107,8 +111,18 @@ def build_benchmark_report_section(
                 f"which is not in plan.task_ids={list(plan.task_ids)}"
             )
 
-        # Validate GradeResult.task_id matches
+        # Get and pop the grade
         grade: GradeResult | None = grade_by_attempt.pop(attempt.attempt_id, None)
+
+        # Strict grading: only SUCCESS may carry a GradeResult
+        if grade is not None and attempt.status != TaskStatus.SUCCESS:
+            raise ValueError(
+                f"TaskAttempt '{attempt.attempt_id}' has status={attempt.status.value} "
+                f"but a GradeResult (grade_id='{grade.grade_id}') is attached. "
+                f"Only TaskStatus.SUCCESS may carry a GradeResult."
+            )
+
+        # Validate GradeResult.task_id matches
         if grade is not None and grade.task_id != attempt.task_id:
             raise ValueError(
                 f"GradeResult.task_id='{grade.task_id}' does not match "
@@ -134,10 +148,10 @@ def build_benchmark_report_section(
         if grade is not None and grade.status in (GradeStatus.UNGRADABLE, GradeStatus.ERROR):
             ungradable_count += 1
 
-    # ---------- Orphan GradeResults ----------
+    # ---------- Orphan GradeResults → ValueError ----------
     if grade_by_attempt:
         orphan_ids = sorted(grade_by_attempt.keys())
-        warnings.append(f"Orphan GradeResults (no matching TaskAttempt): {orphan_ids}")
+        raise ValueError(f"Orphan GradeResult(s) with no matching TaskAttempt: attempt_ids={orphan_ids}")
 
     # ---------- actual_requests ----------
     actual_requests = len(run_result.evidence_refs)
@@ -227,18 +241,17 @@ def _validate_plan_run_result_provenance(plan: RunPlan, run_result: BenchmarkRun
 
 def _validate_provenance(parent: BenchmarkRunResult, child: BenchmarkProvenance, label: str) -> None:
     """Validate that a child (TaskAttempt or GradeResult) shares provenance with run_result."""
-    if child.suite_id != parent.suite_id:
-        raise ValueError(f"{label} suite_id mismatch: '{child.suite_id}' != '{parent.suite_id}'")
-    if child.suite_version != parent.suite_version:
-        raise ValueError(f"{label} suite_version mismatch: '{child.suite_version}' != '{parent.suite_version}'")
-    if child.source_id != parent.source_id:
-        raise ValueError(f"{label} source_id mismatch: '{child.source_id}' != '{parent.source_id}'")
-    if child.source_revision != parent.source_revision:
-        raise ValueError(f"{label} source_revision mismatch: '{child.source_revision}' != '{parent.source_revision}'")
-    if child.adapter_id != parent.adapter_id:
-        raise ValueError(f"{label} adapter_id mismatch: '{child.adapter_id}' != '{parent.adapter_id}'")
-    if child.adapter_version != parent.adapter_version:
-        raise ValueError(f"{label} adapter_version mismatch: '{child.adapter_version}' != '{parent.adapter_version}'")
+    checks = [
+        ("suite_id", child.suite_id, parent.suite_id),
+        ("suite_version", child.suite_version, parent.suite_version),
+        ("source_id", child.source_id, parent.source_id),
+        ("source_revision", child.source_revision, parent.source_revision),
+        ("adapter_id", child.adapter_id, parent.adapter_id),
+        ("adapter_version", child.adapter_version, parent.adapter_version),
+    ]
+    for field_name, child_val, parent_val in checks:
+        if child_val != parent_val:
+            raise ValueError(f"{label} {field_name} mismatch: '{child_val}' != '{parent_val}'")
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +266,7 @@ def _build_task_item(
 ) -> TaskReportItem:
     """Build a single TaskReportItem from a TaskAttempt and optional GradeResult."""
 
-    # Smoke task eligibility via explicit metadata key, not name guessing
+    # Smoke task eligibility via explicit metadata flag
     capability_eligible = not _is_smoke_task_from_metadata(attempt)
 
     # Status mapping
@@ -270,7 +283,7 @@ def _build_task_item(
     if attempt.failure is not None:
         failure_item = _build_failure_item(attempt)
 
-    # Grade fields — only GRADED yields scores
+    # Grade fields — only GRADED on SUCCESS yields scores
     grader_id: str | None = None
     grade_status: ReportGradeStatus | None = None
     raw_score: float | None = None
@@ -295,8 +308,8 @@ def _build_task_item(
             f"SUCCESS but has no matching GradeResult — marked ungraded."
         )
 
-    # Recursive JSON-safe metadata
-    safe_metadata: dict[str, object] = _sanitize_metadata(attempt.metadata)
+    # Validate metadata via json_safety module
+    validate_json_mapping(attempt.metadata)
 
     return TaskReportItem(
         task_id=attempt.task_id,
@@ -309,7 +322,7 @@ def _build_task_item(
         evidence_refs=list(attempt.evidence_refs),
         failure=failure_item,
         capability_score_eligible=capability_eligible,
-        metadata=safe_metadata,
+        metadata=dict(attempt.metadata),
     )
 
 
@@ -329,11 +342,9 @@ def _build_failure_item(attempt: TaskAttempt) -> FailureReportItem:
     for k, v in attempt.failure.details.items():
         if not isinstance(k, str):
             continue
-        # Redact sensitive keys
         if _is_sensitive_key(k):
             safe_details[k] = "<REDACTED>"
             continue
-        # Only accept JSON-scalar values
         if isinstance(v, bool | int | float | str):
             safe_details[k] = str(v)
         elif v is None:
@@ -346,65 +357,6 @@ def _build_failure_item(attempt: TaskAttempt) -> FailureReportItem:
         retryable=attempt.failure.retryable,
         safe_details=safe_details,
     )
-
-
-# ---------------------------------------------------------------------------
-# JSON-safe metadata sanitization
-# ---------------------------------------------------------------------------
-
-# Types that are explicitly forbidden and must be rejected (not str() converted)
-_FORBIDDEN_METADATA_TYPES = (bytes, set, tuple, frozenset, bytearray)
-
-
-def _sanitize_metadata(raw: dict[str, object]) -> dict[str, object]:
-    """Recursively clean metadata into JSON-safe types only.
-
-    Allows: None, bool, int, float, str, list[...], dict[str, ...]
-    Rejects (ValueError): Pydantic BaseModel, BaseException, bytes, set, tuple,
-                          custom objects, nested non-JSON types.
-    """
-    result: dict[str, object] = {}
-    for k, v in raw.items():
-        result[k] = _sanitize_value(v, path=f"metadata['{k}']")
-    return result
-
-
-def _sanitize_value(value: object, path: str = "metadata") -> JsonSafeScalar | list[object] | dict[str, object]:
-    """Recursively sanitize a single value into JsonSafeValue.
-
-    Raises ValueError for forbidden types.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return value
-    if isinstance(value, str):
-        return value
-
-    # Reject forbidden container types
-    if isinstance(value, _FORBIDDEN_METADATA_TYPES):
-        raise ValueError(f"{path}: forbidden type {type(value).__name__} — not JSON-safe")
-
-    # Reject Pydantic BaseModel instances
-    if hasattr(value, "model_dump"):
-        raise ValueError(f"{path}: Pydantic model {type(value).__name__} — not allowed in metadata")
-
-    # Reject exceptions
-    if isinstance(value, BaseException):
-        raise ValueError(f"{path}: Exception {type(value).__name__} — not allowed in metadata")
-
-    # Reject arbitrary custom objects (anything not in allowed categories)
-    if isinstance(value, list):
-        return [_sanitize_value(item, path=f"{path}[{i}]") for i, item in enumerate(value)]
-
-    if isinstance(value, dict):
-        return {str(dk): _sanitize_value(dv, path=f"{path}.{dk}") for dk, dv in value.items()}
-
-    raise ValueError(f"{path}: unknown type {type(value).__name__} — not JSON-safe")
 
 
 # ---------------------------------------------------------------------------
@@ -423,14 +375,7 @@ def _is_sensitive_key(key: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-_SMOKE_METADATA_KEY = "llmtrace_smoke_task"
-
-
 def _is_smoke_task_from_metadata(attempt: TaskAttempt) -> bool:
-    """Detect smoke tasks via explicit metadata flag, not name guessing.
-
-    A task is a smoke task if its metadata contains:
-      {"llmtrace_smoke_task": True}
-    """
-    flag = attempt.metadata.get(_SMOKE_METADATA_KEY)
+    """Detect smoke tasks via explicit metadata flag."""
+    flag = attempt.metadata.get("llmtrace_smoke_task")
     return flag is True

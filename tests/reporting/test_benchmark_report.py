@@ -32,6 +32,7 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 
+from llmtrace.adapters.lm_eval import LmEvalAdapter
 from llmtrace.benchmarks.models import (
     AdapterFailure,
     BenchmarkRunResult,
@@ -43,11 +44,14 @@ from llmtrace.benchmarks.models import (
     TaskAttempt,
     TaskStatus,
 )
+from llmtrace.benchmarks.planner import build_plan
 from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
 from llmtrace.reporting.benchmark_models import (
     BenchmarkReportSection,
     BenchmarkRunSummary,
 )
+from llmtrace.reporting.json_safety import sanitize_json_value
+from tests.adapters.conftest import FakeProvider
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -743,6 +747,192 @@ class TestNoScoringFields:
         summary_fields = BenchmarkRunSummary.model_fields
         assert "total_score" not in summary_fields
         assert "capability_score" not in summary_fields
+
+
+# ---------------------------------------------------------------------------
+# Tests: Strict grading rules (only SUCCESS may carry a GradeResult)
+# ---------------------------------------------------------------------------
+
+
+class TestStrictGradingRules:
+    def test_failure_with_grade_raises(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_failure_attempt("att-1", "task_a")
+        grade = _make_grade("att-1", "task_a")
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+        with pytest.raises(ValueError, match="Only TaskStatus.SUCCESS"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_skipped_with_grade_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.SKIPPED,
+            evidence_refs=[],
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = _make_grade("att-1", "task_a")
+        run_result = _make_run_result([attempt], [grade])
+        with pytest.raises(ValueError, match="Only TaskStatus.SUCCESS"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_pending_with_grade_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.PENDING,
+            evidence_refs=[],
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = _make_grade("att-1", "task_a")
+        run_result = _make_run_result([attempt], [grade])
+        with pytest.raises(ValueError, match="Only TaskStatus.SUCCESS"):
+            build_benchmark_report_section(plan, run_result)
+
+    def test_running_with_grade_raises(self) -> None:
+        plan = _make_run_plan()
+        p = _provenance()
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="task_a",
+            status=TaskStatus.RUNNING,
+            evidence_refs=[],
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = _make_grade("att-1", "task_a")
+        run_result = _make_run_result([attempt], [grade])
+        with pytest.raises(ValueError, match="Only TaskStatus.SUCCESS"):
+            build_benchmark_report_section(plan, run_result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Orphan GradeResult
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanGradeResult:
+    def test_orphan_grade_result_raises(self) -> None:
+        plan = _make_run_plan()
+        attempt = _make_success_attempt("att-1", "task_a")
+        grade = _make_grade("att-unmatched", "task_a")  # attempt_id not in attempts
+        run_result = _make_run_result([attempt], [grade], evidence_refs=attempt.evidence_refs)
+        with pytest.raises(ValueError, match="Orphan GradeResult"):
+            build_benchmark_report_section(plan, run_result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: sanitize_json_value direct (model-level)
+# ---------------------------------------------------------------------------
+
+
+class TestJsonSafetyModelLevel:
+    def test_non_string_dict_key_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-string dict key"):
+            sanitize_json_value({"key": "ok", 1: "bad"}, "test")
+
+    def test_datetime_raises(self) -> None:
+        with pytest.raises(ValueError, match="datetime-like type"):
+            sanitize_json_value(datetime.now(), "test")
+
+    def test_bytearray_raises(self) -> None:
+        with pytest.raises(ValueError, match="forbidden type"):
+            sanitize_json_value(bytearray(b"test"), "test")
+
+    def test_frozenset_raises(self) -> None:
+        with pytest.raises(ValueError, match="forbidden type"):
+            sanitize_json_value(frozenset([1, 2]), "test")
+
+    def test_legal_values_pass(self) -> None:
+        # None of these should raise
+        sanitize_json_value(None, "test")
+        sanitize_json_value(True, "test")
+        sanitize_json_value(42, "test")
+        sanitize_json_value(3.14, "test")
+        sanitize_json_value("hello", "test")
+        sanitize_json_value([1, "a", None], "test")
+        sanitize_json_value({"key": [1, 2]}, "test")
+
+
+# ---------------------------------------------------------------------------
+# Tests: Real smoke link (end-to-end via LmEvalAdapter)
+# ---------------------------------------------------------------------------
+
+
+class TestRealSmokeLink:
+    async def test_real_smoke_link(self) -> None:
+        pytest.importorskip("lm_eval")
+
+        # 1. Get the smoke task spec from LmEvalAdapter
+        adapter = LmEvalAdapter()
+        task_specs = adapter.list_tasks()
+        assert len(task_specs) == 1
+        smoke_spec = task_specs[0]
+
+        provider = FakeProvider(
+            response_map={
+                "LLMTRACE_OK": "LLMTRACE_OK",
+                "DETERMINISTIC": "DETERMINISTIC",
+                "ADAPTER_WORKS": "ADAPTER_WORKS",
+                "EVIDENCE_TRACED": "EVIDENCE_TRACED",
+            }
+        )
+
+        # 2. Build a plan using the shared planner
+        plan = build_plan(
+            suite_id="llmtrace_smoke",
+            suite_version="1.0.0",
+            source_id="lm-eval",
+            source_revision="0000000-smoke",
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+            tasks=[smoke_spec],
+        )
+
+        # 3. Run the smoke task via the adapter with the smoke_provider
+        attempt = await adapter.run_task(smoke_spec, provider)
+
+        # 4. Grade the result
+        grade = GradeResult(
+            grade_id=str(uuid4()),
+            attempt_id=attempt.attempt_id,
+            task_id=smoke_spec.task_id,
+            grader_id="exact_match",
+            raw_score=1.0,
+            normalized_score=1.0,
+            source_id="lm-eval",
+            source_revision="0000000-smoke",
+            suite_id="llmtrace_smoke",
+            suite_version="1.0.0",
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+        )
+
+        # 5. Build BenchmarkRunResult and report section
+        run_result = BenchmarkRunResult(
+            run_id=str(uuid4()),
+            task_attempts=[attempt],
+            grade_results=[grade],
+            evidence_refs=attempt.evidence_refs,
+            source_id="lm-eval",
+            source_revision="0000000-smoke",
+            suite_id="llmtrace_smoke",
+            suite_version="1.0.0",
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+        )
+
+        section = build_benchmark_report_section(plan, run_result)
+
+        # 6. Assert capability_score_eligible is False
+        task = section.tasks[0]
+        assert task.capability_score_eligible is False
+
+        # 7. Assert metadata contains "llmtrace_smoke_task": True
+        assert task.metadata.get("llmtrace_smoke_task") is True
 
 
 # ---------------------------------------------------------------------------
