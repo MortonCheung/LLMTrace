@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.1",
+  "report_id": "golden-report-id",
+  "meta": {
+    "llmtrace_version": "0.2.0",
+    "test_suite_version": "1.0",
+    "utc_time": "2026-01-01T00:00:00+00:00",
+    "local_timezone": "Asia/Shanghai",
+    "python_version": "3.12",
+    "platform": "darwin",
+    "report_id": "golden-report-id",
+    "config_summary": {
+      "protocol": "openai",
+      "base_url": "https://api.example.com",
+      "model": "test-model"
+    },
+    "probe_list": [],
+    "risk_level": "INCONCLUSIVE",
+    "schema_version": "1.1",
+    "content_hash": "555173e610bebe444b5d2ece634fac56b492dc14e2cee4169bc603ec6ef57b32"
+  },
+  "config": {
+    "protocol": "openai",
+    "base_url": "https://api.example.com",
+    "model": "test-model",
+    "api_key_env": "TEST_KEY",
+    "auth_style": "bearer",
+    "repeat_count": 1,
+    "timeout": 30.0,
+    "max_output_tokens": 100,
+    "check_streaming": false
+  },
+  "evidence": [],
+  "findings": [],
+  "risk_level": "INCONCLUSIVE",
+  "schema_fingerprints": [],
+  "model_list": [],
+  "model_list_available": false,
+  "model_in_list": null,
+  "benchmarks": [
+    {
+      "run_id": "00000000-0000-0000-0000-000000000007",
+      "plan_id": "e09d416da7dd85b1e0a0096a54b7d3e3aa927f324b8fd4d441822e5ff5db6753",
+      "suite_id": "llmtrace_smoke",
+      "suite_version": "1.0.0",
+      "source_id": "lm-eval",
+      "source_revision": "0000000-smoke",
+      "adapter_id": "lm-eval",
+      "adapter_version": "0.4.12",
+      "status": "success",
+      "started_at": null,
+      "finished_at": null,
+      "planned_requests": 4,
+      "maximum_requests": 4,
+      "actual_requests": 4,
+      "estimated_input_tokens": 2048,
+      "estimated_output_tokens": 1024,
+      "estimated_cost": null,
+      "tasks": [
+        {
+          "task_id": "llmtrace_smoke",
+          "attempt_id": "00000000-0000-0000-0000-000000000001",
+          "status": "success",
+          "grader_id": "exact_match",
+          "grade_status": "graded",
+          "raw_score": 1.0,
+          "normalized_score": 1.0,
+          "evidence_refs": [
+            "00000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000004",
+            "00000000-0000-0000-0000-000000000005"
+          ],
+          "failure": null,
+          "capability_score_eligible": false,
+          "metadata": {
+            "llmtrace_smoke_task": true,
+            "metric_result": {
+              "task_name": "llmtrace_smoke",
+              "metric_name": "exact_match",
+              "filter_name": "none",
+              "value": 1.0,
+              "fewshot": 0,
+              "lm_eval_version": "0.4.12",
+              "task_revision": "1.0",
+              "generation_options": {
+                "until": [
+                  "\n"
+                ],
+                "stop": null,
+                "temperature": 0.0,
+                "max_gen_toks": null,
+                "max_tokens": null,
+                "do_sample": false
+              }
+            }
+          }
+        }
+      ],
+      "summary": {
+        "planned_requests": 4,
+        "maximum_requests": 4,
+        "actual_requests": 4,
+        "success_count": 1,
+        "failure_count": 0,
+        "skip_count": 0,
+        "ungraded_count": 0,
+        "ungradable_count": 0,
+        "estimated_input_tokens": 2048,
+        "estimated_output_tokens": 1024,
+        "estimated_cost": null,
+        "warnings": []
+      },
+      "warnings": []
+    }
+  ],
+  "content_hash": "555173e610bebe444b5d2ece634fac56b492dc14e2cee4169bc603ec6ef57b32"
+}

@@ -929,6 +929,35 @@ class TestJsonSafetyModelLevel:
         )
         assert item.metadata == data
 
+    def test_mapping_proxy_type_passes(self) -> None:
+        """MappingProxyType (immutable Mapping) is accepted and converted to dict."""
+        from types import MappingProxyType
+
+        from llmtrace.reporting.benchmark_models import TaskReportItem, TaskReportStatus
+
+        data: dict[str, object] = {"key": "value", "num": 42}
+        proxy = MappingProxyType(data)
+        item = TaskReportItem(
+            task_id="test",
+            attempt_id="att-mp",
+            status=TaskReportStatus.SUCCESS,
+            metadata=proxy,
+        )
+        assert isinstance(item.metadata, dict)
+        assert item.metadata == dict(proxy)
+
+    def test_non_mapping_metadata_fails(self) -> None:
+        """Non-Mapping types must fail metadata validation."""
+        from llmtrace.reporting.benchmark_models import TaskReportItem, TaskReportStatus
+
+        with pytest.raises(ValueError, match="metadata must be a Mapping"):
+            TaskReportItem(
+                task_id="test",
+                attempt_id="att-1",
+                status=TaskReportStatus.SUCCESS,
+                metadata=[1, 2, 3],  # type: ignore[arg-type]
+            )
+
 
 # ---------------------------------------------------------------------------
 # Golden Test: strict full comparison
@@ -998,100 +1027,6 @@ class TestGoldenFixture:
 
         assert actual == expected, (
             f"Golden fixture mismatch.\n"
-            f"Actual:   {json.dumps(actual, indent=2)}\n"
-            f"Expected: {json.dumps(expected, indent=2)}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Smoke Golden Test: lm_eval smoke section fixture
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def smoke_golden_fixture_path() -> Path:
-    return Path(__file__).parent / "fixtures" / "lm_eval_smoke_report_golden.json"
-
-
-class TestSmokeGoldenFixture:
-    """Golden test: known smoke inputs → deterministic BenchmarkReportSection JSON.
-
-    The fixture MUST pre-exist.  Any field change causes failure.
-    """
-
-    def test_smoke_golden_matches_fixture(self, smoke_golden_fixture_path: Path) -> None:
-        assert smoke_golden_fixture_path.exists(), (
-            f"Smoke golden fixture not found at {smoke_golden_fixture_path}. "
-            f"It must be committed before running this test."
-        )
-
-        run_id = "11111111-1111-1111-1111-111111111111"
-        ev1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-        ev2 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-
-        p = {
-            "suite_id": "llmtrace_smoke",
-            "suite_version": "1.0.0",
-            "source_id": "lm-eval",
-            "source_revision": "0000000-smoke",
-            "adapter_id": "lm-eval",
-            "adapter_version": "0.4.12",
-        }
-
-        plan = RunPlan(
-            plan_id="smoke-golden-plan",
-            task_ids=["llmtrace_smoke"],
-            total_samples=4,
-            budget=BudgetEstimate(planned_requests=4, maximum_requests=4, estimated_cost=None),
-            **{k: v for k, v in p.items() if k in RunPlan.model_fields},
-        )
-
-        attempt = TaskAttempt(
-            attempt_id="attempt-smoke-001",
-            task_id="llmtrace_smoke",
-            status=TaskStatus.SUCCESS,
-            evidence_refs=[ev1, ev2],
-            metadata={
-                "llmtrace_smoke_task": True,
-                "metric_result": {
-                    "task_name": "llmtrace_smoke",
-                    "metric_name": "exact_match",
-                    "generation_options": {
-                        "temperature": 0.0,
-                        "until": ["\n"],
-                        "do_sample": False,
-                    },
-                },
-            },
-            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
-        )
-
-        grade = GradeResult(
-            grade_id="grade-smoke-001",
-            attempt_id="attempt-smoke-001",
-            task_id="llmtrace_smoke",
-            grader_id="exact_match",
-            raw_score=1.0,
-            normalized_score=1.0,
-            **{k: v for k, v in p.items() if k in GradeResult.model_fields},
-        )
-
-        run_result = BenchmarkRunResult(
-            run_id=run_id,
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=[ev1, ev2],
-            started_at=datetime(2026, 1, 1, tzinfo=UTC),
-            finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
-            **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
-        )
-
-        section = build_benchmark_report_section(plan, run_result)
-        actual = json.loads(section.model_dump_json(indent=2))
-        expected = json.loads(smoke_golden_fixture_path.read_text())
-
-        assert actual == expected, (
-            f"Smoke golden fixture mismatch.\n"
             f"Actual:   {json.dumps(actual, indent=2)}\n"
             f"Expected: {json.dumps(expected, indent=2)}"
         )
