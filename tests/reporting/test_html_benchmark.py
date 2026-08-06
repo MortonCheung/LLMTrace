@@ -12,6 +12,8 @@ from llmtrace.benchmarks.models import (
     BenchmarkRunResult,
     BudgetEstimate,
     FailureCategory,
+    GradeResult,
+    GradeStatus,
     RunPlan,
     TaskAttempt,
     TaskStatus,
@@ -266,3 +268,222 @@ class TestHtmlWithBenchmarks:
 
         assert "total_score" not in html
         assert "capability_score" not in html
+
+    def test_split_raw_normalized_scores(self) -> None:
+        """Raw Score and Normalized Score appear as separate table columns."""
+        result = _make_minimal_audit_result()
+        section = _make_benchmark_section()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            html = output_path.read_text()
+
+        assert "<th>Raw Score</th>" in html
+        assert "<th>Normalized Score</th>" in html
+
+    def test_raw_score_differs_from_normalized(self) -> None:
+        """When raw_score != normalized_score, both display their actual values."""
+        result = _make_minimal_audit_result()
+        p = _provenance()
+        ev_uuid = str(uuid4())
+        plan = RunPlan(
+            plan_id="diff-plan",
+            task_ids=["task_a"],
+            total_samples=2,
+            budget=BudgetEstimate(planned_requests=2, maximum_requests=2, estimated_cost=None),
+            **{k: v for k, v in p.items() if k in RunPlan.model_fields},
+        )
+        attempt = TaskAttempt(
+            attempt_id="att-diff",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[ev_uuid],
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        grade = GradeResult(
+            grade_id="grade-diff",
+            attempt_id="att-diff",
+            task_id="task_a",
+            grader_id="exact_match",
+            raw_score=0.8,
+            normalized_score=0.75,
+            status=GradeStatus.GRADED,
+            **{k: v for k, v in p.items() if k in GradeResult.model_fields},
+        )
+        rr = BenchmarkRunResult(
+            run_id=str(uuid4()),
+            task_attempts=[attempt],
+            grade_results=[grade],
+            evidence_refs=[ev_uuid],
+            **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
+        )
+        section = build_benchmark_report_section(plan, rr)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            html = output_path.read_text()
+
+        assert "0.8" in html
+        assert "0.75" in html
+
+    def test_none_score_not_displayed_as_zero(self) -> None:
+        """FAILURE task: raw_score=None should show N/A, not 0 or 0.0."""
+        result = _make_minimal_audit_result()
+        p = _provenance()
+        ev_uuid = str(uuid4())
+        plan = RunPlan(
+            plan_id="none-plan",
+            task_ids=["task_a"],
+            total_samples=1,
+            budget=BudgetEstimate(planned_requests=1, maximum_requests=1, estimated_cost=None),
+            **{k: v for k, v in p.items() if k in RunPlan.model_fields},
+        )
+        attempt = TaskAttempt(
+            attempt_id="att-none",
+            task_id="task_a",
+            status=TaskStatus.FAILURE,
+            evidence_refs=[ev_uuid],
+            failure=AdapterFailure(
+                error_code="ERR",
+                category=FailureCategory.ADAPTER,
+                message="fail",
+                retryable=False,
+            ),
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+        rr = BenchmarkRunResult(
+            run_id=str(uuid4()),
+            task_attempts=[attempt],
+            grade_results=[],
+            evidence_refs=[ev_uuid],
+            **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
+        )
+        section = build_benchmark_report_section(plan, rr)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            html = output_path.read_text()
+
+        # N/A must appear, no forged 0.0 in the task row
+        bm_match = re.search(r"<h2>7\. 能力评测</h2>(.*?)<h2>8\.", html, re.DOTALL)
+        assert bm_match is not None
+        bm_html = bm_match.group(1)
+        assert "N/A" in bm_html
+
+    def test_html_no_double_escaping(self) -> None:
+        """autoescape=True: no &amp;lt; double-escaping anywhere in benchmark section."""
+        result = _make_minimal_audit_result()
+        xss_value = "<script>alert(1)</script>"
+
+        xss_p = {
+            "suite_id": "test-suite",
+            "suite_version": "1.0.0",
+            "source_id": "test-source",
+            "source_revision": xss_value,
+            "adapter_id": "lm-eval",
+            "adapter_version": "0.4.12",
+        }
+        plan = RunPlan(
+            plan_id="xss-plan",
+            task_ids=[xss_value],
+            total_samples=1,
+            budget=BudgetEstimate(planned_requests=1, maximum_requests=1, estimated_cost=None),
+            **{k: v for k, v in xss_p.items() if k in RunPlan.model_fields},
+        )
+        attempt = TaskAttempt(
+            attempt_id=xss_value,
+            task_id=xss_value,
+            status=TaskStatus.FAILURE,
+            evidence_refs=[str(uuid4())],
+            failure=AdapterFailure(
+                error_code="ERR",
+                category=FailureCategory.PROVIDER,
+                message=xss_value,
+                retryable=False,
+            ),
+            **{k: v for k, v in xss_p.items() if k in TaskAttempt.model_fields},
+        )
+        rr = BenchmarkRunResult(
+            run_id=str(uuid4()),
+            task_attempts=[attempt],
+            grade_results=[],
+            evidence_refs=[str(uuid4())],
+            **{k: v for k, v in xss_p.items() if k in BenchmarkRunResult.model_fields},
+        )
+        section = build_benchmark_report_section(plan, rr)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            html = output_path.read_text()
+
+        # Raw tags must not appear
+        assert "<script>" not in html
+        assert "<img src=x" not in html
+        # Single escaping only: &lt; not &amp;lt;
+        assert "&lt;script&gt;" in html
+        assert "&amp;lt;" not in html
+
+    def test_xss_in_all_benchmark_fields(self) -> None:
+        """XSS vectors in suite_id, source_revision fields are escaped."""
+        result = _make_minimal_audit_result()
+        xss = "<img src=x onerror=alert(1)>"
+        xss_rev = "<svg onload=alert(1)>"
+
+        xss_p = {
+            "suite_id": xss,
+            "suite_version": "1.0.0",
+            "source_id": "test-source",
+            "source_revision": xss_rev,
+            "adapter_id": "lm-eval",
+            "adapter_version": "0.4.12",
+        }
+
+        plan = RunPlan(
+            plan_id="xss-fields",
+            task_ids=["task_a"],
+            total_samples=1,
+            budget=BudgetEstimate(planned_requests=1, maximum_requests=1, estimated_cost=None),
+            **{k: v for k, v in xss_p.items() if k in RunPlan.model_fields},
+        )
+        attempt = TaskAttempt(
+            attempt_id="att-xss-fields",
+            task_id="task_a",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[str(uuid4())],
+            **{k: v for k, v in xss_p.items() if k in TaskAttempt.model_fields},
+        )
+
+        grade = GradeResult(
+            grade_id="grade-xss-fields",
+            attempt_id="att-xss-fields",
+            task_id="task_a",
+            grader_id="exact_match",
+            raw_score=1.0,
+            normalized_score=1.0,
+            status=GradeStatus.GRADED,
+            **{k: v for k, v in xss_p.items() if k in GradeResult.model_fields},
+        )
+        rr = BenchmarkRunResult(
+            run_id=str(uuid4()),
+            task_attempts=[attempt],
+            grade_results=[grade],
+            evidence_refs=[str(uuid4())],
+            **{k: v for k, v in xss_p.items() if k in BenchmarkRunResult.model_fields},
+        )
+        section = build_benchmark_report_section(plan, rr)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            html = output_path.read_text()
+
+        # Raw XSS vectors must not appear
+        assert "<img src=x" not in html
+        assert "<svg onload=" not in html
+        # Escaped versions must appear
+        assert "&lt;img" in html
+        assert "&lt;svg" in html

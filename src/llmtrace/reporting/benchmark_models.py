@@ -168,12 +168,14 @@ class TaskReportItem(BaseModel):
     capability_score_eligible: bool = Field(default=True, description="False for smoke/infrastructure tasks")
     metadata: dict[str, Any] = Field(default_factory=dict, description="JSON-safe metadata (validated at runtime)")
 
-    @field_validator("metadata")
+    @field_validator("metadata", mode="before")
     @classmethod
-    def _validate_metadata_json_safe(cls, v: dict[str, Any]) -> dict[str, Any]:
+    def _validate_metadata_json_safe(cls, v: object) -> object:
         """Validate metadata values through the shared json_safety module."""
         from llmtrace.reporting.json_safety import validate_json_mapping
 
+        if not isinstance(v, dict):
+            raise ValueError(f"metadata must be a dict, got {type(v).__name__}")
         validate_json_mapping(v)
         return v
 
