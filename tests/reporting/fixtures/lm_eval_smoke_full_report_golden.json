@@ -17,7 +17,7 @@
     "probe_list": [],
     "risk_level": "INCONCLUSIVE",
     "schema_version": "1.1",
-    "content_hash": "555173e610bebe444b5d2ece634fac56b492dc14e2cee4169bc603ec6ef57b32"
+    "content_hash": "b5b989d1a29ee32f0c9af8453453a46c46f5bbf30a9c1f8dc66cac653839dfcc"
   },
   "config": {
     "protocol": "openai",
@@ -30,7 +30,168 @@
     "max_output_tokens": 100,
     "check_streaming": false
   },
-  "evidence": [],
+  "evidence": [
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000002",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 500.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "LLMTRACE_OK",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    },
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000003",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 799.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "DETERMINISTIC",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    },
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000004",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 99.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "ADAPTER_WORKS",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    },
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000005",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 400.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "EVIDENCE_TRACED",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    }
+  ],
   "findings": [],
   "risk_level": "INCONCLUSIVE",
   "schema_fingerprints": [],
@@ -114,5 +275,5 @@
       "warnings": []
     }
   ],
-  "content_hash": "555173e610bebe444b5d2ece634fac56b492dc14e2cee4169bc603ec6ef57b32"
+  "content_hash": "b5b989d1a29ee32f0c9af8453453a46c46f5bbf30a9c1f8dc66cac653839dfcc"
 }
