@@ -32,7 +32,6 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 
-from llmtrace.adapters.lm_eval import LmEvalAdapter
 from llmtrace.benchmarks.models import (
     AdapterFailure,
     BenchmarkRunResult,
@@ -44,14 +43,12 @@ from llmtrace.benchmarks.models import (
     TaskAttempt,
     TaskStatus,
 )
-from llmtrace.benchmarks.planner import build_plan
 from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
 from llmtrace.reporting.benchmark_models import (
     BenchmarkReportSection,
     BenchmarkRunSummary,
 )
 from llmtrace.reporting.json_safety import sanitize_json_value
-from tests.adapters.conftest import FakeProvider
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -856,83 +853,81 @@ class TestJsonSafetyModelLevel:
         sanitize_json_value([1, "a", None], "test")
         sanitize_json_value({"key": [1, 2]}, "test")
 
+    # --- Non-finite float rejection ---
 
-# ---------------------------------------------------------------------------
-# Tests: Real smoke link (end-to-end via LmEvalAdapter)
-# ---------------------------------------------------------------------------
+    def test_nan_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-finite float"):
+            sanitize_json_value(float("nan"), "$")
 
+    def test_pos_inf_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-finite float"):
+            sanitize_json_value(float("inf"), "$")
 
-class TestRealSmokeLink:
-    async def test_real_smoke_link(self) -> None:
-        pytest.importorskip("lm_eval")
+    def test_neg_inf_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-finite float"):
+            sanitize_json_value(float("-inf"), "$")
 
-        # 1. Get the smoke task spec from LmEvalAdapter
-        adapter = LmEvalAdapter()
-        task_specs = adapter.list_tasks()
-        assert len(task_specs) == 1
-        smoke_spec = task_specs[0]
+    # --- Top-level key validation ---
 
-        provider = FakeProvider(
-            response_map={
-                "LLMTRACE_OK": "LLMTRACE_OK",
-                "DETERMINISTIC": "DETERMINISTIC",
-                "ADAPTER_WORKS": "ADAPTER_WORKS",
-                "EVIDENCE_TRACED": "EVIDENCE_TRACED",
-            }
+    def test_top_level_int_key_raises(self) -> None:
+        from llmtrace.reporting.json_safety import validate_json_mapping
+
+        with pytest.raises(ValueError, match="non-string dict key"):
+            validate_json_mapping({1: "a"})  # type: ignore[arg-type]
+
+    def test_nested_int_key_raises(self) -> None:
+        from llmtrace.reporting.json_safety import validate_json_mapping
+
+        with pytest.raises(ValueError, match="non-string dict key"):
+            validate_json_mapping({"a": {1: "b"}})  # type: ignore[dict-item]
+
+    def test_key_conflict_raises(self) -> None:
+        """{1: "a", "1": "b"} would silently overwrite after str() conversion."""
+        from llmtrace.reporting.json_safety import validate_json_mapping
+
+        with pytest.raises(ValueError, match="non-string dict key"):
+            validate_json_mapping({1: "a", "1": "b"})  # type: ignore[arg-type]
+
+    # --- Additional forbidden types ---
+
+    def test_tuple_raises(self) -> None:
+        with pytest.raises(ValueError, match="forbidden type"):
+            sanitize_json_value((1, 2), "$")
+
+    # --- TaskReportItem metadata validator: mode="before" ---
+
+    def test_task_report_item_int_key_metadata_raises(self) -> None:
+        """TaskReportItem with int key in metadata must fail at construction."""
+        from llmtrace.reporting.benchmark_models import TaskReportItem, TaskReportStatus
+
+        with pytest.raises(ValueError, match="non-string dict key"):
+            TaskReportItem(
+                task_id="test",
+                attempt_id="att-1",
+                status=TaskReportStatus.SUCCESS,
+                metadata={1: "a", "1": "b"},
+            )
+
+    def test_task_report_item_metadata_roundtrip(self) -> None:
+        """Legal JSON roundtrip through TaskReportItem metadata."""
+        from llmtrace.reporting.benchmark_models import TaskReportItem, TaskReportStatus
+
+        data: dict[str, object] = {
+            "str_": "hello",
+            "int_": 42,
+            "float_": 3.14,
+            "bool_": True,
+            "none_": None,
+            "list_": [1, "two", None],
+            "dict_": {"nested": "value"},
+        }
+        item = TaskReportItem(
+            task_id="test",
+            attempt_id="att-1",
+            status=TaskReportStatus.SUCCESS,
+            metadata=data,
         )
-
-        # 2. Build a plan using the shared planner
-        plan = build_plan(
-            suite_id="llmtrace_smoke",
-            suite_version="1.0.0",
-            source_id="lm-eval",
-            source_revision="0000000-smoke",
-            adapter_id=adapter.adapter_id,
-            adapter_version=adapter.adapter_version,
-            tasks=[smoke_spec],
-        )
-
-        # 3. Run the smoke task via the adapter with the smoke_provider
-        attempt = await adapter.run_task(smoke_spec, provider)
-
-        # 4. Grade the result
-        grade = GradeResult(
-            grade_id=str(uuid4()),
-            attempt_id=attempt.attempt_id,
-            task_id=smoke_spec.task_id,
-            grader_id="exact_match",
-            raw_score=1.0,
-            normalized_score=1.0,
-            source_id="lm-eval",
-            source_revision="0000000-smoke",
-            suite_id="llmtrace_smoke",
-            suite_version="1.0.0",
-            adapter_id=adapter.adapter_id,
-            adapter_version=adapter.adapter_version,
-        )
-
-        # 5. Build BenchmarkRunResult and report section
-        run_result = BenchmarkRunResult(
-            run_id=str(uuid4()),
-            task_attempts=[attempt],
-            grade_results=[grade],
-            evidence_refs=attempt.evidence_refs,
-            source_id="lm-eval",
-            source_revision="0000000-smoke",
-            suite_id="llmtrace_smoke",
-            suite_version="1.0.0",
-            adapter_id=adapter.adapter_id,
-            adapter_version=adapter.adapter_version,
-        )
-
-        section = build_benchmark_report_section(plan, run_result)
-
-        # 6. Assert capability_score_eligible is False
-        task = section.tasks[0]
-        assert task.capability_score_eligible is False
-
-        # 7. Assert metadata contains "llmtrace_smoke_task": True
-        assert task.metadata.get("llmtrace_smoke_task") is True
+        assert item.metadata == data
 
 
 # ---------------------------------------------------------------------------
@@ -1003,6 +998,100 @@ class TestGoldenFixture:
 
         assert actual == expected, (
             f"Golden fixture mismatch.\n"
+            f"Actual:   {json.dumps(actual, indent=2)}\n"
+            f"Expected: {json.dumps(expected, indent=2)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Smoke Golden Test: lm_eval smoke section fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def smoke_golden_fixture_path() -> Path:
+    return Path(__file__).parent / "fixtures" / "lm_eval_smoke_report_golden.json"
+
+
+class TestSmokeGoldenFixture:
+    """Golden test: known smoke inputs → deterministic BenchmarkReportSection JSON.
+
+    The fixture MUST pre-exist.  Any field change causes failure.
+    """
+
+    def test_smoke_golden_matches_fixture(self, smoke_golden_fixture_path: Path) -> None:
+        assert smoke_golden_fixture_path.exists(), (
+            f"Smoke golden fixture not found at {smoke_golden_fixture_path}. "
+            f"It must be committed before running this test."
+        )
+
+        run_id = "11111111-1111-1111-1111-111111111111"
+        ev1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        ev2 = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+        p = {
+            "suite_id": "llmtrace_smoke",
+            "suite_version": "1.0.0",
+            "source_id": "lm-eval",
+            "source_revision": "0000000-smoke",
+            "adapter_id": "lm-eval",
+            "adapter_version": "0.4.12",
+        }
+
+        plan = RunPlan(
+            plan_id="smoke-golden-plan",
+            task_ids=["llmtrace_smoke"],
+            total_samples=4,
+            budget=BudgetEstimate(planned_requests=4, maximum_requests=4, estimated_cost=None),
+            **{k: v for k, v in p.items() if k in RunPlan.model_fields},
+        )
+
+        attempt = TaskAttempt(
+            attempt_id="attempt-smoke-001",
+            task_id="llmtrace_smoke",
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[ev1, ev2],
+            metadata={
+                "llmtrace_smoke_task": True,
+                "metric_result": {
+                    "task_name": "llmtrace_smoke",
+                    "metric_name": "exact_match",
+                    "generation_options": {
+                        "temperature": 0.0,
+                        "until": ["\n"],
+                        "do_sample": False,
+                    },
+                },
+            },
+            **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+        )
+
+        grade = GradeResult(
+            grade_id="grade-smoke-001",
+            attempt_id="attempt-smoke-001",
+            task_id="llmtrace_smoke",
+            grader_id="exact_match",
+            raw_score=1.0,
+            normalized_score=1.0,
+            **{k: v for k, v in p.items() if k in GradeResult.model_fields},
+        )
+
+        run_result = BenchmarkRunResult(
+            run_id=run_id,
+            task_attempts=[attempt],
+            grade_results=[grade],
+            evidence_refs=[ev1, ev2],
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+            **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
+        )
+
+        section = build_benchmark_report_section(plan, run_result)
+        actual = json.loads(section.model_dump_json(indent=2))
+        expected = json.loads(smoke_golden_fixture_path.read_text())
+
+        assert actual == expected, (
+            f"Smoke golden fixture mismatch.\n"
             f"Actual:   {json.dumps(actual, indent=2)}\n"
             f"Expected: {json.dumps(expected, indent=2)}"
         )

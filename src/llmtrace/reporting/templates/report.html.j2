@@ -141,13 +141,14 @@
 
     <h4>Tasks</h4>
     <table>
-      <tr><th>Task ID</th><th>Status</th><th>Grader</th><th>Score</th><th>Evidence</th><th>Failure</th></tr>
+      <tr><th>Task ID</th><th>Status</th><th>Grader</th><th>Raw Score</th><th>Normalized Score</th><th>Evidence</th><th>Failure</th></tr>
       {% for task in bm.tasks %}
       <tr>
         <td>{{ task.task_id }}{% if task.is_smoke %} <span style="color:#757575;">(smoke)</span>{% endif %}</td>
         <td class="{{ task.status_class }}">{{ task.status }}</td>
         <td>{{ task.grader_id or 'N/A' }}</td>
-        <td>{{ task.score_display }}</td>
+        <td>{{ task.raw_score_display }}</td>
+        <td>{{ task.normalized_score_display }}</td>
         <td><span title="{{ task.evidence_refs_display }}">{{ task.evidence_refs | length }}</span></td>
         <td>{{ task.failure_display or '—' }}</td>
       </tr>

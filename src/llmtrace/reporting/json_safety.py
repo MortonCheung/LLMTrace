@@ -30,6 +30,7 @@ footgun.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,8 @@ def sanitize_json_value(value: object, path: str = "$") -> None:
     if isinstance(value, int):
         return
     if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{path}: non-finite float {value!r} — not JSON-safe")
         return
     if isinstance(value, str):
         return
@@ -82,14 +85,19 @@ def sanitize_json_value(value: object, path: str = "$") -> None:
 
 
 def validate_json_mapping(raw: Mapping[str, object]) -> None:
-    """Validate that every value in *raw* is JSON-safe.
+    """Validate that every key and value in *raw* is JSON-safe.
 
-    Convenience wrapper around sanitize_json_value() for dict validation.
+    Explicitly validates each top-level key is a str, then validates
+    each value recursively via sanitize_json_value().
 
     Raises:
-        ValueError: If any value is not JSON-safe.
+        ValueError: If any key is not a string or any value is not JSON-safe.
     """
     for key, value in raw.items():
+        if not isinstance(key, str):
+            raise ValueError(
+                f"metadata: non-string dict key {key!r} (type={type(key).__name__}) — JSON requires string keys"
+            )
         sanitize_json_value(value, f"metadata['{key}']")
 
 
