@@ -24,17 +24,15 @@ from llmtrace.adapters.lm_eval import (
     _get_task_def,
 )
 from llmtrace.benchmarks.models import (
-    CapabilityDimension,
     GradeResult,
     GradeStatus,
     TaskAttempt,
-    TaskScoringSpec,
-    TaskScoringRegistry,
     TaskSpec,
     TaskStatus,
 )
 from llmtrace.reporting.benchmark_mapper import _is_smoke_task_from_metadata
-from llmtrace.scoring.aggregator import aggregate_dimension_scores
+from llmtrace.scoring.aggregator import TaskScoringRegistry, aggregate_dimension_scores
+from llmtrace.scoring.models import CapabilityDimension, TaskScoringSpec
 
 
 # ---------------------------------------------------------------------------
