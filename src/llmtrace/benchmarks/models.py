@@ -551,15 +551,71 @@ class CompletionProvider(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# SmokeTaskManifest — fixed identity for the smoke task
+# BenchmarkTaskDefinition — single source of task identity
+# ---------------------------------------------------------------------------
+
+
+class BenchmarkTaskDefinition(BaseModel):
+    """Unified task identity — single truth source for every task known to an adapter.
+
+    Replaces the legacy approach of reading SmokeTaskManifest for all tasks.
+    Each entry carries its own provenance, smoke flag, and eligibility so that
+    run_task(), normalize_result(), and reporting all derive from the same
+    canonical definition.
+    """
+
+    task_id: NonEmptyStr = Field(..., description="Unique task identifier")
+    source_id: NonEmptyStr = Field(..., description="Benchmark source identifier")
+    source_revision: NonEmptyStr = Field(..., description="Source data revision (hash, tag, or verification status)")
+    suite_id: NonEmptyStr = Field(..., description="Suite identifier this task belongs to")
+    suite_version: NonEmptyStr = Field(..., description="Suite version string")
+    adapter_id: NonEmptyStr = Field(default="lm-eval", description="Adapter identifier")
+    is_smoke: bool = Field(default=False, description="Whether this is a smoke / integrity check task")
+    capability_score_eligible: bool = Field(
+        default=True, description="Whether this task can contribute to capability scoring"
+    )
+    metric: NonEmptyStr = Field(default="exact_match", description="Default metric name")
+    filter_: NonEmptyStr = Field(default="none", alias="filter", description="Default filter name")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional task metadata")
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    def provenance_dict(self) -> dict[str, str]:
+        """Return provenance fields as a plain dict suitable for model constructors."""
+        return {
+            "source_id": self.source_id,
+            "source_revision": self.source_revision,
+            "suite_id": self.suite_id,
+            "suite_version": self.suite_version,
+        }
+
+    def task_metadata(self, *, metric_result: dict[str, object] | None = None) -> dict[str, object]:
+        """Build the metadata dict for a TaskAttempt from this definition.
+
+        Smoke tasks get ``llmtrace_smoke_task=True``; real benchmarks do NOT.
+        """
+        meta: dict[str, object] = {}
+        if self.is_smoke:
+            meta["llmtrace_smoke_task"] = True
+        if metric_result is not None:
+            meta["metric_result"] = metric_result
+        for key, val in self.metadata.items():
+            if key not in meta:
+                meta[key] = val
+        return meta
+
+
+# ---------------------------------------------------------------------------
+# SmokeTaskManifest — kept for compatibility, delegates to BenchmarkTaskDefinition
 # ---------------------------------------------------------------------------
 
 
 class SmokeTaskManifest(BaseModel):
     """Fixed provenance and identity for the LLMTrace smoke task.
 
-    This manifest is the single source of truth for smoke task identity
-    and is shared by RunPlan, TaskAttempt, and GradeResult.
+    Deprecated in favour of BenchmarkTaskDefinition.  This class exists
+    solely to support tests and code that reference SmokeTaskManifest
+    directly.
     """
 
     task_id: NonEmptyStr = Field(default="llmtrace_smoke")
@@ -572,6 +628,20 @@ class SmokeTaskManifest(BaseModel):
     capability_score_eligible: bool = Field(default=False)
 
     model_config = {"frozen": True, "extra": "forbid"}
+
+    def to_definition(self) -> BenchmarkTaskDefinition:
+        """Convert to the new canonical format."""
+        return BenchmarkTaskDefinition(
+            task_id=self.task_id,
+            source_id=self.source_id,
+            source_revision=self.source_revision,
+            suite_id=self.suite_id,
+            suite_version=self.suite_version,
+            is_smoke=True,
+            capability_score_eligible=False,
+            metric=self.metric,
+            filter=self.filter,
+        )
 
 
 # ---------------------------------------------------------------------------
