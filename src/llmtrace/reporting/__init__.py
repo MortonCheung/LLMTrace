@@ -13,6 +13,7 @@ from llmtrace.reporting.console import (
     print_dry_run,
     print_error,
 )
+from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import SCHEMA_VERSION, generate_json_report
 
@@ -29,4 +30,5 @@ __all__ = [
     "TaskReportItem",
     "FailureReportItem",
     "SCHEMA_VERSION",
+    "validate_report_evidence_refs",
 ]

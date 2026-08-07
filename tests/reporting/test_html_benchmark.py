@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from llmtrace.benchmarks.models import (
     AdapterFailure,
     BenchmarkRunResult,
@@ -24,7 +26,10 @@ from llmtrace.models.audit import AuditResult, RiskLevel
 from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
 from llmtrace.reporting.html_report import generate_html_report
 from tests.reporting.test_json_report_integration import (
+    _add_evidence_for_section,
     _make_benchmark_section,
+    _make_benchmark_section_with_refs,
+    _make_evidence,
     _make_minimal_audit_result,
     _provenance,
 )
@@ -72,6 +77,7 @@ class TestHtmlWithBenchmarks:
         """HTML contains suite_id, status=success, raw_score, evidence_refs UUID."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -121,6 +127,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -157,6 +164,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -176,6 +184,7 @@ class TestHtmlWithBenchmarks:
         """Smoke tasks show the smoke note text in HTML."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section(smoke=True)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -188,6 +197,7 @@ class TestHtmlWithBenchmarks:
         """Evidence UUID string appears in the HTML output."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         # Get one of the evidence refs UUIDs
         ev_uuid = section.tasks[0].evidence_refs[0]
@@ -234,6 +244,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -251,6 +262,7 @@ class TestHtmlWithBenchmarks:
         """estimated_cost=None displays as 未估算."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -263,6 +275,7 @@ class TestHtmlWithBenchmarks:
         """Strings total_score and capability_score do not appear in HTML."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -276,6 +289,7 @@ class TestHtmlWithBenchmarks:
         """Raw Score and Normalized Score appear as separate table columns."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -322,6 +336,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -364,6 +379,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -417,6 +433,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in xss_p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -478,6 +495,7 @@ class TestHtmlWithBenchmarks:
             **{k: v for k, v in xss_p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -497,6 +515,7 @@ class TestHtmlWithBenchmarks:
         """XSS in 'warnings' list is escaped."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
         xss = '<script>alert("warning")</script>'
         section_xss = section.model_copy(update={"warnings": [xss]})
 
@@ -540,6 +559,7 @@ class TestHtmlWithBenchmarks:
             content_hash="",
         )
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.html"
@@ -549,3 +569,38 @@ class TestHtmlWithBenchmarks:
         assert "<img src=x" not in html
         assert "&lt;img" in html
         assert "&amp;lt;img" not in html
+
+
+# ---------------------------------------------------------------------------
+# Evidence validation — production entry tests (HTML)
+# ---------------------------------------------------------------------------
+
+
+class TestHtmlReportEvidenceValidation:
+    """Tests that generate_html_report enforces evidence reference integrity."""
+
+    def test_missing_evidence_raises_valueerror_html(self) -> None:
+        """Orphan evidence_ref raises ValueError, no HTML file created."""
+        result = _make_minimal_audit_result()
+        result.evidence = []  # empty — no evidence to resolve
+        section = _make_benchmark_section_with_refs([str(uuid4())])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            with pytest.raises(ValueError, match="unresolvable evidence_id"):
+                generate_html_report(result, output_path, benchmark_sections=[section])
+            assert not output_path.exists()
+
+    def test_evidence_closure_success_html(self) -> None:
+        """Matching evidence allows HTML report generation."""
+        ev = _make_evidence()
+        result = _make_minimal_audit_result()
+        result.evidence = [ev]
+        section = _make_benchmark_section_with_refs([str(ev.evidence_id)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, benchmark_sections=[section])
+            assert output_path.exists()
+            html = output_path.read_text()
+            assert "能力评测" in html
