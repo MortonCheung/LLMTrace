@@ -335,7 +335,7 @@ class TestProvenanceValidation:
         # Test child vs parent: attempt has wrong suite_id
         attempt_bad = _make_success_attempt("att-1", "task_a", suite_id="wrong")
         run_result = _make_run_result([attempt_bad], [])
-        with pytest.raises(ValueError, match="TaskAttempt suite_id mismatch"):
+        with pytest.raises(ValueError, match="Provenance mismatch.*TaskAttempt"):
             build_benchmark_report_section(plan, run_result)
 
     def test_grade_provenance_mismatch(self) -> None:
@@ -343,7 +343,7 @@ class TestProvenanceValidation:
         attempt = _make_success_attempt("att-1", "task_a")
         grade = _make_grade("att-1", "task_a", suite_id="wrong")
         run_result = _make_run_result([attempt], [grade])
-        with pytest.raises(ValueError, match="GradeResult suite_id mismatch"):
+        with pytest.raises(ValueError, match="Provenance mismatch.*GradeResult"):
             build_benchmark_report_section(plan, run_result)
 
     def test_grade_task_id_mismatch(self) -> None:

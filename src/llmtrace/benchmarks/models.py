@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Protocol, runtime_checkable
 from uuid import UUID
 
 from pydantic import (
@@ -84,6 +84,47 @@ class BenchmarkProvenance(BaseModel):
     adapter_version: NonEmptyStr = Field(..., description="Adapter version string")
 
     model_config = {"extra": "forbid"}
+
+    _PROVENANCE_FIELDS: ClassVar[tuple[str, ...]] = (
+        "source_id",
+        "source_revision",
+        "suite_id",
+        "suite_version",
+        "adapter_id",
+        "adapter_version",
+    )
+
+    def provenance_matches(self, other: BenchmarkProvenance) -> bool:
+        """Check whether this provenance matches *other* on all fields."""
+        return all(getattr(self, f) == getattr(other, f) for f in self._PROVENANCE_FIELDS)
+
+
+def validate_provenance_consistency(
+    parent: BenchmarkProvenance,
+    child: BenchmarkProvenance,
+    child_label: str,
+    parent_label: str = "run_result",
+) -> None:
+    """Validate that *child* provenance matches *parent*.
+
+    Shared by reporting (benchmark_mapper) and scoring (aggregator) layers.
+
+    Args:
+        parent: The enclosing provenance record (e.g. BenchmarkRunResult).
+        child: The child record (e.g. TaskAttempt or GradeResult).
+        child_label: Label for the child in error messages.
+        parent_label: Label for the parent in error messages.
+
+    Raises:
+        ValueError: If any provenance field differs between parent and child.
+    """
+    for field in BenchmarkProvenance._PROVENANCE_FIELDS:
+        parent_val = getattr(parent, field)
+        child_val = getattr(child, field)
+        if child_val != parent_val:
+            raise ValueError(
+                f"Provenance mismatch on '{field}': {child_label} has '{child_val}', {parent_label} has '{parent_val}'"
+            )
 
 
 # ---------------------------------------------------------------------------

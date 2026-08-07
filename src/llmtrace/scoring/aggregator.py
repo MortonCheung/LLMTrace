@@ -21,6 +21,7 @@ from llmtrace.benchmarks.models import (
     BenchmarkRunResult,
     GradeStatus,
     TaskStatus,
+    validate_provenance_consistency,
 )
 
 from .errors import TaskRegistrationError
@@ -100,8 +101,9 @@ class TaskScoringRegistry:
                 self._specs[spec.task_id] = copy.deepcopy(spec)
 
     def get(self, task_id: str) -> TaskScoringSpec | None:
-        """Return the TaskScoringSpec for *task_id*, or None if unregistered."""
-        return self._specs.get(task_id)
+        """Return a deep copy of the TaskScoringSpec for *task_id*, or None."""
+        spec = self._specs.get(task_id)
+        return copy.deepcopy(spec) if spec is not None else None
 
     def __contains__(self, task_id: str) -> bool:
         return task_id in self._specs
@@ -110,10 +112,14 @@ class TaskScoringRegistry:
         return len(self._specs)
 
     def __iter__(self) -> Any:
-        return iter(self._specs.values())
+        """Iterate over deep copies of all TaskScoringSpec entries."""
+        for spec in self._specs.values():
+            yield copy.deepcopy(spec)
 
     def items(self) -> Any:
-        return self._specs.items()
+        """Return (task_id, deep-copied TaskScoringSpec) pairs."""
+        for tid, spec in self._specs.items():
+            yield (tid, copy.deepcopy(spec))
 
 
 # ---------------------------------------------------------------------------
@@ -166,26 +172,72 @@ def _count_eligible_tasks(
     return count
 
 
-def _count_graded_tasks(
+# ---------------------------------------------------------------------------
+# GradeResult ↔ TaskAttempt pairing (by attempt_id)
+# ---------------------------------------------------------------------------
+
+
+def _build_attempt_index(
     run_results: Sequence[BenchmarkRunResult],
-    registry: TaskScoringRegistry,
-    dimension: CapabilityDimension,
-    graded_task_ids: set[str],
-) -> int:
-    """Count successfully graded tasks for a dimension."""
-    count = 0
+) -> dict[str, tuple[BenchmarkRunResult, Any]]:  # Any = TaskAttempt
+    """Build a global index of attempt_id → (run_result, TaskAttempt)."""
+    index: dict[str, tuple[BenchmarkRunResult, Any]] = {}
     for run in run_results:
-        for a in run.task_attempts:
-            spec = registry.get(a.task_id)
-            if (
-                spec is not None
-                and spec.dimension == dimension
-                and spec.capability_score_eligible
-                and a.status == TaskStatus.SUCCESS
-                and a.task_id in graded_task_ids
-            ):
-                count += 1
-    return count
+        for attempt in run.task_attempts:
+            index[attempt.attempt_id] = (run, attempt)
+    return index
+
+
+def _pair_grades_with_attempts(
+    run_results: Sequence[BenchmarkRunResult],
+) -> dict[str, tuple[BenchmarkRunResult, Any, Any]]:  # (run, attempt, grade)
+    """Pair GradeResult → TaskAttempt by attempt_id with full validation.
+
+    Returns:
+        attempt_id → (run_result, TaskAttempt, GradeResult)
+
+    Raises:
+        ValueError: On orphan GradeResult, duplicate GradeResult,
+                    attempt_id/task_id mismatch, or provenance mismatch.
+    """
+    attempt_index = _build_attempt_index(run_results)
+    paired: dict[str, tuple[BenchmarkRunResult, Any, Any]] = {}
+
+    for run in run_results:
+        for grade in run.grade_results:
+            aid = grade.attempt_id
+
+            # Orphan check
+            if aid not in attempt_index:
+                raise ValueError(
+                    f"Orphan GradeResult: attempt_id='{aid}' (grade_id='{grade.grade_id}') has no matching TaskAttempt"
+                )
+
+            # Duplicate check
+            if aid in paired:
+                existing_grade = paired[aid][2]
+                raise ValueError(
+                    f"Duplicate GradeResult for attempt_id='{aid}': "
+                    f"grade_ids='{grade.grade_id}' and '{existing_grade.grade_id}'"
+                )
+
+            # task_id consistency
+            _, attempt = attempt_index[aid]
+            if grade.task_id != attempt.task_id:
+                raise ValueError(
+                    f"GradeResult.task_id='{grade.task_id}' does not match "
+                    f"TaskAttempt.task_id='{attempt.task_id}' for attempt_id='{aid}'"
+                )
+
+            # Provenance: grade vs run
+            validate_provenance_consistency(run, grade, child_label="GradeResult")
+
+            # Provenance: attempt vs run
+            validate_provenance_consistency(run, attempt, child_label="TaskAttempt")
+
+            paired[aid] = (run, attempt, grade)
+
+    return paired
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +264,8 @@ def aggregate_dimension_score(
 
     contribute to the dimension score.
 
+    GradeResult is paired with TaskAttempt by attempt_id (not task_id).
+
     Args:
         dimension: Target capability dimension.
         run_results: BenchmarkRunResult instances to aggregate from.
@@ -225,6 +279,8 @@ def aggregate_dimension_score(
 
     Raises:
         TaskRegistrationError: If *strict* and unregistered tasks encountered.
+        ValueError: On orphan GradeResult, duplicate GradeResult,
+                    attempt_id/task_id mismatch, or provenance mismatch.
     """
     if calibrator is None:
         calibrator = _NoCalibration()
@@ -232,35 +288,18 @@ def aggregate_dimension_score(
     global_weight = policy.weight_for(dimension)
     warnings: list[str] = []
 
-    # Collect eligible + graded tasks for this dimension
+    # ---------- Build attempt_id-level grade index ----------
+    paired = _pair_grades_with_attempts(run_results)
+
+    # ---------- Aggregate across all runs ----------
     planned_weight_sum = 0.0
     graded_weight_sum = 0.0
     weighted_score_sum = 0.0
     evidence_refs: list[str] = []
     source_task_ids: list[str] = []
+    graded_attempt_ids: list[str] = []
 
     for run in run_results:
-        graded_map: dict[str, float] = {}  # task_id → normalized_score
-        graded_evidence: dict[str, list[str]] = {}  # task_id → evidence_refs
-
-        for grade in run.grade_results:
-            spec = _resolve_spec(registry, grade.task_id, strict)
-            if spec is None:
-                continue
-            if spec.dimension != dimension:
-                continue
-            if not spec.capability_score_eligible:
-                warnings.append(
-                    f"Task '{grade.task_id}' is capability_score_eligible=False; excluding from dimension score"
-                )
-                continue
-            if grade.status != GradeStatus.GRADED:
-                continue
-
-            graded_map[grade.task_id] = grade.normalized_score
-            graded_evidence[grade.task_id] = list(grade.evidence_refs)
-
-        # Process attempts
         for attempt in run.task_attempts:
             spec = _resolve_spec(registry, attempt.task_id, strict)
             if spec is None:
@@ -268,20 +307,35 @@ def aggregate_dimension_score(
             if spec.dimension != dimension:
                 continue
             if not spec.capability_score_eligible:
+                warnings.append(
+                    f"Task '{attempt.task_id}' is capability_score_eligible=False; excluding from dimension score"
+                )
                 continue
 
             planned_weight_sum += spec.task_weight
 
-            if attempt.status == TaskStatus.SUCCESS and attempt.task_id in graded_map:
-                score = graded_map[attempt.task_id]
-                weighted_score_sum += score * spec.task_weight
-                graded_weight_sum += spec.task_weight
-                evidence_refs.extend(graded_evidence.get(attempt.task_id, []))
-                evidence_refs.extend(attempt.evidence_refs)
-                source_task_ids.append(attempt.task_id)
+            # Check if this attempt has a valid grade
+            grade_entry = paired.get(attempt.attempt_id)
+            if grade_entry is None:
+                continue  # no grade → cannot participate
 
-    # Determine status
-    if planned_weight_sum == 0.0:
+            _, _, grade = grade_entry
+            if attempt.status != TaskStatus.SUCCESS:
+                continue
+            if grade.status != GradeStatus.GRADED:
+                continue
+
+            graded_weight_sum += spec.task_weight
+            weighted_score_sum += grade.normalized_score * spec.task_weight
+            evidence_refs.extend(grade.evidence_refs)
+            evidence_refs.extend(attempt.evidence_refs)
+            source_task_ids.append(attempt.task_id)
+            graded_attempt_ids.append(attempt.attempt_id)
+
+    # ---------- Determine status ----------
+    eligible_count = _count_eligible_tasks(run_results, registry, dimension)
+
+    if planned_weight_sum == 0.0 or eligible_count == 0:
         return DimensionScoreResult(
             dimension=dimension,
             status=DimensionScoreStatus.UNAVAILABLE,
@@ -292,13 +346,13 @@ def aggregate_dimension_score(
             task_coverage=0.0,
             global_weight=global_weight,
             weighted_contribution=0.0,
-            evidence_refs=[],
-            source_task_ids=[],
-            warnings=warnings,
+            evidence_refs=(),
+            source_task_ids=(),
+            warnings=tuple(warnings),
         )
 
     raw_normalized_score = weighted_score_sum / graded_weight_sum if graded_weight_sum > 0 else 0.0
-    task_coverage = graded_weight_sum / planned_weight_sum
+    task_coverage = graded_weight_sum / planned_weight_sum if planned_weight_sum > 0 else 0.0
 
     if graded_weight_sum == 0.0:
         return DimensionScoreResult(
@@ -306,37 +360,57 @@ def aggregate_dimension_score(
             status=DimensionScoreStatus.INSUFFICIENT_DATA,
             raw_normalized_score=0.0,
             calibrated_score=None,
-            task_count=_count_eligible_tasks(run_results, registry, dimension),
+            task_count=eligible_count,
             graded_task_count=0,
             task_coverage=0.0,
             global_weight=global_weight,
             weighted_contribution=0.0,
-            evidence_refs=[],
-            source_task_ids=[],
-            warnings=warnings,
+            evidence_refs=(),
+            source_task_ids=(),
+            warnings=tuple(warnings),
         )
 
-    # Determine status
-    status = DimensionScoreStatus.UNCALIBRATED if policy.calibration_required else DimensionScoreStatus.SCORED
-
+    # Coverage below minimum → INSUFFICIENT_DATA
     if task_coverage < policy.minimum_dimension_coverage:
-        status = DimensionScoreStatus.INSUFFICIENT_DATA
+        return DimensionScoreResult(
+            dimension=dimension,
+            status=DimensionScoreStatus.INSUFFICIENT_DATA,
+            raw_normalized_score=raw_normalized_score,
+            calibrated_score=None,
+            task_count=eligible_count,
+            graded_task_count=len(graded_attempt_ids),
+            task_coverage=task_coverage,
+            global_weight=global_weight,
+            weighted_contribution=raw_normalized_score * global_weight,
+            evidence_refs=tuple(_normalize_evidence_refs(evidence_refs)),
+            source_task_ids=tuple(sorted(set(source_task_ids))),
+            warnings=tuple(warnings),
+        )
 
+    # ---------- Calibration state machine ----------
     calibrated = calibrator.calibrate(dimension, raw_normalized_score)
+
+    if calibrated is not None:
+        # Validate calibration range
+        if calibrated < 0.0 or calibrated > 100.0:
+            raise ValueError(f"Calibrated score for {dimension.value} is {calibrated}, must be in [0, 100]")
+        status = DimensionScoreStatus.SCORED
+    else:
+        status = DimensionScoreStatus.UNCALIBRATED
 
     return DimensionScoreResult(
         dimension=dimension,
         status=status,
         raw_normalized_score=raw_normalized_score,
         calibrated_score=calibrated,
-        task_count=_count_eligible_tasks(run_results, registry, dimension),
-        graded_task_count=_count_graded_tasks(run_results, registry, dimension, set(graded_map.keys())),
+        task_count=eligible_count,
+        graded_task_count=len(graded_attempt_ids),
         task_coverage=task_coverage,
         global_weight=global_weight,
         weighted_contribution=raw_normalized_score * global_weight,
-        evidence_refs=_normalize_evidence_refs(evidence_refs),
-        source_task_ids=sorted(set(source_task_ids)),
-        warnings=warnings,
+        evidence_refs=tuple(_normalize_evidence_refs(evidence_refs)),
+        source_task_ids=tuple(sorted(set(source_task_ids))),
+        warnings=tuple(warnings),
     )
 
 
@@ -407,10 +481,10 @@ def aggregate_capability_profile(
         profile_version="0.1.0",
         scoring_policy_id=policy.policy_id,
         scoring_policy_version=policy.policy_version,
-        dimensions=dimensions,
+        dimensions=tuple(dimensions),
         coverage_weight=coverage_weight,
         calibrated_total_score=None,  # Always None until Reference Calibration
         provisional_raw_index=provisional_raw_index,
-        evidence_refs=_normalize_evidence_refs(all_evidence),
-        warnings=all_warnings,
+        evidence_refs=tuple(_normalize_evidence_refs(all_evidence)),
+        warnings=tuple(all_warnings),
     )

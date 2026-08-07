@@ -35,6 +35,7 @@ from llmtrace.benchmarks.models import (
     RunPlan,
     TaskAttempt,
     TaskStatus,
+    validate_provenance_consistency,
 )
 from llmtrace.reporting.benchmark_models import (
     _SENSITIVE_KEY_PATTERNS,
@@ -91,7 +92,7 @@ def build_benchmark_report_section(
                 f"Duplicate GradeResult for attempt_id='{g.attempt_id}'. "
                 f"Each TaskAttempt must have at most one GradeResult."
             )
-        _validate_provenance(run_result, g, "GradeResult")
+        _check_provenance(run_result, g, "GradeResult")
         grade_by_attempt[g.attempt_id] = g
 
     # ---------- Build TaskReportItems ----------
@@ -102,7 +103,7 @@ def build_benchmark_report_section(
     ungraded_count, ungradable_count = 0, 0
 
     for attempt in attempts:
-        _validate_provenance(run_result, attempt, "TaskAttempt")
+        _check_provenance(run_result, attempt, "TaskAttempt")
 
         # Validate task_id is in plan
         if attempt.task_id not in plan_task_ids:
@@ -239,19 +240,9 @@ def _validate_plan_run_result_provenance(plan: RunPlan, run_result: BenchmarkRun
             raise ValueError(f"Provenance mismatch on '{field_name}': plan has '{plan_val}', run_result has '{rr_val}'")
 
 
-def _validate_provenance(parent: BenchmarkRunResult, child: BenchmarkProvenance, label: str) -> None:
+def _check_provenance(parent: BenchmarkRunResult, child: BenchmarkProvenance, label: str) -> None:
     """Validate that a child (TaskAttempt or GradeResult) shares provenance with run_result."""
-    checks = [
-        ("suite_id", child.suite_id, parent.suite_id),
-        ("suite_version", child.suite_version, parent.suite_version),
-        ("source_id", child.source_id, parent.source_id),
-        ("source_revision", child.source_revision, parent.source_revision),
-        ("adapter_id", child.adapter_id, parent.adapter_id),
-        ("adapter_version", child.adapter_version, parent.adapter_version),
-    ]
-    for field_name, child_val, parent_val in checks:
-        if child_val != parent_val:
-            raise ValueError(f"{label} {field_name} mismatch: '{child_val}' != '{parent_val}'")
+    validate_provenance_consistency(parent, child, child_label=label)
 
 
 # ---------------------------------------------------------------------------

@@ -55,7 +55,6 @@ class TestPolicyCreation:
 
     def test_unknown_dimension_in_weights_fails(self) -> None:
         """All weight keys must be valid CapabilityDimension values."""
-        # This is caught by sum validation — incomplete weights won't sum to 1.0
         weights = {CapabilityDimension.REASONING: 0.5}
         with pytest.raises(ValueError, match="sum to 1.0"):
             CapabilityScoringPolicy(
@@ -63,6 +62,90 @@ class TestPolicyCreation:
                 policy_version="1.0",
                 dimension_weights=weights,
                 enabled_dimensions={CapabilityDimension.REASONING},
+            )
+
+    # -- NEW: NaN / Infinity rejection ------------------------------------
+
+    def test_nan_weight_rejected(self) -> None:
+        """NaN weight must raise InvalidPolicyError."""
+        weights = dict(CapabilityScoringPolicy.create_v1().dimension_weights)
+        weights[CapabilityDimension.REASONING] = float("nan")
+        with pytest.raises(InvalidPolicyError, match="Non-finite weight"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                dimension_weights=weights,
+            )
+
+    def test_infinity_weight_rejected(self) -> None:
+        """Infinity weight must raise InvalidPolicyError."""
+        weights = dict(CapabilityScoringPolicy.create_v1().dimension_weights)
+        weights[CapabilityDimension.REASONING] = float("inf")
+        with pytest.raises(InvalidPolicyError, match="Non-finite weight"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                dimension_weights=weights,
+            )
+
+    def test_negative_infinity_weight_rejected(self) -> None:
+        """Negative infinity weight must raise InvalidPolicyError."""
+        weights = dict(CapabilityScoringPolicy.create_v1().dimension_weights)
+        weights[CapabilityDimension.REASONING] = float("-inf")
+        with pytest.raises(InvalidPolicyError, match="Non-finite weight"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                dimension_weights=weights,
+            )
+
+    def test_nan_sum_rejected(self) -> None:
+        """NaN total must raise InvalidPolicyError."""
+        weights = {CapabilityDimension.REASONING: float("nan")}
+        with pytest.raises(InvalidPolicyError, match="Non-finite"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                dimension_weights=weights,
+                enabled_dimensions={CapabilityDimension.REASONING},
+            )
+
+    # -- NEW: minimum_dimension_coverage validation -----------------------
+
+    def test_negative_minimum_coverage_rejected(self) -> None:
+        """Negative minimum_dimension_coverage must fail."""
+        with pytest.raises(InvalidPolicyError, match="minimum_dimension_coverage"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                minimum_dimension_coverage=-0.1,
+            )
+
+    def test_over_one_minimum_coverage_rejected(self) -> None:
+        """minimum_dimension_coverage > 1.0 must fail."""
+        with pytest.raises(InvalidPolicyError, match="minimum_dimension_coverage"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                minimum_dimension_coverage=1.1,
+            )
+
+    def test_nan_minimum_coverage_rejected(self) -> None:
+        """NaN minimum_dimension_coverage must fail."""
+        with pytest.raises(InvalidPolicyError, match="finite"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                minimum_dimension_coverage=float("nan"),
+            )
+
+    def test_inf_minimum_coverage_rejected(self) -> None:
+        """Infinity minimum_dimension_coverage must fail."""
+        with pytest.raises(InvalidPolicyError, match="finite"):
+            CapabilityScoringPolicy(
+                policy_id="test",
+                policy_version="1.0",
+                minimum_dimension_coverage=float("inf"),
             )
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from .errors import InvalidPolicyError
 from .models import (
     _LONG_TERM_WEIGHTS,
@@ -65,18 +67,28 @@ class CapabilityScoringPolicy:
 
         Raises:
             InvalidPolicyError: If weights do not sum to exactly 1.0, or if any
-                weight is negative, or if an enabled dimension has no weight.
+                weight is negative, non-finite, or if an enabled dimension has no weight.
         """
         self._policy_id = policy_id
         self._policy_version = policy_version
-        self._minimum_dimension_coverage = minimum_dimension_coverage
         self._calibration_required = calibration_required
         self._description = description
 
+        # Validate minimum_dimension_coverage: [0.0, 1.0] and finite
+        if not math.isfinite(minimum_dimension_coverage):
+            raise InvalidPolicyError(f"minimum_dimension_coverage must be finite, got {minimum_dimension_coverage}")
+        if minimum_dimension_coverage < 0.0 or minimum_dimension_coverage > 1.0:
+            raise InvalidPolicyError(
+                f"minimum_dimension_coverage must be in [0.0, 1.0], got {minimum_dimension_coverage}"
+            )
+        self._minimum_dimension_coverage = minimum_dimension_coverage
+
         # Weights
         weights = dimension_weights if dimension_weights is not None else _build_default_dimension_weights()
-        # Validate
+        # Validate negatives and non-finite
         for dim, w in weights.items():
+            if not math.isfinite(w):
+                raise InvalidPolicyError(f"Non-finite weight {w} for dimension {dim.value}")
             if w < 0:
                 raise InvalidPolicyError(f"Negative weight {w} for dimension {dim.value}")
         _validate_weights_sum(weights)
