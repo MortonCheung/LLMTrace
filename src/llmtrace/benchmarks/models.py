@@ -571,7 +571,9 @@ class BenchmarkTaskDefinition(BaseModel):
     suite_version: NonEmptyStr = Field(..., description="Suite version string")
     adapter_id: NonEmptyStr = Field(default="lm-eval", description="Adapter identifier")
     is_smoke: bool = Field(default=False, description="Whether this is a smoke / integrity check task")
-    capability_score_eligible: bool = Field(default=True, description="Whether this task can contribute to capability scoring")
+    capability_score_eligible: bool = Field(
+        default=True, description="Whether this task can contribute to capability scoring"
+    )
     metric: NonEmptyStr = Field(default="exact_match", description="Default metric name")
     filter_: NonEmptyStr = Field(default="none", alias="filter", description="Default filter name")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional task metadata")
