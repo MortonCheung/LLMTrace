@@ -2,6 +2,7 @@
 
 from llmtrace.benchmarks.models import (
     AdapterFailure,
+    BenchmarkItemResult,
     BenchmarkProvenance,
     BenchmarkRunResult,
     BenchmarkSource,
@@ -11,6 +12,7 @@ from llmtrace.benchmarks.models import (
     FailureCategory,
     GradeResult,
     GradeStatus,
+    ItemStatus,
     RunPlan,
     SuiteVersion,
     TaskAttempt,
@@ -21,6 +23,7 @@ from llmtrace.benchmarks.models import (
 
 __all__ = [
     "AdapterFailure",
+    "BenchmarkItemResult",
     "BenchmarkProvenance",
     "BenchmarkRunResult",
     "BenchmarkSource",
@@ -30,6 +33,7 @@ __all__ = [
     "FailureCategory",
     "GradeResult",
     "GradeStatus",
+    "ItemStatus",
     "RunPlan",
     "SuiteVersion",
     "TaskAttempt",

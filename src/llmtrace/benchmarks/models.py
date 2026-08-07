@@ -64,6 +64,14 @@ class FailureCategory(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ItemStatus(StrEnum):
+    """Status of a single benchmark item result."""
+
+    GRADED = "graded"
+    UNGRADABLE = "ungradable"
+    FAILURE = "failure"
+
+
 # ---------------------------------------------------------------------------
 # Provenance – shared origin tracking
 # ---------------------------------------------------------------------------
@@ -201,6 +209,34 @@ class BenchmarkSource(BaseModel):
     url: str = Field(default="", description="Reference URL for the benchmark")
 
     model_config = {"extra": "forbid"}
+
+
+def compute_item_aggregate_score(items: list[BenchmarkItemResult]) -> float | None:
+    """Compute the mean normalized_score of GRADED items only.
+
+    UNGRADABLE and FAILURE items are excluded from the aggregate
+    but are reported separately via item status.
+
+    Returns None if there are no graded items.
+    """
+    graded = [it for it in items if it.status == ItemStatus.GRADED]
+    if not graded:
+        return None
+    return sum(it.normalized_score for it in graded) / len(graded)
+
+
+def item_aggregate_summary(items: list[BenchmarkItemResult]) -> dict[str, object]:
+    """Return a summary dict of item-level aggregate statistics."""
+    graded = [it for it in items if it.status == ItemStatus.GRADED]
+    failed = [it for it in items if it.status == ItemStatus.FAILURE]
+    return {
+        "total_items": len(items),
+        "graded_count": len(graded),
+        "failure_count": len(failed),
+        "ungradable_count": len(items) - len(graded) - len(failed),
+        "correct_count": sum(1 for it in graded if it.normalized_score >= 1.0),
+        "item_aggregate_score": compute_item_aggregate_score(items),
+    }
 
 
 class SuiteVersion(BaseModel):
@@ -342,6 +378,10 @@ class TaskAttempt(BenchmarkProvenance):
         default_factory=list,
         description="Evidence UUIDs (as strings) collected during this attempt",
     )
+    item_results: list[BenchmarkItemResult] = Field(
+        default_factory=list,
+        description="Per-item results for this attempt",
+    )
     failure: AdapterFailure | None = Field(default=None, description="Structured failure information on failure")
     started_at: datetime | None = Field(default=None, description="Attempt start time")
     finished_at: datetime | None = Field(default=None, description="Attempt finish time")
@@ -358,6 +398,49 @@ class TaskAttempt(BenchmarkProvenance):
         elif self.failure is not None:
             raise ValueError(f"failure must be None when status is {self.status.value}")
         return self
+
+
+# ---------------------------------------------------------------------------
+# Item-Level Results
+# ---------------------------------------------------------------------------
+
+
+class BenchmarkItemResult(BaseModel):
+    """Per-item result for a single benchmark sample.
+
+    Each item represents one question/problem within a task.  Items
+    reference their parent TaskAttempt via ``attempt_id`` and are
+    aggregated into a task-level GradeResult.
+
+    Provenance is traceable through ``attempt_id`` → ``TaskAttempt``
+    without duplicating all provenance fields.
+    """
+
+    item_id: NonEmptyStr = Field(..., description="Unique item identifier (e.g. item-001)")
+    task_id: NonEmptyStr = Field(..., description="Parent task identifier")
+    attempt_id: NonEmptyStr = Field(..., description="Parent TaskAttempt identifier")
+    status: ItemStatus = Field(default=ItemStatus.GRADED, description="Item grading status")
+    raw_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Raw score [0, 1] for this item",
+    )
+    normalized_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Normalized score in [0, 1]",
+    )
+    grader_id: NonEmptyStr = Field(default="exact_match", description="Grader identifier")
+    evidence_refs: EvidenceRefs = Field(
+        default_factory=list,
+        description="Evidence UUIDs referenced by this item",
+    )
+    error_message: str | None = Field(default=None, description="Error message if grading failed")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional item metadata")
+
+    model_config = {"extra": "forbid"}
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +504,7 @@ class BenchmarkRunResult(BenchmarkProvenance):
 
     run_id: NonEmptyStr = Field(..., description="Unique run identifier")
     task_attempts: list[TaskAttempt] = Field(default_factory=list, description="All task attempts")
+    item_results: list[BenchmarkItemResult] = Field(default_factory=list, description="All per-item results")
     grade_results: list[GradeResult] = Field(default_factory=list, description="All grading results")
     dimensions: list[DimensionResult] = Field(default_factory=list, description="Per-dimension aggregate results")
     started_at: datetime | None = Field(default=None, description="Run start time")

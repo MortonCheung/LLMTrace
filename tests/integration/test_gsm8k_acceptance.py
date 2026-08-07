@@ -136,6 +136,7 @@ def _make_run_result(attempt, grade, adapter) -> BenchmarkRunResult:
     return BenchmarkRunResult(
         run_id="00000000-0000-0000-0000-000000000555",
         task_attempts=[attempt],
+        item_results=list(attempt.item_results),
         grade_results=[grade],
         evidence_refs=attempt.evidence_refs,
         source_id=attempt.source_id,

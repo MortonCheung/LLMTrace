@@ -302,6 +302,23 @@ def _build_task_item(
     # Validate metadata via json_safety module
     validate_json_mapping(attempt.metadata)
 
+    # Build item-level report items
+    from llmtrace.reporting.benchmark_models import ItemReportItem
+
+    item_report_items: list[ItemReportItem] = [
+        ItemReportItem(
+            item_id=ir.item_id,
+            status=ir.status.value,
+            raw_score=ir.raw_score,
+            normalized_score=ir.normalized_score,
+            grader_id=ir.grader_id,
+            evidence_refs=list(ir.evidence_refs),
+            error_message=ir.error_message,
+            metadata=ir.metadata,
+        )
+        for ir in attempt.item_results
+    ]
+
     return TaskReportItem(
         task_id=attempt.task_id,
         attempt_id=attempt.attempt_id,
@@ -311,6 +328,7 @@ def _build_task_item(
         raw_score=raw_score,
         normalized_score=normalized_score,
         evidence_refs=list(attempt.evidence_refs),
+        items=item_report_items,
         failure=failure_item,
         capability_score_eligible=capability_eligible,
         metadata=dict(attempt.metadata),

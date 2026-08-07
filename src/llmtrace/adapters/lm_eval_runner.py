@@ -309,6 +309,7 @@ class LmEvalRunner:
                 "request_count": len(evidence_ids),
                 "actual_options": actual_options,
                 "options_inconsistent": options_inconsistent,
+                "sample_results": self._lm.sample_results if self._lm else [],
             }
         finally:
             # Auto-clean temp directory on all paths

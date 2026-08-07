@@ -146,6 +146,21 @@ class FailureReportItem(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ItemReportItem(BaseModel):
+    """Report view of a single BenchmarkItemResult."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    item_id: str = Field(..., min_length=1)
+    status: str = Field(..., description="graded / ungradable / failure")
+    raw_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    normalized_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    grader_id: str | None = Field(default=None)
+    evidence_refs: list[str] = Field(default_factory=list)
+    error_message: str | None = Field(default=None)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskReportItem(BaseModel):
     """Report view of a single TaskAttempt + optional GradeResult.
 
@@ -164,6 +179,7 @@ class TaskReportItem(BaseModel):
     raw_score: float | None = Field(default=None, description="None when ungraded, failed, or ungradable")
     normalized_score: float | None = Field(default=None, description="None when ungraded, failed, or ungradable")
     evidence_refs: list[str] = Field(default_factory=list)
+    items: list[ItemReportItem] = Field(default_factory=list, description="Per-item results for this task")
     failure: FailureReportItem | None = Field(default=None)
     capability_score_eligible: bool = Field(default=True, description="False for smoke/infrastructure tasks")
     metadata: dict[str, Any] = Field(default_factory=dict, description="JSON-safe metadata (validated at runtime)")

@@ -237,6 +237,8 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
         self._evidence_registry: dict[str, HTTPEvidence] = evidence_registry if evidence_registry is not None else {}
         self._generation_kwargs: dict[str, object] = generation_kwargs or {}
         self._used_options: list[CompletionOptions | None] = []
+        # Per-sample tracking for item-level results
+        self._sample_results: list[dict[str, object]] = []
 
     @property
     def used_options(self) -> CompletionOptions | None:
@@ -257,6 +259,11 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
     def used_options_list(self) -> list[CompletionOptions | None]:
         """Return the raw list of options used (for error diagnostics)."""
         return list(self._used_options)
+
+    @property
+    def sample_results(self) -> list[dict[str, object]]:
+        """Return per-sample tracking data collected during generate_until."""
+        return list(self._sample_results)
 
     # ------------------------------------------------------------------
     # generate_until — the only supported mode
@@ -307,6 +314,15 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
 
             text = evidence.response_text or ""
             responses.append(text)
+
+            # Record per-sample data for item-level results
+            self._sample_results.append(
+                {
+                    "evidence_id": str(evidence.evidence_id),
+                    "response_text": text,
+                    "prompt": prompt,
+                }
+            )
 
         return responses
 
