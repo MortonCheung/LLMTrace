@@ -10,6 +10,7 @@ from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
+from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.utilities.hashing import sha256_hash
 
 # Single source of truth for schema version
@@ -80,6 +81,10 @@ def generate_json_report(
         写入后的输出文件路径.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Enforce evidence reference integrity before generating report
+    if benchmark_sections:
+        validate_report_evidence_refs(benchmark_sections, result.evidence)
 
     # Build benchmark list
     benchmarks: list[dict[str, object]] = []

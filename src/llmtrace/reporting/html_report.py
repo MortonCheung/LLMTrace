@@ -11,6 +11,7 @@ from llmtrace.analysis.risk import risk_explanation
 from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
+from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 
 
 def _evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -46,6 +47,10 @@ def generate_html_report(
 ) -> Path:
     """生成 HTML 报告."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Enforce evidence reference integrity before generating report
+    if benchmark_sections:
+        validate_report_evidence_refs(benchmark_sections, result.evidence)
 
     env = Environment(
         loader=PackageLoader("llmtrace", "reporting/templates"),

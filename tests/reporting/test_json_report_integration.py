@@ -7,7 +7,9 @@ import tempfile
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
+
+import pytest
 
 from llmtrace.benchmarks.models import (
     AdapterFailure,
@@ -15,12 +17,14 @@ from llmtrace.benchmarks.models import (
     BudgetEstimate,
     FailureCategory,
     GradeResult,
+    GradeStatus,
     RunPlan,
     TaskAttempt,
     TaskStatus,
 )
 from llmtrace.config import AuditConfig, AuthStyle, Protocol
 from llmtrace.models.audit import AuditResult, RiskLevel
+from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.json_report import generate_json_report
@@ -112,6 +116,33 @@ def _make_benchmark_section(
     return build_benchmark_report_section(plan, run_result)
 
 
+def _add_evidence_for_section(
+    result: AuditResult,
+    section: BenchmarkReportSection,
+) -> None:
+    """Add matching HTTPEvidence for all task evidence_refs in the section."""
+    evidence_ids_seen: set[str] = set()
+    for task in section.tasks:
+        for ref in task.evidence_refs:
+            if ref not in evidence_ids_seen:
+                evidence_ids_seen.add(ref)
+                result.evidence.append(
+                    HTTPEvidence(
+                        evidence_id=UUID(ref),
+                        evidence_type="smoke_test",
+                        request_method="POST",
+                        request_url_redacted="https://api.example.com/v1/chat/completions",
+                        request_path="/v1/chat/completions",
+                        request_headers_redacted={"Authorization": "Bearer sk-fake-***"},
+                        request_model="test-model",
+                        response_model="test-model",
+                        total_latency_ms=100.0,
+                        http_status=200,
+                        response_text="fake response",
+                    )
+                )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -147,6 +178,7 @@ class TestJsonReportWithBenchmarks:
         """Report with one benchmark section."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
         bm: Sequence[BenchmarkReportSection] = [section]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -168,6 +200,8 @@ class TestJsonReportWithBenchmarks:
             _make_benchmark_section(run_id="11111111-1111-1111-1111-111111111111"),
             _make_benchmark_section(run_id="22222222-2222-2222-2222-222222222222"),
         ]
+        for s in sections:
+            _add_evidence_for_section(result, s)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
@@ -188,6 +222,7 @@ class TestJsonReportWithBenchmarks:
 
         # With one benchmark
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
         with tempfile.TemporaryDirectory() as tmpdir:
             p2 = Path(tmpdir) / "r2.json"
             generate_json_report(result, p2, benchmark_sections=[section])
@@ -238,6 +273,7 @@ class TestJsonReportWithBenchmarks:
             **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
         )
         section = build_benchmark_report_section(plan, rr)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
@@ -254,6 +290,7 @@ class TestJsonReportWithBenchmarks:
         """Smoke tasks are serialized with capability_score_eligible=false."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section(smoke=True)
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
@@ -267,6 +304,7 @@ class TestJsonReportWithBenchmarks:
         """estimated_cost=None serializes as null in JSON."""
         result = _make_minimal_audit_result()
         section = _make_benchmark_section()
+        _add_evidence_for_section(result, section)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
@@ -293,3 +331,130 @@ class TestSchemaVersionConstant:
 
         assert data["schema_version"] == json_report.SCHEMA_VERSION
         assert data["meta"]["schema_version"] == json_report.SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Helpers for evidence validation tests
+# ---------------------------------------------------------------------------
+
+
+def _make_evidence(evidence_id: UUID | None = None) -> HTTPEvidence:
+    """Create a minimal HTTPEvidence for testing."""
+    return HTTPEvidence(
+        evidence_id=evidence_id if evidence_id is not None else uuid4(),
+        evidence_type="smoke_test",
+        request_method="POST",
+        request_url_redacted="https://api.example.com/v1/chat/completions",
+        request_path="/v1/chat/completions",
+        request_headers_redacted={"Authorization": "Bearer sk-fake-***"},
+        request_model="test-model",
+        response_model="test-model",
+        total_latency_ms=100.0,
+        http_status=200,
+        response_text="fake response",
+    )
+
+
+def _make_benchmark_section_with_refs(
+    evidence_refs: list[str],
+    run_id: str = "11111111-1111-1111-1111-111111111111",
+) -> BenchmarkReportSection:
+    """Create a BenchmarkReportSection with specific evidence_refs."""
+    p = _provenance()
+    plan = RunPlan(
+        plan_id="test-plan",
+        task_ids=["task_a"],
+        total_samples=4,
+        budget=BudgetEstimate(planned_requests=4, maximum_requests=4, estimated_cost=None),
+        **{k: v for k, v in p.items() if k in RunPlan.model_fields},
+    )
+    attempt = TaskAttempt(
+        attempt_id="att-1",
+        task_id="task_a",
+        status=TaskStatus.SUCCESS,
+        evidence_refs=evidence_refs,
+        **{k: v for k, v in p.items() if k in TaskAttempt.model_fields},
+    )
+    grade = GradeResult(
+        grade_id="grade-1",
+        attempt_id="att-1",
+        task_id="task_a",
+        grader_id="exact_match",
+        raw_score=0.8,
+        normalized_score=0.8,
+        status=GradeStatus.GRADED,
+        evidence_refs=evidence_refs,
+        **{k: v for k, v in p.items() if k in GradeResult.model_fields},
+    )
+    run_result = BenchmarkRunResult(
+        run_id=run_id,
+        task_attempts=[attempt],
+        grade_results=[grade],
+        evidence_refs=evidence_refs,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
+        **{k: v for k, v in p.items() if k in BenchmarkRunResult.model_fields},
+    )
+    return build_benchmark_report_section(plan, run_result)
+
+
+# ---------------------------------------------------------------------------
+# Evidence validation — production entry tests
+# ---------------------------------------------------------------------------
+
+
+class TestJsonReportEvidenceValidation:
+    """Tests that generate_json_report enforces evidence reference integrity."""
+
+    def test_evidence_closure_success(self) -> None:
+        """Matching evidence allows report generation."""
+        ev = _make_evidence()
+        result = _make_minimal_audit_result()
+        result.evidence = [ev]
+        section = _make_benchmark_section_with_refs([str(ev.evidence_id)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=[section])
+            assert output_path.exists()
+            data = json.loads(output_path.read_text())
+            assert len(data["evidence"]) == 1
+            assert data["evidence"][0]["evidence_id"] == str(ev.evidence_id)
+
+    def test_missing_evidence_raises_valueerror(self) -> None:
+        """Orphan evidence_ref raises ValueError, no file created."""
+        result = _make_minimal_audit_result()
+        result.evidence = []  # empty — no evidence to resolve
+        section = _make_benchmark_section_with_refs([str(uuid4())])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            with pytest.raises(ValueError, match="unresolvable evidence_id"):
+                generate_json_report(result, output_path, benchmark_sections=[section])
+            assert not output_path.exists()
+
+    def test_duplicate_evidence_id_raises_valueerror(self) -> None:
+        """Duplicate evidence_id raises ValueError."""
+        dup_id = uuid4()
+        ev1 = _make_evidence(evidence_id=dup_id)
+        ev2 = _make_evidence(evidence_id=dup_id)
+        result = _make_minimal_audit_result()
+        result.evidence = [ev1, ev2]
+        section = _make_benchmark_section_with_refs([str(dup_id)])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            with pytest.raises(ValueError, match="Duplicate evidence_id"):
+                generate_json_report(result, output_path, benchmark_sections=[section])
+
+    def test_no_benchmarks_preserves_old_behavior(self) -> None:
+        """benchmark_sections=None does not trigger validation."""
+        result = _make_minimal_audit_result()
+        result.evidence = []  # empty evidence is fine with no benchmarks
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, benchmark_sections=None)
+            assert output_path.exists()
+            data = json.loads(output_path.read_text())
+            assert data["benchmarks"] == []
