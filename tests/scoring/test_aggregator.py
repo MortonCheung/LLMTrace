@@ -52,6 +52,7 @@ def _make_attempt(
     task_id: str,
     status: TaskStatus = TaskStatus.SUCCESS,
     evidence_ids: list[str] | None = None,
+    attempt_id: str | None = None,
 ) -> TaskAttempt:
     failure = None
     if status == TaskStatus.FAILURE:
@@ -61,7 +62,7 @@ def _make_attempt(
             message="Test-induced failure",
         )
     return TaskAttempt(
-        attempt_id=f"att-{task_id}",
+        attempt_id=attempt_id or f"att-{task_id}",
         task_id=task_id,
         status=status,
         evidence_refs=evidence_ids or [str(uuid4())],
@@ -77,7 +78,11 @@ def _make_grade(
     normalized_score: float,
     status: GradeStatus = GradeStatus.GRADED,
     evidence_ids: list[str] | None = None,
+    provenance_override: dict | None = None,
 ) -> GradeResult:
+    prov = dict(_PROVENANCE)
+    if provenance_override:
+        prov.update(provenance_override)
     return GradeResult(
         grade_id=grade_id,
         attempt_id=attempt_id,
@@ -87,7 +92,7 @@ def _make_grade(
         normalized_score=normalized_score,
         status=status,
         evidence_refs=evidence_ids or [str(uuid4())],
-        **_PROVENANCE,
+        **prov,
     )
 
 
@@ -95,15 +100,29 @@ def _make_run(
     run_id: str,
     attempts: list[TaskAttempt],
     grades: list[GradeResult],
+    provenance_override: dict | None = None,
 ) -> BenchmarkRunResult:
+    prov = dict(_PROVENANCE)
+    if provenance_override:
+        prov.update(provenance_override)
     return BenchmarkRunResult(
         run_id=run_id,
         task_attempts=attempts,
         grade_results=grades,
         started_at=datetime(2026, 1, 1, tzinfo=UTC),
         finished_at=datetime(2026, 1, 1, 1, tzinfo=UTC),
-        **_PROVENANCE,
+        **prov,
     )
+
+
+class _FakeCalibrator:
+    """Calibrator that returns a fixed value for testing."""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def calibrate(self, dimension, raw_score, reference_profile=None):
+        return self.value
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +187,6 @@ class TestDimensionAggregation:
             registry,
             policy,
         )
-        # (0.8*3 + 0.6*1) / (3+1) = 3.0/4 = 0.75
         assert abs(result.raw_normalized_score - 0.75) < 1e-9
 
     def test_failure_coverage(self) -> None:
@@ -231,9 +249,8 @@ class TestDimensionAggregation:
             registry,
             policy,
         )
-        # Smoke excluded → only task_a in the score
         assert abs(result.raw_normalized_score - 0.5) < 1e-9
-        assert abs(result.task_coverage - 1.0) < 1e-9  # smoke weight doesn't count toward planned
+        assert abs(result.task_coverage - 1.0) < 1e-9
         assert "smoke_task" not in result.source_task_ids
 
     def test_ungradable_not_in_score_affects_coverage(self) -> None:
@@ -346,7 +363,6 @@ class TestDimensionAggregation:
             registry,
             policy,
         )
-        # eid should appear only once
         assert result.evidence_refs.count(eid) == 1
 
     def test_global_weight_assigned(self) -> None:
@@ -370,6 +386,246 @@ class TestDimensionAggregation:
         )
         assert abs(result.global_weight - 0.20) < 1e-9
         assert abs(result.weighted_contribution - 0.9 * 0.20) < 1e-9
+
+    # -- NEW: multi-run graded_task_count --------------------------------
+
+    def test_multi_run_graded_count(self) -> None:
+        """Two runs with different tasks, both grading → counts are global."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+                TaskScoringSpec(task_id="task_b", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [_make_grade("g1", "att-a", "task_a", 0.8)],
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_b", attempt_id="att-b")],
+            [_make_grade("g2", "att-b", "task_b", 0.6)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run1, run2],
+            registry,
+            policy,
+        )
+        assert result.task_count == 2
+        assert result.graded_task_count == 2
+        assert abs(result.task_coverage - 1.0) < 1e-9
+
+    def test_multi_run_one_failure(self) -> None:
+        """Run1 graded, run2 failure → graded_task_count == 1."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+                TaskScoringSpec(task_id="task_b", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", TaskStatus.SUCCESS, attempt_id="att-a")],
+            [_make_grade("g1", "att-a", "task_a", 0.8)],
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_b", TaskStatus.FAILURE, attempt_id="att-b")],
+            [],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run1, run2],
+            registry,
+            policy,
+        )
+        assert result.task_count == 2
+        assert result.graded_task_count == 1
+        assert abs(result.task_coverage - 0.5) < 1e-9
+
+    # -- NEW: attempt_id pairing errors ----------------------------------
+
+    def test_orphan_grade_result_raises(self) -> None:
+        """GradeResult with no matching TaskAttempt → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [_make_grade("orphan", "att-nonexistent", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Orphan GradeResult"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+            )
+
+    def test_grade_attempt_task_id_mismatch_raises(self) -> None:
+        """GradeResult.task_id != TaskAttempt.task_id → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [_make_grade("g1", "att-a", "wrong_task_id", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="does not match"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+            )
+
+    def test_duplicate_grade_for_attempt_raises(self) -> None:
+        """Two GradeResults for same attempt_id → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [
+                _make_grade("g1", "att-a", "task_a", 0.8),
+                _make_grade("g2", "att-a", "task_a", 0.9),
+            ],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Duplicate GradeResult"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+            )
+
+    def test_provenance_mismatch_grade_raises(self) -> None:
+        """GradeResult with different provenance → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [_make_grade("g1", "att-a", "task_a", 0.8, provenance_override={"source_id": "different"})],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Provenance mismatch"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+            )
+
+    # -- NEW: calibration state machine ----------------------------------
+
+    def test_no_calibration_returns_uncalibrated(self) -> None:
+        """Default NoCalibration → status UNCALIBRATED, calibrated_score None."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run],
+            registry,
+            policy,
+        )
+        assert result.status == DimensionScoreStatus.UNCALIBRATED
+        assert result.calibrated_score is None
+
+    def test_fake_calibration_returns_scored(self) -> None:
+        """Fake calibrator returning 83.5 → status SCORED, calibrated_score = 83.5."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run],
+            registry,
+            policy,
+            calibrator=_FakeCalibrator(83.5),
+        )
+        assert result.status == DimensionScoreStatus.SCORED
+        assert result.calibrated_score == 83.5
+
+    def test_calibrated_score_out_of_range_raises(self) -> None:
+        """Calibrator returning >100 → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="must be in \\[0, 100\\]"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+                calibrator=_FakeCalibrator(101.0),
+            )
+
+    def test_calibrated_score_negative_raises(self) -> None:
+        """Calibrator returning <0 → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="must be in \\[0, 100\\]"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+                calibrator=_FakeCalibrator(-0.1),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -407,21 +663,16 @@ class TestCapabilityProfile:
             policy,
         )
 
-        # coverage_weight: reasoning(0.25) + coding(0.20) = 0.45
         assert abs(profile.coverage_weight - 0.45) < 1e-9
-        # provisional_raw_index: 0.8*0.25 + 0.7*0.20 = 0.20 + 0.14 = 0.34
         assert abs(profile.provisional_raw_index - 0.34) < 1e-9
         assert profile.calibrated_total_score is None
 
-        # Evidence propagation
         assert e1 in profile.evidence_refs
         assert e2 in profile.evidence_refs
 
-        # Check dimensions
         dims_by_name = {d.dimension: d for d in profile.dimensions}
         assert dims_by_name[CapabilityDimension.REASONING].status == DimensionScoreStatus.UNCALIBRATED
         assert dims_by_name[CapabilityDimension.CODING].status == DimensionScoreStatus.UNCALIBRATED
-        # Untested dimensions should be UNAVAILABLE or INSUFFICIENT_DATA
         assert dims_by_name[CapabilityDimension.MATH_SCIENCE].status == DimensionScoreStatus.UNAVAILABLE
         assert dims_by_name[CapabilityDimension.INSTRUCTION_FOLLOWING].status == DimensionScoreStatus.UNAVAILABLE
 
@@ -443,9 +694,7 @@ class TestCapabilityProfile:
             registry,
             policy,
         )
-        # Only reasoning → coverage_weight = 0.25, NOT 1.0
         assert abs(profile.coverage_weight - 0.25) < 1e-9
-        # provisional_raw_index = 0.8 * 0.25 = 0.20, NOT 0.8
         assert abs(profile.provisional_raw_index - 0.20) < 1e-9
 
     def test_all_calibrated_scores_none(self) -> None:
@@ -503,7 +752,7 @@ class TestCapabilityProfile:
         )
         policy = CapabilityScoringPolicy.create_v1()
         profile = aggregate_capability_profile([run], registry, policy)
-        with pytest.raises((TypeError, ValueError)):  # frozen model raises on mutation
+        with pytest.raises((TypeError, ValueError)):
             profile.coverage_weight = 1.0  # type: ignore[misc]
 
     def test_smoke_does_not_affect_profile(self) -> None:
@@ -534,5 +783,71 @@ class TestCapabilityProfile:
         profile = aggregate_capability_profile([run], registry, policy)
 
         dim_reasoning = next(d for d in profile.dimensions if d.dimension == CapabilityDimension.REASONING)
-        assert abs(dim_reasoning.raw_normalized_score - 0.5) < 1e-9  # NOT (0.5+1.0)/2=0.75
+        assert abs(dim_reasoning.raw_normalized_score - 0.5) < 1e-9
         assert abs(profile.provisional_raw_index - 0.5 * 0.25) < 1e-9
+
+    # -- NEW: profile mutation tests -------------------------------------
+
+    def test_dimension_result_is_frozen(self) -> None:
+        """DimensionScoreResult must be frozen."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.5)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run],
+            registry,
+            policy,
+        )
+        with pytest.raises((TypeError, ValueError)):
+            result.raw_normalized_score = 0.9  # type: ignore[misc]
+
+    def test_profile_evidence_refs_immutable(self) -> None:
+        """evidence_refs on profile is a tuple → cannot be mutated."""
+        eid = str(uuid4())
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a", evidence_ids=[eid])],
+            [_make_grade("g1", "att-task_a", "task_a", 0.5, evidence_ids=[eid])],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        profile = aggregate_capability_profile([run], registry, policy)
+        # evidence_refs is a tuple, cannot append
+        with pytest.raises(AttributeError):
+            profile.evidence_refs.append("fake-uuid")  # type: ignore[union-attr]
+
+    def test_dimension_evidence_refs_immutable(self) -> None:
+        """evidence_refs on DimensionScoreResult is a tuple."""
+        eid = str(uuid4())
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a", evidence_ids=[eid])],
+            [_make_grade("g1", "att-task_a", "task_a", 0.5, evidence_ids=[eid])],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run],
+            registry,
+            policy,
+        )
+        with pytest.raises(AttributeError):
+            result.evidence_refs.append("fake")  # type: ignore[union-attr]

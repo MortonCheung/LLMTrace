@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from enum import StrEnum
 from typing import Any
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Capability dimensions
@@ -44,8 +46,11 @@ _LONG_TERM_WEIGHTS: dict[CapabilityDimension, float] = {
 def _validate_weights_sum(weights: dict[CapabilityDimension, float]) -> dict[CapabilityDimension, float]:
     """Validate that dimension weights sum to exactly 1.0."""
     total = sum(weights.values())
-    if abs(total - 1.0) > 1e-9:
+    if not math.isfinite(total) or abs(total - 1.0) > 1e-9:
         raise ValueError(f"Global dimension weights must sum to 1.0, got {total}")
+    for dim, w in weights.items():
+        if not math.isfinite(w):
+            raise ValueError(f"Weight for {dim.value} is not finite: {w}")
     return weights
 
 
@@ -95,7 +100,23 @@ class TaskScoringSpec(BaseModel):
     suite_id: str = Field(default="", description="Benchmark suite identifier")
     scoring_notes: str = Field(default="", description="Optional scoring notes")
 
-    model_config = {"extra": "forbid"}
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+# ---------------------------------------------------------------------------
+# Evidence UUID validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_evidence_uuids(refs: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate that every entry is a valid UUID and return normalized forms."""
+    result: list[str] = []
+    for r in refs:
+        try:
+            result.append(str(UUID(r)))
+        except ValueError as exc:
+            raise ValueError(f"Invalid evidence UUID: '{r}'") from exc
+    return tuple(result)
 
 
 # ---------------------------------------------------------------------------
@@ -138,17 +159,25 @@ class DimensionScoreResult(BaseModel):
         le=1.0,
         description="raw_normalized_score × global_weight",
     )
-    evidence_refs: list[str] = Field(
-        default_factory=list,
+    evidence_refs: tuple[str, ...] = Field(
+        default_factory=tuple,
         description="Evidence UUIDs from contributing GradeResults and TaskAttempts",
     )
-    source_task_ids: list[str] = Field(
-        default_factory=list,
+    source_task_ids: tuple[str, ...] = Field(
+        default_factory=tuple,
         description="Task IDs that contributed to this dimension score",
     )
-    warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings")
+    warnings: tuple[str, ...] = Field(default_factory=tuple, description="Non-fatal warnings")
 
-    model_config = {"extra": "forbid"}
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    @field_validator("calibrated_score")
+    @classmethod
+    def _validate_calibrated_score_range(cls, v: float | None) -> float | None:
+        """calibrated_score must be None or in [0, 100]."""
+        if v is not None and (v < 0.0 or v > 100.0):
+            raise ValueError(f"calibrated_score must be in [0, 100], got {v}")
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +200,8 @@ class CapabilityProfile(BaseModel):
     )
     scoring_policy_id: str = Field(..., min_length=1, description="Scoring policy identifier")
     scoring_policy_version: str = Field(..., min_length=1, description="Scoring policy version")
-    dimensions: list[DimensionScoreResult] = Field(
-        default_factory=list,
+    dimensions: tuple[DimensionScoreResult, ...] = Field(
+        default_factory=tuple,
         description="Per-dimension score results",
     )
     coverage_weight: float = Field(
@@ -195,11 +224,25 @@ class CapabilityProfile(BaseModel):
             "0–100 capability score."
         ),
     )
-    evidence_refs: list[str] = Field(
-        default_factory=list,
+    evidence_refs: tuple[str, ...] = Field(
+        default_factory=tuple,
         description="Union of all dimension evidence_refs (deduplicated, first-seen order)",
     )
-    warnings: list[str] = Field(default_factory=list, description="Non-fatal warnings")
+    warnings: tuple[str, ...] = Field(default_factory=tuple, description="Non-fatal warnings")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
 
     model_config = {"frozen": True, "extra": "forbid"}
+
+    @field_validator("calibrated_total_score")
+    @classmethod
+    def _validate_calibrated_total_score_range(cls, v: float | None) -> float | None:
+        """calibrated_total_score must be None or in [0, 100]."""
+        if v is not None and (v < 0.0 or v > 100.0):
+            raise ValueError(f"calibrated_total_score must be in [0, 100], got {v}")
+        return v
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def _validate_evidence_uuids(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """Validate that evidence_refs entries are valid UUIDs."""
+        return _validate_evidence_uuids(v)
