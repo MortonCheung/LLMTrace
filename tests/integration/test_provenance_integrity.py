@@ -18,10 +18,10 @@ from unittest.mock import patch
 import pytest
 
 from llmtrace.adapters.lm_eval import (
+    LmEvalAdapter,
     _SMOKE_MANIFEST,
     _TASK_REGISTRY,
     _get_task_def,
-    LmEvalAdapter,
 )
 from llmtrace.benchmarks.models import (
     GradeResult,
