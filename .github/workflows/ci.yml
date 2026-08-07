@@ -38,7 +38,7 @@ jobs:
         run: mypy src/llmtrace
 
       - name: Test (pytest + coverage gate)
-        run: pytest --cov=llmtrace --cov-report=term-missing --cov-fail-under=68 --ignore=tests/integration/test_gsm8k_acceptance.py --ignore=tests/integration/test_provenance_integrity.py
+        run: pytest --cov=llmtrace --cov-report=term-missing --cov-fail-under=68 --ignore=tests/integration/test_gsm8k_acceptance.py --ignore=tests/integration/test_provenance_integrity.py --ignore=tests/integration/test_item_level_results.py
 
   lm-eval-integration:
     runs-on: ubuntu-latest
