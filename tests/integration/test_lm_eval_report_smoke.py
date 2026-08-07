@@ -41,7 +41,7 @@ class TestRealSmokeReportChain:
         # 1. Get the smoke task spec from LmEvalAdapter
         adapter = LmEvalAdapter()
         task_specs = adapter.list_tasks()
-        assert len(task_specs) == 1
+        assert len(task_specs) >= 1
         smoke_spec = task_specs[0]
 
         # 2. Build a plan using the shared planner

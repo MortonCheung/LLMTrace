@@ -36,6 +36,33 @@ from tests.adapters import conftest as _conftest
 from tests.adapters.conftest import FakeProvider
 
 # ---------------------------------------------------------------------------
+# Platform-normalization for cross-OS golden comparison
+# ---------------------------------------------------------------------------
+
+
+def _normalize_report(report: dict[str, object]) -> None:
+    """Remove platform-dependent fields so golden comparison works on Linux CI.
+
+    Strips fields whose values depend on the OS, timezone, or call-count of
+    mock functions rather than on the structural correctness of the pipeline.
+    """
+    # Root level
+    report.pop("content_hash", None)
+
+    # Meta: hash, timezone, platform
+    meta = report.get("meta")
+    if isinstance(meta, dict):
+        meta.pop("content_hash", None)
+        meta.pop("local_timezone", None)
+        meta.pop("platform", None)
+
+    # Evidence: latency depends on monotonic() call count (varies per platform)
+    for ev in report.get("evidence", []):
+        if isinstance(ev, dict):
+            ev.pop("total_latency_ms", None)
+
+
+# ---------------------------------------------------------------------------
 # Fixed UUID sequence (matches gen_smoke_golden.py)
 # ---------------------------------------------------------------------------
 
@@ -83,7 +110,7 @@ class TestSmokeFullReportGolden:
         async def _run() -> None:
             adapter = LmEvalAdapter()
             task_specs = adapter.list_tasks()
-            smoke_spec = task_specs[0]
+            smoke_spec = next(t for t in task_specs if t.task_id == "llmtrace_smoke")
 
             plan = build_plan(
                 suite_id="llmtrace_smoke",
@@ -195,11 +222,14 @@ class TestSmokeFullReportGolden:
             # Validation function check
             validate_report_evidence_refs([section], list(provider.evidence))
 
+            # Normalize platform-dependent fields for cross-platform comparison
+            _normalize_report(actual)
+            _normalize_report(expected)
+
             assert actual == expected, (
                 f"Golden fixture mismatch.\n"
                 f"Actual keys: {sorted(actual.keys())}\n"
                 f"Expected keys: {sorted(expected.keys())}\n"
-                f"Diff in content_hash may indicate evidence content change."
             )
 
         asyncio.run(_run())

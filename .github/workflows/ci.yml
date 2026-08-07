@@ -38,7 +38,7 @@ jobs:
         run: mypy src/llmtrace
 
       - name: Test (pytest + coverage gate)
-        run: pytest --cov=llmtrace --cov-report=term-missing --cov-fail-under=68
+        run: pytest --cov=llmtrace --cov-report=term-missing --cov-fail-under=68 --ignore=tests/integration/test_gsm8k_acceptance.py
 
   lm-eval-integration:
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
           pip install -e ".[dev,lm-eval]"
 
       - name: Run lm-eval adapter integration tests
-        run: pytest tests/adapters/test_lm_eval*.py tests/integration/test_lm_eval*.py
+        run: pytest tests/adapters/test_lm_eval*.py tests/integration/test_lm_eval*.py tests/integration/test_gsm8k*.py
 
   packaging:
     runs-on: ubuntu-latest
@@ -111,6 +111,14 @@ jobs:
           assert json_path.exists(), f'JSON not found: {json_path}'
           data = json.loads(json_path.read_text())
           assert len(data) == 4
+
+          # Verify GSM8K subset files are bundled
+          gsm_yaml = root / 'gsm8k_subset.yaml'
+          assert gsm_yaml.exists(), f'gsm8k_subset.yaml not found in wheel'
+          gsm_json = root / 'gsm8k_subset.json'
+          assert gsm_json.exists(), f'gsm8k_subset.json not found in wheel'
+          gsm_data = json.loads(gsm_json.read_text())
+          assert len(gsm_data) == 8
 
           # Verify import comes from wheel venv, not editable source
           import llmtrace

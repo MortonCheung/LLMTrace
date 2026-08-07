@@ -568,5 +568,5 @@ class TestSmokeTaskMetadata:
         """The smoke task category is 'smoke', not a capability benchmark."""
         adapter = LmEvalAdapter()
         tasks = adapter.list_tasks()
-        for t in tasks:
-            assert t.category == "smoke"
+        smoke_task = next(t for t in tasks if t.task_id == "llmtrace_smoke")
+        assert smoke_task.category == "smoke"
