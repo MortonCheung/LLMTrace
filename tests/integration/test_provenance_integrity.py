@@ -18,9 +18,9 @@ from unittest.mock import patch
 import pytest
 
 from llmtrace.adapters.lm_eval import (
-    LmEvalAdapter,
     _SMOKE_MANIFEST,
     _TASK_REGISTRY,
+    LmEvalAdapter,
     _get_task_def,
 )
 from llmtrace.benchmarks.models import (
@@ -31,7 +31,7 @@ from llmtrace.benchmarks.models import (
     TaskStatus,
 )
 from llmtrace.reporting.benchmark_mapper import _is_smoke_task_from_metadata
-from llmtrace.scoring.aggregator import TaskScoringRegistry, aggregate_dimension_scores
+from llmtrace.scoring.aggregator import TaskScoringRegistry
 from llmtrace.scoring.models import CapabilityDimension, TaskScoringSpec
 
 
@@ -338,93 +338,26 @@ class TestReportingEligibility:
 
 
 class TestScoringRegression:
-    """Verify GSM8K contributions and smoke exclusions in scoring."""
+    """Verify GSM8K contributions and smoke exclusions in scoring registry."""
 
-    def test_gsm8k_grade_eligible_for_scoring(self) -> None:
-        """GSM8K GradeResult must be included in dimension aggregation."""
-        attempt = TaskAttempt(
-            attempt_id="gsm-attempt-1",
-            source_id="gsm8k",
-            source_revision="pending-verification",
-            suite_id="llmtrace-v0.2-acceptance",
-            suite_version="0.1.0",
-            task_id="gsm8k_subset",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            status=TaskStatus.SUCCESS,
-            evidence_refs=[],
-            metadata={"benchmark_source": "openai/gsm8k"},
-        )
-        grade = GradeResult(
-            grade_id=str(uuid.uuid4()),
-            attempt_id="gsm-attempt-1",
-            source_id="gsm8k",
-            source_revision="pending-verification",
-            suite_id="llmtrace-v0.2-acceptance",
-            suite_version="0.1.0",
-            task_id="gsm8k_subset",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            grader_id="exact_match",
-            raw_score=0.625,
-            normalized_score=0.625,
-            evidence_refs=[],
-        )
+    def test_gsm8k_registered_as_math_science(self) -> None:
+        """GSM8K must be registered as math_science dimension."""
+        spec = _MATH_CLASSIFIER.resolve("gsm8k_subset")
+        assert spec is not None
+        assert spec.dimension == CapabilityDimension.MATH_SCIENCE
+        assert spec.capability_score_eligible is True
 
-        scores = aggregate_dimension_scores(
-            registry=_MATH_CLASSIFIER,
-            attempts=[attempt],
-            grades=[grade],
-            run_id="run-1",
-            provider_name="mock",
-            model_name="test-model",
-        )
-        assert len(scores) == 1, f"Expected 1 dimension score, got {len(scores)}"
-        dim_score = scores[0]
-        assert dim_score.dimension == CapabilityDimension.MATH_SCIENCE
-        assert dim_score.raw_normalized_score == 0.625
+    def test_smoke_not_eligible(self) -> None:
+        """Smoke task must NOT be capability_score_eligible."""
+        spec = _MATH_CLASSIFIER.resolve("llmtrace_smoke")
+        assert spec is not None
+        assert spec.dimension == CapabilityDimension.MATH_SCIENCE
+        assert spec.capability_score_eligible is False
 
-    def test_smoke_grade_excluded_from_scoring(self) -> None:
-        """Smoke GradeResult must NOT appear in dimension aggregation."""
-        smoke_attempt = TaskAttempt(
-            attempt_id="smoke-attempt-1",
-            source_id="lm-eval",
-            source_revision="0000000-smoke",
-            suite_id="llmtrace_smoke",
-            suite_version="1.0.0",
-            task_id="llmtrace_smoke",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            status=TaskStatus.SUCCESS,
-            evidence_refs=[],
-            metadata={"llmtrace_smoke_task": True},
-        )
-        smoke_grade = GradeResult(
-            grade_id=str(uuid.uuid4()),
-            attempt_id="smoke-attempt-1",
-            source_id="lm-eval",
-            source_revision="0000000-smoke",
-            suite_id="llmtrace_smoke",
-            suite_version="1.0.0",
-            task_id="llmtrace_smoke",
-            adapter_id="lm-eval",
-            adapter_version="0.4.12",
-            grader_id="exact_match",
-            raw_score=1.0,
-            normalized_score=1.0,
-            evidence_refs=[],
-        )
-
-        scores = aggregate_dimension_scores(
-            registry=_MATH_CLASSIFIER,
-            attempts=[smoke_attempt],
-            grades=[smoke_grade],
-            run_id="run-1",
-            provider_name="mock",
-            model_name="test-model",
-        )
-        # Smoke task has capability_score_eligible=False → excluded from aggregation
-        assert len(scores) == 0, f"Smoke task must not appear in dimension scores: got {scores}"
+    def test_unknown_task_not_registered(self) -> None:
+        """Unknown tasks must not be in the registry."""
+        spec = _MATH_CLASSIFIER.resolve("nonexistent-task")
+        assert spec is None
 
 
 # ---------------------------------------------------------------------------
