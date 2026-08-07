@@ -49,8 +49,11 @@ metadata:
   upstream_dataset: openai/gsm8k
   upstream_revision: pending-verification
   upstream_revision_note: >
-    The 8-sample subset was extracted from the openai/gsm8k dataset.
-    A fixed HF datasets revision commit has not yet been independently
-    confirmed.  This field will be updated to a concrete SHA once the
-    extraction provenance is fully traced.
+    The 8-sample subset was extracted from the openai/gsm8k dataset (MIT license).
+    The HF datasets repo HEAD at verification time (2026-08-07) was
+    740312add88f781978c0658806c59bc2815b9866, but the exact extraction
+    provenance (which HF datasets commit the 8 samples were drawn from)
+    has not yet been independently confirmed.  This field MUST be updated
+    to a concrete SHA before the formal Quick Suite release.
+    BLOCKER: formal Quick Suite release.
   subset_sha256: 1bd26da0a30a17c643f41a414072bc3a272018f63e92c9fdc3d313724225b182
