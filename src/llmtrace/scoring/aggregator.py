@@ -14,7 +14,8 @@ Architecture:
 from __future__ import annotations
 
 import copy
-from collections.abc import Sequence
+import math
+from collections.abc import Iterator, Sequence
 from typing import Any, Protocol
 
 from llmtrace.benchmarks.models import (
@@ -90,8 +91,6 @@ class TaskScoringRegistry:
         Raises:
             TaskRegistrationError: If the same task_id is registered more
                 than once.
-            ValueError: If any spec has capability_score_eligible=True but
-                the task also appears in a different dimension.
         """
         self._specs: dict[str, TaskScoringSpec] = {}
         if specs:
@@ -111,12 +110,12 @@ class TaskScoringRegistry:
     def __len__(self) -> int:
         return len(self._specs)
 
-    def __iter__(self) -> Any:
+    def __iter__(self) -> Iterator[TaskScoringSpec]:
         """Iterate over deep copies of all TaskScoringSpec entries."""
         for spec in self._specs.values():
             yield copy.deepcopy(spec)
 
-    def items(self) -> Any:
+    def items(self) -> Iterator[tuple[str, TaskScoringSpec]]:
         """Return (task_id, deep-copied TaskScoringSpec) pairs."""
         for tid, spec in self._specs.items():
             yield (tid, copy.deepcopy(spec))
@@ -125,17 +124,6 @@ class TaskScoringRegistry:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _normalize_evidence_refs(refs: list[str]) -> list[str]:
-    """Deduplicate evidence UUIDs, preserving first-seen order."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for r in refs:
-        if r not in seen:
-            seen.add(r)
-            out.append(r)
-    return out
 
 
 def _resolve_spec(
@@ -173,56 +161,58 @@ def _count_eligible_tasks(
 
 
 # ---------------------------------------------------------------------------
-# GradeResult ↔ TaskAttempt pairing (by attempt_id)
+# GradeResult ↔ TaskAttempt pairing — per-run only, no cross-run
 # ---------------------------------------------------------------------------
 
 
-def _build_attempt_index(
-    run_results: Sequence[BenchmarkRunResult],
-) -> dict[str, tuple[BenchmarkRunResult, Any]]:  # Any = TaskAttempt
-    """Build a global index of attempt_id → (run_result, TaskAttempt)."""
-    index: dict[str, tuple[BenchmarkRunResult, Any]] = {}
-    for run in run_results:
-        for attempt in run.task_attempts:
-            index[attempt.attempt_id] = (run, attempt)
-    return index
-
-
-def _pair_grades_with_attempts(
+def _pair_grades_with_attempts_per_run(
     run_results: Sequence[BenchmarkRunResult],
 ) -> dict[str, tuple[BenchmarkRunResult, Any, Any]]:  # (run, attempt, grade)
-    """Pair GradeResult → TaskAttempt by attempt_id with full validation.
+    """Pair GradeResult → TaskAttempt within each BenchmarkRunResult.
 
     Returns:
         attempt_id → (run_result, TaskAttempt, GradeResult)
 
     Raises:
-        ValueError: On orphan GradeResult, duplicate GradeResult,
+        ValueError: On duplicate attempt_id (within or across runs),
+                    orphan GradeResult, duplicate GradeResult,
                     attempt_id/task_id mismatch, or provenance mismatch.
     """
-    attempt_index = _build_attempt_index(run_results)
     paired: dict[str, tuple[BenchmarkRunResult, Any, Any]] = {}
 
     for run in run_results:
+        # Build per-run attempt index
+        attempt_by_id: dict[str, Any] = {}  # Any = TaskAttempt
+        for attempt in run.task_attempts:
+            aid = attempt.attempt_id
+            if aid in attempt_by_id:
+                raise ValueError(f"Duplicate attempt_id='{aid}' within BenchmarkRunResult '{run.run_id}'")
+            attempt_by_id[aid] = attempt
+
         for grade in run.grade_results:
             aid = grade.attempt_id
 
-            # Orphan check
-            if aid not in attempt_index:
+            # Orphan: grade refers to unknown attempt in this run
+            if aid not in attempt_by_id:
                 raise ValueError(
-                    f"Orphan GradeResult: attempt_id='{aid}' (grade_id='{grade.grade_id}') has no matching TaskAttempt"
+                    f"Orphan GradeResult in run '{run.run_id}': "
+                    f"attempt_id='{aid}' (grade_id='{grade.grade_id}') "
+                    f"has no matching TaskAttempt in the same run"
                 )
 
-            # Duplicate check
+            # Detect duplicate attempt_id within or across runs
             if aid in paired:
-                existing_grade = paired[aid][2]
-                raise ValueError(
-                    f"Duplicate GradeResult for attempt_id='{aid}': "
-                    f"grade_ids='{grade.grade_id}' and '{existing_grade.grade_id}'"
-                )
+                existing_run = paired[aid][0]
+                if existing_run.run_id != run.run_id:
+                    raise ValueError(
+                        f"Duplicate attempt_id='{aid}' across runs '{existing_run.run_id}' and '{run.run_id}'"
+                    )
+                else:
+                    raise ValueError(f"Duplicate GradeResult for attempt_id='{aid}' in run '{run.run_id}'")
+
+            attempt = attempt_by_id[aid]
 
             # task_id consistency
-            _, attempt = attempt_index[aid]
             if grade.task_id != attempt.task_id:
                 raise ValueError(
                     f"GradeResult.task_id='{grade.task_id}' does not match "
@@ -264,7 +254,8 @@ def aggregate_dimension_score(
 
     contribute to the dimension score.
 
-    GradeResult is paired with TaskAttempt by attempt_id (not task_id).
+    GradeResult is paired with TaskAttempt by attempt_id within the same
+    BenchmarkRunResult — cross-run pairing is forbidden.
 
     Args:
         dimension: Target capability dimension.
@@ -279,8 +270,9 @@ def aggregate_dimension_score(
 
     Raises:
         TaskRegistrationError: If *strict* and unregistered tasks encountered.
-        ValueError: On orphan GradeResult, duplicate GradeResult,
-                    attempt_id/task_id mismatch, or provenance mismatch.
+        ValueError: On orphan/duplicate/cross-run GradeResult,
+                    duplicate attempt_id, task_id mismatch,
+                    or provenance mismatch.
     """
     if calibrator is None:
         calibrator = _NoCalibration()
@@ -288,8 +280,8 @@ def aggregate_dimension_score(
     global_weight = policy.weight_for(dimension)
     warnings: list[str] = []
 
-    # ---------- Build attempt_id-level grade index ----------
-    paired = _pair_grades_with_attempts(run_results)
+    # ---------- Build per-run attempt_id-level grade index ----------
+    paired = _pair_grades_with_attempts_per_run(run_results)
 
     # ---------- Aggregate across all runs ----------
     planned_weight_sum = 0.0
@@ -382,7 +374,7 @@ def aggregate_dimension_score(
             task_coverage=task_coverage,
             global_weight=global_weight,
             weighted_contribution=raw_normalized_score * global_weight,
-            evidence_refs=tuple(_normalize_evidence_refs(evidence_refs)),
+            evidence_refs=tuple(evidence_refs),
             source_task_ids=tuple(sorted(set(source_task_ids))),
             warnings=tuple(warnings),
         )
@@ -391,7 +383,9 @@ def aggregate_dimension_score(
     calibrated = calibrator.calibrate(dimension, raw_normalized_score)
 
     if calibrated is not None:
-        # Validate calibration range
+        # Validate calibration: finite and 0.0–100.0
+        if not math.isfinite(calibrated):
+            raise ValueError(f"Calibrated score for {dimension.value} is non-finite: {calibrated}")
         if calibrated < 0.0 or calibrated > 100.0:
             raise ValueError(f"Calibrated score for {dimension.value} is {calibrated}, must be in [0, 100]")
         status = DimensionScoreStatus.SCORED
@@ -408,7 +402,7 @@ def aggregate_dimension_score(
         task_coverage=task_coverage,
         global_weight=global_weight,
         weighted_contribution=raw_normalized_score * global_weight,
-        evidence_refs=tuple(_normalize_evidence_refs(evidence_refs)),
+        evidence_refs=tuple(evidence_refs),
         source_task_ids=tuple(sorted(set(source_task_ids))),
         warnings=tuple(warnings),
     )
@@ -485,6 +479,6 @@ def aggregate_capability_profile(
         coverage_weight=coverage_weight,
         calibrated_total_score=None,  # Always None until Reference Calibration
         provisional_raw_index=provisional_raw_index,
-        evidence_refs=tuple(_normalize_evidence_refs(all_evidence)),
+        evidence_refs=tuple(all_evidence),
         warnings=tuple(all_warnings),
     )

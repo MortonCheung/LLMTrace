@@ -140,6 +140,39 @@ class TestDimensionScoreResult:
         with pytest.raises((TypeError, ValueError)):
             result.raw_normalized_score = 0.9  # type: ignore[misc]
 
+    def test_invalid_evidence_uuid_rejected(self) -> None:
+        """Invalid UUID in evidence_refs → ValueError."""
+        with pytest.raises(ValueError):
+            DimensionScoreResult(
+                dimension=CapabilityDimension.REASONING,
+                status=DimensionScoreStatus.UNCALIBRATED,
+                raw_normalized_score=0.5,
+                evidence_refs=("not-a-uuid",),
+            )
+
+    def test_evidence_refs_deduplicated(self) -> None:
+        """Duplicate evidence UUIDs are deduplicated on construction."""
+        eid = str(uuid4())
+        result = DimensionScoreResult(
+            dimension=CapabilityDimension.REASONING,
+            status=DimensionScoreStatus.UNCALIBRATED,
+            raw_normalized_score=0.5,
+            evidence_refs=(eid, eid),
+        )
+        assert result.evidence_refs.count(eid) == 1
+        assert len(result.evidence_refs) == 1
+
+    def test_evidence_refs_preserves_order(self) -> None:
+        """First-seen order of evidence UUIDs is preserved."""
+        e1, e2 = str(uuid4()), str(uuid4())
+        result = DimensionScoreResult(
+            dimension=CapabilityDimension.REASONING,
+            status=DimensionScoreStatus.UNCALIBRATED,
+            raw_normalized_score=0.5,
+            evidence_refs=(e1, e2, e1),  # e1 duplicated, first occurrence wins
+        )
+        assert result.evidence_refs == (e1, e2)
+
 
 class TestCapabilityProfile:
     """Tests for CapabilityProfile."""
@@ -177,7 +210,7 @@ class TestCapabilityProfile:
 
     def test_invalid_evidence_uuid_rejected(self) -> None:
         """Evidence refs that are not valid UUIDs must be rejected."""
-        with pytest.raises(ValueError, match="Invalid evidence UUID"):
+        with pytest.raises(ValueError):
             CapabilityProfile(
                 scoring_policy_id="test-policy",
                 scoring_policy_version="1.0",
@@ -201,3 +234,23 @@ class TestCapabilityProfile:
             evidence_refs=(eid,),
         )
         assert isinstance(profile.evidence_refs, tuple)
+
+    def test_evidence_refs_deduplicated(self) -> None:
+        """Duplicate evidence UUIDs are deduplicated."""
+        eid = str(uuid4())
+        profile = CapabilityProfile(
+            scoring_policy_id="test-policy",
+            scoring_policy_version="1.0",
+            evidence_refs=(eid, eid),
+        )
+        assert len(profile.evidence_refs) == 1
+
+    def test_evidence_refs_order_preserved(self) -> None:
+        """First-seen order of evidence UUIDs is preserved."""
+        e1, e2 = str(uuid4()), str(uuid4())
+        profile = CapabilityProfile(
+            scoring_policy_id="test-policy",
+            scoring_policy_version="1.0",
+            evidence_refs=(e1, e2, e1),
+        )
+        assert profile.evidence_refs == (e1, e2)

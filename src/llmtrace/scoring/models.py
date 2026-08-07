@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 from enum import StrEnum
 from typing import Any
-from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
+
+from llmtrace.benchmarks.models import normalize_evidence_tuple
 
 # ---------------------------------------------------------------------------
 # Capability dimensions
@@ -104,22 +105,6 @@ class TaskScoringSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Evidence UUID validation
-# ---------------------------------------------------------------------------
-
-
-def _validate_evidence_uuids(refs: tuple[str, ...]) -> tuple[str, ...]:
-    """Validate that every entry is a valid UUID and return normalized forms."""
-    result: list[str] = []
-    for r in refs:
-        try:
-            result.append(str(UUID(r)))
-        except ValueError as exc:
-            raise ValueError(f"Invalid evidence UUID: '{r}'") from exc
-    return tuple(result)
-
-
-# ---------------------------------------------------------------------------
 # Per-dimension score result
 # ---------------------------------------------------------------------------
 
@@ -173,11 +158,20 @@ class DimensionScoreResult(BaseModel):
 
     @field_validator("calibrated_score")
     @classmethod
-    def _validate_calibrated_score_range(cls, v: float | None) -> float | None:
-        """calibrated_score must be None or in [0, 100]."""
-        if v is not None and (v < 0.0 or v > 100.0):
-            raise ValueError(f"calibrated_score must be in [0, 100], got {v}")
+    def _validate_calibrated_score(cls, v: float | None) -> float | None:
+        """calibrated_score must be None or finite 0.0–100.0."""
+        if v is not None:
+            if not math.isfinite(v):
+                raise ValueError(f"calibrated_score must be finite, got {v}")
+            if v < 0.0 or v > 100.0:
+                raise ValueError(f"calibrated_score must be in [0, 100], got {v}")
         return v
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def _validate_evidence_refs(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """Validate UUIDs and deduplicate evidence refs, preserving first-seen order."""
+        return normalize_evidence_tuple(v)
 
 
 # ---------------------------------------------------------------------------
@@ -235,14 +229,17 @@ class CapabilityProfile(BaseModel):
 
     @field_validator("calibrated_total_score")
     @classmethod
-    def _validate_calibrated_total_score_range(cls, v: float | None) -> float | None:
-        """calibrated_total_score must be None or in [0, 100]."""
-        if v is not None and (v < 0.0 or v > 100.0):
-            raise ValueError(f"calibrated_total_score must be in [0, 100], got {v}")
+    def _validate_calibrated_total_score(cls, v: float | None) -> float | None:
+        """calibrated_total_score must be None or finite 0.0–100.0."""
+        if v is not None:
+            if not math.isfinite(v):
+                raise ValueError(f"calibrated_total_score must be finite, got {v}")
+            if v < 0.0 or v > 100.0:
+                raise ValueError(f"calibrated_total_score must be in [0, 100], got {v}")
         return v
 
     @field_validator("evidence_refs")
     @classmethod
-    def _validate_evidence_uuids(cls, v: tuple[str, ...]) -> tuple[str, ...]:
-        """Validate that evidence_refs entries are valid UUIDs."""
-        return _validate_evidence_uuids(v)
+    def _validate_evidence_refs(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        """Validate UUIDs and deduplicate evidence refs, preserving first-seen order."""
+        return normalize_evidence_tuple(v)
