@@ -152,6 +152,35 @@
         <td><span title="{{ task.evidence_refs_display }}">{{ task.evidence_refs | length }}</span></td>
         <td>{{ task.failure_display or '—' }}</td>
       </tr>
+      {% if task["items"] %}
+      <tr>
+        <td colspan="7" style="padding:0;">
+          <details style="margin:4px 12px;">
+            <summary>Items ({{ task["items"] | length }})</summary>
+            <table style="margin:4px 0; font-size:0.85em;">
+              <tr><th>Item</th><th>Status</th><th>Score</th><th>Evidence</th><th>{{ "Error / Failure" }}</th></tr>
+              {% for item in task["items"] %}
+              <tr>
+                <td>{{ item.item_id }}</td>
+                <td>{{ item.status }}</td>
+                <td>{{ item.normalized_score if item.normalized_score is not none else '—' }}</td>
+                <td>{{ item.evidence_refs | join(', ') if item.evidence_refs else '—' }}</td>
+                <td>
+                  {% if item.error_message %}
+                    {{ item.error_message }}
+                  {% elif item.failure_message %}
+                    [{{ item.failure_category }}] {{ item.failure_error_code }}: {{ item.failure_message }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </table>
+          </details>
+        </td>
+      </tr>
+      {% endif %}
       {% endfor %}
     </table>
 

@@ -6,6 +6,8 @@ TaskAttempt and GradeResult models via the Provider-backed bridge.
 
 from __future__ import annotations
 
+import contextlib
+import math
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,6 +21,7 @@ from llmtrace.adapters.lm_eval_runner import (
 )
 from llmtrace.benchmarks.models import (
     AdapterFailure,
+    BenchmarkItemResult,
     BenchmarkTaskDefinition,
     BudgetEstimate,
     CompletionOptions,
@@ -26,12 +29,14 @@ from llmtrace.benchmarks.models import (
     FailureCategory,
     GradeResult,
     GradeStatus,
+    ItemStatus,
     LmEvalMetricResult,
     RunPlan,
     SmokeTaskManifest,
     TaskAttempt,
     TaskSpec,
     TaskStatus,
+    aggregate_item_results,
 )
 
 try:
@@ -56,6 +61,7 @@ _SMOKE_DEFINITION = BenchmarkTaskDefinition(
     suite_id="llmtrace_smoke",
     suite_version="1.0.0",
     is_smoke=True,
+    requires_item_results=False,
     capability_score_eligible=False,
 )
 
@@ -292,6 +298,13 @@ class LmEvalAdapter(BenchmarkAdapter):
                     ),
                 )
 
+            # Extract item-level results for tasks that support them
+            item_results: list[BenchmarkItemResult] = []
+            sample_results_raw: object = result.get("sample_results")
+            if isinstance(sample_results_raw, list) and task_id == "gsm8k_subset":
+                sample_results = [s for s in sample_results_raw if isinstance(s, dict)]
+                item_results = _grade_gsm8k_items(sample_results, attempt_id, task_id)
+
             return _build_attempt(
                 attempt_id=attempt_id,
                 task_id=task_id,
@@ -301,6 +314,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                 status=TaskStatus.SUCCESS,
                 evidence_refs=evidence_refs,
                 metric_result=metric_result.model_dump(),
+                item_results=item_results,
             )
 
         except ProviderEvidenceError as exc:
@@ -365,9 +379,18 @@ class LmEvalAdapter(BenchmarkAdapter):
     def normalize_result(self, raw_result: dict[str, object]) -> GradeResult:
         """Normalize a raw lm-eval result dict into a GradeResult.
 
-        Only accepts exact_match or exact_match,<filter> metrics.
-        Values outside [0, 1] or non-numeric are rejected as UNGRADABLE.
-        No fallback to "first numeric metric".
+        **Data flow** (v0.3-A):
+
+        1. Extract ``item_results`` and ``planned_item_count`` from ``raw_result``.
+        2. Compute ``ItemAggregateResult`` via ``aggregate_item_results()`` — this
+           is the **canonical** score source.
+        3. Extract lm-eval metric from ``raw_result["results"]``.
+        4. Cross-check: if both sources exist and mismatch beyond float tolerance,
+           raise ``ValueError("LM_EVAL_ITEM_AGGREGATE_MISMATCH")``.
+        5. GradeResult.normalized_score = item aggregate normalized_score.
+           If no item results, fall back to lm-eval metric.
+
+        lm-eval metric is NO LONGER the source of truth for the GradeResult score.
 
         Provenance is read from ``_TASK_REGISTRY`` via the task_name in the
         raw_result, so GradeResult always carries the same identity as the
@@ -378,26 +401,130 @@ class LmEvalAdapter(BenchmarkAdapter):
         evidence_ids: list[object] = list(evidence_ids_raw) if isinstance(evidence_ids_raw, list) else []
         task_name = str(raw_result.get("task_name", "unknown"))
 
-        if not results:
-            return _ungradable(task_name, "No results found in raw lm-eval output")
+        # ----------------------------------------------------------------
+        # 0. Enforce item_results requirement (prevents silent fallback)
+        # ----------------------------------------------------------------
+        defn = _get_task_def(task_name)
+        item_results_raw: object = raw_result.get("item_results", [])
+        planned_item_count_raw: object = raw_result.get("planned_item_count")
 
-        if not isinstance(results, dict):
-            return _ungradable(task_name, "Results is not a dict")
+        has_item_results = isinstance(item_results_raw, list) and len(item_results_raw) > 0
+        has_planned_count = planned_item_count_raw is not None
 
-        # Strict: only accept exact_match or exact_match,<filter>
-        metric_name, raw_score = _find_exact_match(results)
-
-        if metric_name is None:
-            return _ungradable(task_name, "No exact_match metric found in results")
-
-        # Strict: value must be within [0, 1]
-        if raw_score < 0.0 or raw_score > 1.0:
-            return _ungradable(
-                task_name,
-                f"exact_match value {raw_score} is outside [0, 1]",
+        if defn.requires_item_results and (not has_item_results or not has_planned_count):
+            missing: list[str] = []
+            if not has_item_results:
+                missing.append("item_results")
+            if not has_planned_count:
+                missing.append("planned_item_count")
+            raise ValueError(
+                f"ITEM_RESULTS_REQUIRED: task '{task_name}' requires item-level "
+                f"results but {', '.join(missing)} is missing from raw_result. "
+                f"Use _build_grade_input() to construct the normalization input."
             )
 
+        # ----------------------------------------------------------------
+        # 1. Derive score from item aggregate (canonical source)
+        # ----------------------------------------------------------------
+
+        item_derived_score: float | None = None
+        item_aggregate_meta: dict[str, object] = {}
+
+        if isinstance(item_results_raw, list) and len(item_results_raw) > 0 and planned_item_count_raw is not None:
+            try:
+                planned = int(planned_item_count_raw)  # type: ignore[call-overload]
+            except (TypeError, ValueError):
+                planned = None
+
+            if planned is not None:
+                items: list[BenchmarkItemResult] = []
+                for ir in item_results_raw:
+                    if isinstance(ir, BenchmarkItemResult):
+                        items.append(ir)
+                    elif isinstance(ir, dict):
+                        with contextlib.suppress(Exception):
+                            items.append(BenchmarkItemResult(**ir))
+
+                if items:
+                    aggregate = aggregate_item_results(items, planned_item_count=planned)
+                    item_derived_score = aggregate.normalized_score
+                    item_aggregate_meta = {
+                        "planned_item_count": aggregate.planned_item_count,
+                        "graded_item_count": aggregate.graded_item_count,
+                        "failure_count": aggregate.failure_count,
+                        "ungradable_count": aggregate.ungradable_count,
+                        "correct_count": aggregate.correct_count,
+                        "wrong_count": aggregate.wrong_count,
+                        "grading_coverage": aggregate.grading_coverage,
+                        "execution_coverage": aggregate.execution_coverage,
+                        "item_aggregate_score": aggregate.normalized_score,
+                    }
+
+        # ----------------------------------------------------------------
+        # 2. Extract lm-eval metric (cross-check only)
+        # ----------------------------------------------------------------
+        metric_name: str | None = None
+        lm_eval_score: float | None = None
+        lm_eval_out_of_bounds: bool = False
+
+        if isinstance(results, dict) and results:
+            metric_name, lm_eval_score = _find_exact_match(results)
+            if metric_name is not None and lm_eval_score is not None:
+                if lm_eval_score < 0.0 or lm_eval_score > 1.0:
+                    lm_eval_out_of_bounds = True
+                    lm_eval_score = None  # cannot be used for cross-check or score
+            else:
+                # No valid exact_match found — clear both
+                lm_eval_score = None
+                metric_name = None
+
+        # ----------------------------------------------------------------
+        # 3. Cross-check: item aggregate vs lm-eval metric
+        # ----------------------------------------------------------------
+        if (
+            item_derived_score is not None
+            and lm_eval_score is not None
+            and not math.isclose(item_derived_score, lm_eval_score, rel_tol=1e-9)
+        ):
+            raise ValueError(
+                f"LM_EVAL_ITEM_AGGREGATE_MISMATCH: "
+                f"item-derived score={item_derived_score}, "
+                f"lm-eval metric='{metric_name}'={lm_eval_score}"
+            )
+
+        # ----------------------------------------------------------------
+        # 4. Determine final score
+        # ----------------------------------------------------------------
+        if item_derived_score is not None:
+            final_score = item_derived_score
+        elif lm_eval_score is not None:
+            final_score = lm_eval_score
+        elif lm_eval_out_of_bounds:
+            return _ungradable(
+                task_name,
+                "exact_match value is outside [0, 1]",
+            )
+        else:
+            if not results:
+                return _ungradable(task_name, "No results found in raw lm-eval output")
+            if not isinstance(results, dict):
+                return _ungradable(task_name, "Results is not a dict")
+            return _ungradable(task_name, "No exact_match metric found in results")
+
+        # ----------------------------------------------------------------
+        # 5. Build GradeResult
+        # ----------------------------------------------------------------
         defn = _get_task_def(task_name)
+
+        # Merge metadata: item aggregate info + lm-eval cross-check info
+        metadata: dict[str, object] = {
+            "lm_eval_version": _LM_EVAL_VERSION,
+        }
+        metadata.update(item_aggregate_meta)
+        if metric_name is not None and lm_eval_score is not None:
+            metadata["lm_eval_metric_name"] = metric_name
+            metadata["lm_eval_cross_check_score"] = lm_eval_score
+            metadata["lm_eval_cross_check_pass"] = item_derived_score is not None
 
         return GradeResult(
             grade_id=str(uuid4()),
@@ -409,14 +536,11 @@ class LmEvalAdapter(BenchmarkAdapter):
             task_id=task_name,
             adapter_id=self.adapter_id,
             adapter_version=self.adapter_version,
-            grader_id=metric_name,
-            raw_score=raw_score,
-            normalized_score=raw_score,
+            grader_id=metric_name if metric_name else "exact_match",
+            raw_score=final_score,
+            normalized_score=final_score,
             evidence_refs=[str(e) for e in evidence_ids],
-            metadata={
-                "lm_eval_version": _LM_EVAL_VERSION,
-                "metric_name": metric_name,
-            },
+            metadata=metadata,
         )
 
 
@@ -522,6 +646,7 @@ def _build_attempt(
     evidence_refs: list[str],
     metric_result: dict[str, object] | None = None,
     failure: AdapterFailure | None = None,
+    item_results: list[BenchmarkItemResult] | None = None,
 ) -> TaskAttempt:
     """Build a TaskAttempt with provenance and metadata from the task definition."""
     return TaskAttempt(
@@ -535,6 +660,7 @@ def _build_attempt(
         adapter_version=adapter_version,
         status=status,
         evidence_refs=evidence_refs,
+        item_results=item_results or [],
         metadata=defn.task_metadata(metric_result=metric_result),
         failure=failure,
     )
@@ -591,3 +717,196 @@ def _extract_metric_result(
         task_revision="1.0",
         generation_options=generation_options,
     )
+
+
+# ---------------------------------------------------------------------------
+# GSM8K item-level grading
+# ---------------------------------------------------------------------------
+
+_GSM8K_ANSWER_RE = __import__("re").compile(r"####\s*(-?[\d,.]+)")
+
+
+def _load_gsm8k_expected_answers() -> list[tuple[str, str]]:
+    """Load expected (question, answer) from gsm8k_subset.json.
+
+    Returns a list of (question, expected_answer) tuples in order.
+    """
+    import json
+
+    data_path = _BUILTIN_RESOURCES / "gsm8k_subset.json"
+    samples = json.loads(data_path.read_text())
+    return [(s["question"], s["answer"]) for s in samples]
+
+
+def _extract_gsm8k_final_answer(text: str) -> str | None:
+    """Extract the final numeric answer from a GSM8K completion.
+
+    Uses the same pattern as the lm-eval strict-match filter:
+    #### followed by a number (possibly negative, with commas or decimals).
+    """
+    m = _GSM8K_ANSWER_RE.search(text)
+    if m:
+        result = m.group(1)
+        return str(result).strip() if result is not None else None
+    return None
+
+
+def _normalize_number(text: str) -> str:
+    """Normalize a number string for comparison: remove commas, extra zeros."""
+    cleaned = text.replace(",", "")
+    try:
+        n = float(cleaned)
+        if n == int(n):
+            return str(int(n))
+        return f"{n:.10f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return cleaned
+
+
+def _build_grade_input(
+    *,
+    attempt: TaskAttempt,
+    lm_eval_results: dict[str, object],
+    planned_item_count: int | None = None,
+) -> dict[str, object]:
+    """Build the canonical ``raw_result`` dict for ``normalize_result()``.
+
+    This is the single construction point for the normalization input,
+    ensuring that every caller passes ``item_results`` and
+    ``planned_item_count`` when the task requires them.
+
+    Args:
+        attempt: The completed TaskAttempt (must carry item_results).
+        lm_eval_results: lm-eval raw metric dict, e.g. ``{"exact_match": 0.875}``.
+        planned_item_count: Planned item count; defaults to ``len(attempt.item_results)``.
+    """
+    if planned_item_count is None:
+        planned_item_count = len(attempt.item_results)
+
+    return {
+        "results": lm_eval_results,
+        "evidence_ids": list(attempt.evidence_refs),
+        "task_name": attempt.task_id,
+        "attempt_id": attempt.attempt_id,
+        "item_results": [ir.model_dump() for ir in attempt.item_results],
+        "planned_item_count": planned_item_count,
+    }
+
+
+def _grade_gsm8k_items(
+    sample_results: list[dict[str, object]],
+    attempt_id: str,
+    task_id: str,
+) -> list[BenchmarkItemResult]:
+    """Grade individual GSM8K responses against expected answers.
+
+    Handles both success and failure samples from the bridge layer.
+    Failure items (status=failure) are mapped to ItemStatus.FAILURE;
+    items with unparseable answers are mapped to ItemStatus.UNGRADABLE.
+
+    Args:
+        sample_results: Per-sample data from ProviderBackedLM, each dict
+            containing at minimum ``evidence_id``, ``response_text``, ``status``.
+        attempt_id: Parent TaskAttempt identifier.
+        task_id: Task identifier.
+
+    Returns:
+        List of BenchmarkItemResult, one per sample, in order.
+    """
+    expected = _load_gsm8k_expected_answers()
+    items: list[BenchmarkItemResult] = []
+
+    for idx, sample in enumerate(sample_results):
+        item_id = f"item-{idx + 1:03d}"
+        sample_status = str(sample.get("status", "success"))
+        evidence_id = str(sample.get("evidence_id", ""))
+
+        # Provider failure → ItemStatus.FAILURE with structured AdapterFailure
+        if sample_status == "failure":
+            failure_category_str = str(sample.get("failure_category", ""))
+            try:
+                category = FailureCategory(failure_category_str)
+            except ValueError:
+                category = FailureCategory.PROVIDER
+
+            adapter_failure = AdapterFailure(
+                error_code=str(sample.get("failure_error_code", "PROVIDER_EXCEPTION")),
+                category=category,
+                message=str(sample.get("failure_message", "Provider failure")),
+                retryable=bool(sample.get("failure_retryable", False)),
+            )
+            items.append(
+                BenchmarkItemResult(
+                    item_id=item_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    status=ItemStatus.FAILURE,
+                    raw_score=0.0,
+                    normalized_score=0.0,
+                    evidence_refs=[evidence_id] if evidence_id else [],
+                    failure=adapter_failure,
+                )
+            )
+            continue
+
+        response_text = str(sample.get("response_text", ""))
+
+        # Extract answers
+        extracted = _extract_gsm8k_final_answer(response_text)
+        if extracted is None:
+            # Could not parse answer from model output
+            items.append(
+                BenchmarkItemResult(
+                    item_id=item_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    status=ItemStatus.UNGRADABLE,
+                    raw_score=0.0,
+                    normalized_score=0.0,
+                    evidence_refs=[evidence_id] if evidence_id else [],
+                    error_message="Could not extract final answer (#### pattern not found)",
+                )
+            )
+            continue
+
+        # Compare with expected (use the idx-th expected answer if available)
+        if idx < len(expected):
+            expected_answer = expected[idx][1]
+            expected_final = _extract_gsm8k_final_answer(expected_answer)
+            if expected_final is None:
+                expected_final = expected_answer
+
+            is_correct = _normalize_number(extracted) == _normalize_number(expected_final)
+            score = 1.0 if is_correct else 0.0
+
+            items.append(
+                BenchmarkItemResult(
+                    item_id=item_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    status=ItemStatus.GRADED,
+                    raw_score=score,
+                    normalized_score=score,
+                    evidence_refs=[evidence_id] if evidence_id else [],
+                    metadata={
+                        "extracted_answer": extracted,
+                        "expected_answer": expected_final,
+                        "correct": is_correct,
+                    },
+                )
+            )
+        else:
+            items.append(
+                BenchmarkItemResult(
+                    item_id=item_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    status=ItemStatus.UNGRADABLE,
+                    raw_score=0.0,
+                    normalized_score=0.0,
+                    evidence_refs=[evidence_id] if evidence_id else [],
+                    error_message=f"No expected answer for item index {idx}",
+                )
+            )
+
+    return items

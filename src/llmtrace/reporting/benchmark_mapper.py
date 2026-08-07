@@ -302,6 +302,41 @@ def _build_task_item(
     # Validate metadata via json_safety module
     validate_json_mapping(attempt.metadata)
 
+    # Build item-level report items with consistency validation
+    from llmtrace.reporting.benchmark_models import ItemReportItem
+
+    item_report_items: list[ItemReportItem] = []
+    for ir in attempt.item_results:
+        # Cross-check: item must reference the correct parent
+        if ir.task_id != attempt.task_id:
+            raise ValueError(
+                f"ItemReportItem task_id mismatch: item '{ir.item_id}' has "
+                f"task_id='{ir.task_id}' but parent TaskAttempt has "
+                f"task_id='{attempt.task_id}'"
+            )
+        if ir.attempt_id != attempt.attempt_id:
+            raise ValueError(
+                f"ItemReportItem attempt_id mismatch: item '{ir.item_id}' has "
+                f"attempt_id='{ir.attempt_id}' but parent TaskAttempt has "
+                f"attempt_id='{attempt.attempt_id}'"
+            )
+
+        item_report_items.append(
+            ItemReportItem(
+                item_id=ir.item_id,
+                status=ir.status.value,
+                raw_score=ir.raw_score,
+                normalized_score=ir.normalized_score,
+                grader_id=ir.grader_id,
+                evidence_refs=list(ir.evidence_refs),
+                error_message=ir.error_message,
+                failure_message=ir.failure.message if ir.failure else None,
+                failure_category=ir.failure.category.value if ir.failure else None,
+                failure_error_code=ir.failure.error_code if ir.failure else None,
+                metadata=ir.metadata,
+            )
+        )
+
     return TaskReportItem(
         task_id=attempt.task_id,
         attempt_id=attempt.attempt_id,
@@ -311,6 +346,7 @@ def _build_task_item(
         raw_score=raw_score,
         normalized_score=normalized_score,
         evidence_refs=list(attempt.evidence_refs),
+        items=item_report_items,
         failure=failure_item,
         capability_score_eligible=capability_eligible,
         metadata=dict(attempt.metadata),

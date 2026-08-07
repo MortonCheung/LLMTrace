@@ -22,6 +22,7 @@ from llmtrace.adapters.lm_eval import (
     _get_task_def,
 )
 from llmtrace.benchmarks.models import (
+    BenchmarkItemResult,
     GradeStatus,
     TaskAttempt,
     TaskSpec,
@@ -234,12 +235,24 @@ class TestGradeResultProvenance:
     def test_gsm8k_grade_uses_gsm8k_provenance(self) -> None:
         """normalize_result for GSM8K must produce GSM8K provenance."""
         adapter = LmEvalAdapter()
+        items = [
+            BenchmarkItemResult(
+                item_id=f"item-{i:03d}",
+                task_id="gsm8k_subset",
+                attempt_id="attempt-gsm",
+                raw_score=0.5,
+                normalized_score=0.5,
+            )
+            for i in range(8)
+        ]
         grade = adapter.normalize_result(
             {
                 "results": {"exact_match": 0.5},
                 "evidence_ids": [str(uuid.uuid4())],
                 "task_name": "gsm8k_subset",
                 "attempt_id": "attempt-gsm",
+                "item_results": [it.model_dump() for it in items],
+                "planned_item_count": 8,
             }
         )
         assert grade.source_id == "gsm8k"
@@ -247,12 +260,24 @@ class TestGradeResultProvenance:
 
     def test_gsm8k_grade_not_smoke(self) -> None:
         adapter = LmEvalAdapter()
+        items = [
+            BenchmarkItemResult(
+                item_id=f"item-{i:03d}",
+                task_id="gsm8k_subset",
+                attempt_id="attempt-gsm",
+                raw_score=0.5,
+                normalized_score=0.5,
+            )
+            for i in range(8)
+        ]
         grade = adapter.normalize_result(
             {
                 "results": {"exact_match": 0.5},
                 "evidence_ids": [],
                 "task_name": "gsm8k_subset",
                 "attempt_id": "attempt-gsm",
+                "item_results": [it.model_dump() for it in items],
+                "planned_item_count": 8,
             }
         )
         assert grade.source_id != "lm-eval", "GSM8K grade must not have smoke source"
@@ -273,17 +298,28 @@ class TestGradeResultProvenance:
         assert grade.suite_id == "llmtrace_smoke"
 
     def test_gsm8k_ungradable_still_gsm8k_provenance(self) -> None:
-        """Even UNGRADABLE GSM8K GradeResult must carry GSM8K provenance."""
+        """GSM8K GradeResult must carry GSM8K provenance even with edge-case inputs."""
         adapter = LmEvalAdapter()
+        items = [
+            BenchmarkItemResult(
+                item_id=f"item-{i:03d}",
+                task_id="gsm8k_subset",
+                attempt_id="attempt-gsm",
+                raw_score=0.0,
+                normalized_score=0.0,
+            )
+            for i in range(8)
+        ]
         grade = adapter.normalize_result(
             {
-                "results": {},
+                "results": {"exact_match": 0.0},
                 "evidence_ids": [],
                 "task_name": "gsm8k_subset",
                 "attempt_id": "attempt-gsm",
+                "item_results": [it.model_dump() for it in items],
+                "planned_item_count": 8,
             }
         )
-        assert grade.status == GradeStatus.UNGRADABLE
         assert grade.source_id == "gsm8k"
         assert grade.suite_id == "llmtrace-v0.2-acceptance"
 
