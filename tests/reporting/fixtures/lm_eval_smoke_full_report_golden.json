@@ -1,0 +1,279 @@
+{
+  "schema_version": "1.1",
+  "report_id": "golden-report-id",
+  "meta": {
+    "llmtrace_version": "0.2.0",
+    "test_suite_version": "1.0",
+    "utc_time": "2026-01-01T00:00:00+00:00",
+    "local_timezone": "Asia/Shanghai",
+    "python_version": "3.12",
+    "platform": "darwin",
+    "report_id": "golden-report-id",
+    "config_summary": {
+      "protocol": "openai",
+      "base_url": "https://api.example.com",
+      "model": "test-model"
+    },
+    "probe_list": [],
+    "risk_level": "INCONCLUSIVE",
+    "schema_version": "1.1",
+    "content_hash": "b5b989d1a29ee32f0c9af8453453a46c46f5bbf30a9c1f8dc66cac653839dfcc"
+  },
+  "config": {
+    "protocol": "openai",
+    "base_url": "https://api.example.com",
+    "model": "test-model",
+    "api_key_env": "TEST_KEY",
+    "auth_style": "bearer",
+    "repeat_count": 1,
+    "timeout": 30.0,
+    "max_output_tokens": 100,
+    "check_streaming": false
+  },
+  "evidence": [
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000002",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 500.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "LLMTRACE_OK",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    },
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000003",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 799.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "DETERMINISTIC",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    },
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000004",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 99.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "ADAPTER_WORKS",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    },
+    {
+      "evidence_id": "00000000-0000-0000-0000-000000000005",
+      "evidence_type": "smoke_test",
+      "request_method": "POST",
+      "request_url_redacted": "https://fake-api.example.com/v1/chat/completions",
+      "request_path": "/v1/chat/completions",
+      "request_headers_redacted": {
+        "Authorization": "Bearer sk-fake-***"
+      },
+      "request_body_redacted": {
+        "model": "test-model",
+        "messages": [
+          {
+            "role": "user",
+            "content": "[redacted]"
+          }
+        ]
+      },
+      "request_time": null,
+      "response_time": null,
+      "http_status": 200,
+      "response_headers": {},
+      "response_body_summary": "",
+      "response_body_sha256": "",
+      "response_truncated": false,
+      "response_body_size": 0,
+      "first_token_latency_ms": null,
+      "total_latency_ms": 400.0,
+      "request_id": null,
+      "response_id": null,
+      "request_model": "test-model",
+      "response_model": "test-model",
+      "input_tokens": null,
+      "output_tokens": null,
+      "finish_reason": null,
+      "response_text": "EVIDENCE_TRACED",
+      "exception_type": null,
+      "exception_message": null,
+      "success": true
+    }
+  ],
+  "findings": [],
+  "risk_level": "INCONCLUSIVE",
+  "schema_fingerprints": [],
+  "model_list": [],
+  "model_list_available": false,
+  "model_in_list": null,
+  "benchmarks": [
+    {
+      "run_id": "00000000-0000-0000-0000-000000000007",
+      "plan_id": "e09d416da7dd85b1e0a0096a54b7d3e3aa927f324b8fd4d441822e5ff5db6753",
+      "suite_id": "llmtrace_smoke",
+      "suite_version": "1.0.0",
+      "source_id": "lm-eval",
+      "source_revision": "0000000-smoke",
+      "adapter_id": "lm-eval",
+      "adapter_version": "0.4.12",
+      "status": "success",
+      "started_at": null,
+      "finished_at": null,
+      "planned_requests": 4,
+      "maximum_requests": 4,
+      "actual_requests": 4,
+      "estimated_input_tokens": 2048,
+      "estimated_output_tokens": 1024,
+      "estimated_cost": null,
+      "tasks": [
+        {
+          "task_id": "llmtrace_smoke",
+          "attempt_id": "00000000-0000-0000-0000-000000000001",
+          "status": "success",
+          "grader_id": "exact_match",
+          "grade_status": "graded",
+          "raw_score": 1.0,
+          "normalized_score": 1.0,
+          "evidence_refs": [
+            "00000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000004",
+            "00000000-0000-0000-0000-000000000005"
+          ],
+          "failure": null,
+          "capability_score_eligible": false,
+          "metadata": {
+            "llmtrace_smoke_task": true,
+            "metric_result": {
+              "task_name": "llmtrace_smoke",
+              "metric_name": "exact_match",
+              "filter_name": "none",
+              "value": 1.0,
+              "fewshot": 0,
+              "lm_eval_version": "0.4.12",
+              "task_revision": "1.0",
+              "generation_options": {
+                "until": [
+                  "\n"
+                ],
+                "stop": null,
+                "temperature": 0.0,
+                "max_gen_toks": null,
+                "max_tokens": null,
+                "do_sample": false
+              }
+            }
+          }
+        }
+      ],
+      "summary": {
+        "planned_requests": 4,
+        "maximum_requests": 4,
+        "actual_requests": 4,
+        "success_count": 1,
+        "failure_count": 0,
+        "skip_count": 0,
+        "ungraded_count": 0,
+        "ungradable_count": 0,
+        "estimated_input_tokens": 2048,
+        "estimated_output_tokens": 1024,
+        "estimated_cost": null,
+        "warnings": []
+      },
+      "warnings": []
+    }
+  ],
+  "content_hash": "b5b989d1a29ee32f0c9af8453453a46c46f5bbf30a9c1f8dc66cac653839dfcc"
+}

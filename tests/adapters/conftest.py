@@ -67,6 +67,7 @@ class FakeProvider:
         self.call_count = 0
         self.calls: list[dict[str, Any]] = []
         self.received_options: list[CompletionOptions | None] = []
+        self.evidence: list[HTTPEvidence] = []
 
     async def complete(
         self,
@@ -87,7 +88,7 @@ class FakeProvider:
         self.calls.append({"model": model, "messages": messages, "response": response_text, "options": options})
 
         # Build a valid HTTPEvidence with all required fields
-        return HTTPEvidence(
+        evidence = HTTPEvidence(
             evidence_id=uuid4(),
             evidence_type="smoke_test",
             request_method="POST",
@@ -103,6 +104,8 @@ class FakeProvider:
             exception_type=self.fail_with_exception_type,
             exception_message=self.fail_with_exception_message,
         )
+        self.evidence.append(evidence)
+        return evidence
 
     def _lookup(self, prompt: str) -> str:
         for key, val in self.response_map.items():

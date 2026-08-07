@@ -1,0 +1,52 @@
+{
+  "run_id": "11111111-1111-1111-1111-111111111111",
+  "plan_id": "golden-plan",
+  "suite_id": "test-suite",
+  "suite_version": "1.0.0",
+  "source_id": "test-source",
+  "source_revision": "abc123",
+  "adapter_id": "lm-eval",
+  "adapter_version": "0.4.12",
+  "status": "success",
+  "started_at": "2026-01-01T00:00:00Z",
+  "finished_at": "2026-01-01T01:00:00Z",
+  "planned_requests": 2,
+  "maximum_requests": 2,
+  "actual_requests": 2,
+  "estimated_input_tokens": null,
+  "estimated_output_tokens": null,
+  "estimated_cost": null,
+  "tasks": [
+    {
+      "task_id": "task_a",
+      "attempt_id": "attempt-1",
+      "status": "success",
+      "grader_id": "exact_match",
+      "grade_status": "graded",
+      "raw_score": 0.75,
+      "normalized_score": 0.75,
+      "evidence_refs": [
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      ],
+      "failure": null,
+      "capability_score_eligible": true,
+      "metadata": {}
+    }
+  ],
+  "summary": {
+    "planned_requests": 2,
+    "maximum_requests": 2,
+    "actual_requests": 2,
+    "success_count": 1,
+    "failure_count": 0,
+    "skip_count": 0,
+    "ungraded_count": 0,
+    "ungradable_count": 0,
+    "estimated_input_tokens": null,
+    "estimated_output_tokens": null,
+    "estimated_cost": null,
+    "warnings": []
+  },
+  "warnings": []
+}
