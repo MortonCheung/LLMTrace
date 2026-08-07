@@ -167,28 +167,58 @@ def _count_eligible_tasks(
 
 def _pair_grades_with_attempts_per_run(
     run_results: Sequence[BenchmarkRunResult],
-) -> dict[str, tuple[BenchmarkRunResult, Any, Any]]:  # (run, attempt, grade)
-    """Pair GradeResult → TaskAttempt within each BenchmarkRunResult.
+) -> list[dict[str, Any]]:  # per-run mapping: attempt_id → GradeResult
+    """Pair GradeResult → TaskAttempt per run (no cross-run data sharing).
+
+    Phase 1: Pre-scan all TaskAttempts across all runs to detect duplicate
+    attempt_id (within and across runs) **before** touching any GradeResult.
+    This catches ungraded duplicates that the old paired-based detection missed.
+
+    Phase 2: For each run, validate and pair its own GradeResults with its
+    own TaskAttempts.  The return value is a list of per-run dicts that
+    strictly enforces run-local ownership.
 
     Returns:
-        attempt_id → (run_result, TaskAttempt, GradeResult)
+        List of per-run dicts mapping attempt_id → GradeResult,
+        aligned by index with *run_results*.
 
     Raises:
         ValueError: On duplicate attempt_id (within or across runs),
                     orphan GradeResult, duplicate GradeResult,
                     attempt_id/task_id mismatch, or provenance mismatch.
     """
-    paired: dict[str, tuple[BenchmarkRunResult, Any, Any]] = {}
+    # ------------------------------------------------------------------
+    # Phase 1: pre-scan ALL TaskAttempts for duplicate detection
+    # ------------------------------------------------------------------
+    seen_attempt_ids: dict[str, str] = {}  # attempt_id → run_id
 
     for run in run_results:
-        # Build per-run attempt index
-        attempt_by_id: dict[str, Any] = {}  # Any = TaskAttempt
+        local_attempt_ids: set[str] = set()
         for attempt in run.task_attempts:
             aid = attempt.attempt_id
-            if aid in attempt_by_id:
-                raise ValueError(f"Duplicate attempt_id='{aid}' within BenchmarkRunResult '{run.run_id}'")
-            attempt_by_id[aid] = attempt
 
+            if aid in local_attempt_ids:
+                raise ValueError(f"Duplicate attempt_id='{aid}' within BenchmarkRunResult '{run.run_id}'")
+
+            if aid in seen_attempt_ids:
+                raise ValueError(
+                    f"Duplicate attempt_id='{aid}' across runs '{seen_attempt_ids[aid]}' and '{run.run_id}'"
+                )
+
+            local_attempt_ids.add(aid)
+            seen_attempt_ids[aid] = run.run_id
+
+    # ------------------------------------------------------------------
+    # Phase 2: per-run GradeResult → TaskAttempt pairing
+    # ------------------------------------------------------------------
+    pairs_by_run: list[dict[str, Any]] = []  # Any = GradeResult
+
+    for run in run_results:
+        attempt_by_id: dict[str, Any] = {}  # Any = TaskAttempt
+        for attempt in run.task_attempts:
+            attempt_by_id[attempt.attempt_id] = attempt
+
+        run_pairs: dict[str, Any] = {}
         for grade in run.grade_results:
             aid = grade.attempt_id
 
@@ -200,15 +230,9 @@ def _pair_grades_with_attempts_per_run(
                     f"has no matching TaskAttempt in the same run"
                 )
 
-            # Detect duplicate attempt_id within or across runs
-            if aid in paired:
-                existing_run = paired[aid][0]
-                if existing_run.run_id != run.run_id:
-                    raise ValueError(
-                        f"Duplicate attempt_id='{aid}' across runs '{existing_run.run_id}' and '{run.run_id}'"
-                    )
-                else:
-                    raise ValueError(f"Duplicate GradeResult for attempt_id='{aid}' in run '{run.run_id}'")
+            # Duplicate GradeResult within the same run
+            if aid in run_pairs:
+                raise ValueError(f"Duplicate GradeResult for attempt_id='{aid}' in run '{run.run_id}'")
 
             attempt = attempt_by_id[aid]
 
@@ -219,15 +243,15 @@ def _pair_grades_with_attempts_per_run(
                     f"TaskAttempt.task_id='{attempt.task_id}' for attempt_id='{aid}'"
                 )
 
-            # Provenance: grade vs run
+            # Provenance checks
             validate_provenance_consistency(run, grade, child_label="GradeResult")
-
-            # Provenance: attempt vs run
             validate_provenance_consistency(run, attempt, child_label="TaskAttempt")
 
-            paired[aid] = (run, attempt, grade)
+            run_pairs[aid] = grade
 
-    return paired
+        pairs_by_run.append(run_pairs)
+
+    return pairs_by_run
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +305,7 @@ def aggregate_dimension_score(
     warnings: list[str] = []
 
     # ---------- Build per-run attempt_id-level grade index ----------
-    paired = _pair_grades_with_attempts_per_run(run_results)
+    pairs_by_run = _pair_grades_with_attempts_per_run(run_results)
 
     # ---------- Aggregate across all runs ----------
     planned_weight_sum = 0.0
@@ -291,7 +315,8 @@ def aggregate_dimension_score(
     source_task_ids: list[str] = []
     graded_attempt_ids: list[str] = []
 
-    for run in run_results:
+    for i, run in enumerate(run_results):
+        run_pairs = pairs_by_run[i]
         for attempt in run.task_attempts:
             spec = _resolve_spec(registry, attempt.task_id, strict)
             if spec is None:
@@ -306,12 +331,11 @@ def aggregate_dimension_score(
 
             planned_weight_sum += spec.task_weight
 
-            # Check if this attempt has a valid grade
-            grade_entry = paired.get(attempt.attempt_id)
-            if grade_entry is None:
+            # Check if this attempt has a valid grade **in the same run**
+            grade = run_pairs.get(attempt.attempt_id)
+            if grade is None:
                 continue  # no grade → cannot participate
 
-            _, _, grade = grade_entry
             if attempt.status != TaskStatus.SUCCESS:
                 continue
             if grade.status != GradeStatus.GRADED:
