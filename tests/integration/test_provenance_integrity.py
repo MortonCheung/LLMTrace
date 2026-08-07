@@ -16,9 +16,9 @@ from unittest.mock import patch
 import pytest
 
 from llmtrace.adapters.lm_eval import (
-    LmEvalAdapter,
     _SMOKE_MANIFEST,
     _TASK_REGISTRY,
+    LmEvalAdapter,
     _get_task_def,
 )
 from llmtrace.benchmarks.models import (
@@ -39,20 +39,19 @@ from llmtrace.scoring.models import CapabilityDimension, TaskScoringSpec
 _SMOKE_DEF = _TASK_REGISTRY["llmtrace_smoke"]
 _GSM8K_DEF = _TASK_REGISTRY["gsm8k_subset"]
 
-_MATH_CLASSIFIER = TaskScoringRegistry()
-_MATH_CLASSIFIER.register(
-    TaskScoringSpec(
-        task_id="gsm8k_subset",
-        dimension=CapabilityDimension.MATH_SCIENCE,
-        capability_score_eligible=True,
-    ),
-)
-_MATH_CLASSIFIER.register(
-    TaskScoringSpec(
-        task_id="llmtrace_smoke",
-        dimension=CapabilityDimension.MATH_SCIENCE,
-        capability_score_eligible=False,
-    ),
+_MATH_CLASSIFIER = TaskScoringRegistry(
+    specs=[
+        TaskScoringSpec(
+            task_id="gsm8k_subset",
+            dimension=CapabilityDimension.MATH_SCIENCE,
+            capability_score_eligible=True,
+        ),
+        TaskScoringSpec(
+            task_id="llmtrace_smoke",
+            dimension=CapabilityDimension.MATH_SCIENCE,
+            capability_score_eligible=False,
+        ),
+    ],
 )
 
 
@@ -339,21 +338,21 @@ class TestScoringRegression:
 
     def test_gsm8k_registered_as_math_science(self) -> None:
         """GSM8K must be registered as math_science dimension."""
-        spec = _MATH_CLASSIFIER.resolve("gsm8k_subset")
+        spec = _MATH_CLASSIFIER.get("gsm8k_subset")
         assert spec is not None
         assert spec.dimension == CapabilityDimension.MATH_SCIENCE
         assert spec.capability_score_eligible is True
 
     def test_smoke_not_eligible(self) -> None:
         """Smoke task must NOT be capability_score_eligible."""
-        spec = _MATH_CLASSIFIER.resolve("llmtrace_smoke")
+        spec = _MATH_CLASSIFIER.get("llmtrace_smoke")
         assert spec is not None
         assert spec.dimension == CapabilityDimension.MATH_SCIENCE
         assert spec.capability_score_eligible is False
 
     def test_unknown_task_not_registered(self) -> None:
         """Unknown tasks must not be in the registry."""
-        spec = _MATH_CLASSIFIER.resolve("nonexistent-task")
+        spec = _MATH_CLASSIFIER.get("nonexistent-task")
         assert spec is None
 
 
