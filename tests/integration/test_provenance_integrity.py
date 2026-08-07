@@ -24,9 +24,7 @@ from llmtrace.adapters.lm_eval import (
     _get_task_def,
 )
 from llmtrace.benchmarks.models import (
-    BenchmarkTaskDefinition,
     CapabilityDimension,
-    DimensionScoreResult,
     GradeResult,
     GradeStatus,
     TaskAttempt,
@@ -36,7 +34,7 @@ from llmtrace.benchmarks.models import (
     TaskStatus,
 )
 from llmtrace.reporting.benchmark_mapper import _is_smoke_task_from_metadata
-from llmtrace.scoring.aggregator import aggregate_dimension_scores, aggregate_profile
+from llmtrace.scoring.aggregator import aggregate_dimension_scores
 
 
 # ---------------------------------------------------------------------------
