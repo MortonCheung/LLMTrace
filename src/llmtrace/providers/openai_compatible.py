@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from llmtrace.benchmarks.models import CompletionOptions
 from llmtrace.config import AuditConfig
 from llmtrace.models.evidence import HTTPEvidence
-from llmtrace.providers.base import BaseProvider
+from llmtrace.providers.base import (
+    BaseProvider,
+    _resolve_max_tokens,
+    _resolve_stop_sequences,
+    _validate_do_sample,
+)
 from llmtrace.providers.url_utils import join_url
 
 
@@ -35,6 +41,32 @@ class OpenAICompatibleProvider(BaseProvider):
             "messages": messages,
             "max_tokens": self.config.max_output_tokens,
         }
+
+    def _apply_options_to_body(self, body: dict[str, object], options: CompletionOptions) -> None:
+        """Map CompletionOptions to OpenAI-compatible request body keys.
+
+        ================ ==============
+        CompletionOptions OpenAI body key
+        ================ ==============
+        stop / until       stop
+        temperature        temperature
+        max_tokens /       max_tokens
+        max_gen_toks
+        do_sample          (validated only)
+        ================ ==============
+        """
+        stop_seqs = _resolve_stop_sequences(options.until, options.stop)
+        if stop_seqs:
+            body["stop"] = stop_seqs
+
+        if options.temperature is not None:
+            body["temperature"] = options.temperature
+
+        max_toks = _resolve_max_tokens(options.max_gen_toks, options.max_tokens)
+        if max_toks is not None:
+            body["max_tokens"] = max_toks
+
+        _validate_do_sample(options.do_sample)
 
     def _build_stream_body(self, model: str, messages: list[dict[str, str]]) -> dict[str, object]:
         body = self._build_completion_body(model, messages)

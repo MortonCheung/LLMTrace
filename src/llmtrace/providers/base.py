@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import httpx
 
+from llmtrace.benchmarks.models import CompletionOptions
 from llmtrace.config import AuditConfig
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.security.redaction import redact_headers, redact_json_body, redact_url
@@ -31,6 +32,48 @@ def _extract_request_id(headers: dict[str, str]) -> str | None:
         if name in lower_headers:
             return lower_headers[name]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Option mapping helpers — shared conflict resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_stop_sequences(until: list[str] | None, stop: list[str] | None) -> list[str] | None:
+    """Merge stop/until; deduplicate while preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for seq in (stop or []) + (until or []):
+        if seq not in seen:
+            seen.add(seq)
+            result.append(seq)
+    return result if result else None
+
+
+def _resolve_max_tokens(max_gen_toks: int | None, max_tokens: int | None) -> int | None:
+    """Resolve max_tokens / max_gen_toks synonym conflict.
+
+    Raises ValueError when both are set to different values.
+    """
+    if max_gen_toks is not None and max_tokens is not None and max_gen_toks != max_tokens:
+        raise ValueError(
+            f"Conflicting token limits: max_gen_toks={max_gen_toks} vs max_tokens={max_tokens}. Set only one of them."
+        )
+    return max_gen_toks if max_gen_toks is not None else max_tokens
+
+
+def _validate_do_sample(do_sample: bool | None) -> None:
+    """Validate do_sample.
+
+    do_sample=False is a deterministic declaration (acceptable).
+    do_sample=True has no direct protocol mapping — must fail.
+    """
+    if do_sample:
+        raise ValueError(
+            "do_sample=True is not supported. "
+            "Neither OpenAI nor Anthropic protocols have a direct 'do_sample' equivalent. "
+            "Use temperature=0.0 for deterministic generation instead."
+        )
 
 
 class BaseProvider(ABC):
@@ -128,11 +171,26 @@ class BaseProvider(ABC):
             evidence.exception_message = str(e)
             return evidence, []
 
-    async def complete(self, model: str, messages: list[dict[str, str]]) -> HTTPEvidence:
-        """非流式补全请求."""
+    async def complete(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        *,
+        options: CompletionOptions | None = None,
+    ) -> HTTPEvidence:
+        """非流式补全请求.
+
+        Args:
+            model: Model identifier.
+            messages: Chat messages.
+            options: Optional CompletionOptions for generation kwargs.
+                     Providers apply these via _apply_options_to_body().
+        """
         url = self._build_completion_url()
         headers = self._build_headers()
         body = self._build_completion_body(model, messages)
+        if options is not None:
+            self._apply_options_to_body(body, options)
         evidence = self._build_evidence("POST", url, body, model=model)
 
         try:
@@ -261,6 +319,15 @@ class BaseProvider(ABC):
     def _extract_models(self, data: dict[str, object]) -> list[str]:
         """从模型列表响应中提取模型 ID."""
         ...
+
+    def _apply_options_to_body(self, body: dict[str, object], options: CompletionOptions) -> None:
+        """Apply completion options to the request body.
+
+        Providers override this to map CompletionOptions fields to
+        protocol-specific request body keys.
+        The default is a no-op.
+        """
+        _ = body, options  # noqa: B027
 
     @abstractmethod
     def _extract_stream_text(self, event: dict[str, object]) -> str | None:

@@ -1,0 +1,18 @@
+[
+    {
+        "input": "Repeat exactly: LLMTRACE_OK",
+        "output": "LLMTRACE_OK"
+    },
+    {
+        "input": "Repeat exactly: DETERMINISTIC",
+        "output": "DETERMINISTIC"
+    },
+    {
+        "input": "Repeat exactly: ADAPTER_WORKS",
+        "output": "ADAPTER_WORKS"
+    },
+    {
+        "input": "Repeat exactly: EVIDENCE_TRACED",
+        "output": "EVIDENCE_TRACED"
+    }
+]

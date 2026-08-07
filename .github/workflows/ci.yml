@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, "feat/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "feat/**"]
 
 jobs:
   quality:
@@ -39,3 +39,83 @@ jobs:
 
       - name: Test (pytest + coverage gate)
         run: pytest --cov=llmtrace --cov-report=term-missing --cov-fail-under=68
+
+  lm-eval-integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,lm-eval]"
+
+      - name: Run lm-eval adapter integration tests
+        run: pytest tests/adapters/test_lm_eval*.py tests/integration/test_lm_eval*.py
+
+  packaging:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install build tool
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Install wheel in fresh venv
+        run: |
+          python -m venv .wheel-test-venv
+          . .wheel-test-venv/bin/activate
+          pip install dist/*.whl
+          python -c "
+          import json
+          from pathlib import Path
+          from llmtrace.adapters.lm_eval import BUILTIN_SMOKE_TASK_ROOT
+
+          root = Path(BUILTIN_SMOKE_TASK_ROOT)
+          assert root.exists(), f'BUILTIN_SMOKE_TASK_ROOT does not exist: {root}'
+          assert root.is_dir()
+
+          yaml_path = root / 'llmtrace_smoke.yaml'
+          assert yaml_path.exists(), f'YAML not found: {yaml_path}'
+          content = yaml_path.read_text()
+          assert 'output_type' in content
+
+          json_path = root / 'llmtrace_smoke.json'
+          assert json_path.exists(), f'JSON not found: {json_path}'
+          data = json.loads(json_path.read_text())
+          assert len(data) == 4
+
+          # Verify import comes from wheel venv, not editable source
+          import llmtrace
+          pkg_path = Path(llmtrace.__file__).resolve()
+          assert '.wheel-test-venv' in str(pkg_path), f'Package not loaded from wheel venv: {pkg_path}'
+
+          print('All wheel installation checks passed.')
+          "

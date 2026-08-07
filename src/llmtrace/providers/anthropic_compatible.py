@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from llmtrace.benchmarks.models import CompletionOptions
 from llmtrace.config import AuditConfig, AuthStyle
 from llmtrace.models.evidence import HTTPEvidence
-from llmtrace.providers.base import BaseProvider
+from llmtrace.providers.base import (
+    BaseProvider,
+    _resolve_max_tokens,
+    _resolve_stop_sequences,
+    _validate_do_sample,
+)
 from llmtrace.providers.url_utils import join_url
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -64,6 +70,32 @@ class AnthropicCompatibleProvider(BaseProvider):
         if system_prompt:
             body["system"] = system_prompt
         return body
+
+    def _apply_options_to_body(self, body: dict[str, object], options: CompletionOptions) -> None:
+        """Map CompletionOptions to Anthropic-compatible request body keys.
+
+        ================ ================
+        CompletionOptions Anthropic body key
+        ================ ================
+        stop / until       stop_sequences
+        temperature        temperature
+        max_tokens /       max_tokens
+        max_gen_toks
+        do_sample          (validated only)
+        ================ ================
+        """
+        stop_seqs = _resolve_stop_sequences(options.until, options.stop)
+        if stop_seqs:
+            body["stop_sequences"] = stop_seqs
+
+        if options.temperature is not None:
+            body["temperature"] = options.temperature
+
+        max_toks = _resolve_max_tokens(options.max_gen_toks, options.max_tokens)
+        if max_toks is not None:
+            body["max_tokens"] = max_toks
+
+        _validate_do_sample(options.do_sample)
 
     def _build_stream_body(self, model: str, messages: list[dict[str, str]]) -> dict[str, object]:
         body = self._build_completion_body(model, messages)

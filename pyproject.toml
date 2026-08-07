@@ -35,6 +35,10 @@ dev = [
     "respx>=0.21.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
+    "build>=1.2",
+]
+lm-eval = [
+    "lm-eval==0.4.12",
 ]
 
 [project.scripts]
@@ -42,6 +46,12 @@ llmtrace = "llmtrace.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"llmtrace.adapters" = [
+    "_resources/*.yaml",
+    "_resources/*.json",
+]
 
 [tool.ruff]
 target-version = "py311"
@@ -70,6 +80,10 @@ disallow_untyped_defs = true
 disallow_any_unimported = false
 no_implicit_optional = true
 exclude = ["tests/"]
+
+[[tool.mypy.overrides]]
+module = ["lm_eval", "lm_eval.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
