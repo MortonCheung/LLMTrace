@@ -12,9 +12,7 @@ and that smoke tasks and real benchmarks are never confused:
 
 import uuid
 from unittest.mock import patch
-
 import pytest
-
 from llmtrace.adapters.lm_eval import (
     _SMOKE_MANIFEST,
     _TASK_REGISTRY,
@@ -44,11 +42,13 @@ _MATH_CLASSIFIER = TaskScoringRegistry(
         TaskScoringSpec(
             task_id="gsm8k_subset",
             dimension=CapabilityDimension.MATH_SCIENCE,
+            task_weight=1.0,
             capability_score_eligible=True,
         ),
         TaskScoringSpec(
             task_id="llmtrace_smoke",
             dimension=CapabilityDimension.MATH_SCIENCE,
+            task_weight=1.0,
             capability_score_eligible=False,
         ),
     ],
