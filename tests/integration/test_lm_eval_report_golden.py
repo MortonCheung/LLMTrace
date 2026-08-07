@@ -195,11 +195,14 @@ class TestSmokeFullReportGolden:
             # Validation function check
             validate_report_evidence_refs([section], list(provider.evidence))
 
+            # Strip content_hash (platform-dependent) from both sides before comparison
+            actual.pop("content_hash", None)
+            expected.pop("content_hash", None)
+
             assert actual == expected, (
                 f"Golden fixture mismatch.\n"
                 f"Actual keys: {sorted(actual.keys())}\n"
                 f"Expected keys: {sorted(expected.keys())}\n"
-                f"Diff in content_hash may indicate evidence content change."
             )
 
         asyncio.run(_run())
