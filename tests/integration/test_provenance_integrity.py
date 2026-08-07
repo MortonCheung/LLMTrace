@@ -10,21 +10,18 @@ and that smoke tasks and real benchmarks are never confused:
 - Reporting correctly distinguishes eligible from ineligible tasks.
 """
 
-from __future__ import annotations
-
 import uuid
 from unittest.mock import patch
 
 import pytest
 
 from llmtrace.adapters.lm_eval import (
+    LmEvalAdapter,
     _SMOKE_MANIFEST,
     _TASK_REGISTRY,
-    LmEvalAdapter,
     _get_task_def,
 )
 from llmtrace.benchmarks.models import (
-    GradeResult,
     GradeStatus,
     TaskAttempt,
     TaskSpec,
