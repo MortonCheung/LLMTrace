@@ -931,6 +931,91 @@ class TestCapabilityProfile:
                 policy,
             )
 
+    # -- Duplicate attempt_id detection based on TaskAttempt pre-scan ----
+
+    def test_duplicate_attempt_id_across_runs_no_grade_one_side(self) -> None:
+        """run1 att-x NO grade, run2 att-x WITH grade → ValueError (pre-scan catches it)."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-x")],
+            [],  # NO grade
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_a", attempt_id="att-x")],  # duplicate attempt_id!
+            [_make_grade("g1", "att-x", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Duplicate attempt_id.*across"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run1, run2],
+                registry,
+                policy,
+            )
+
+    def test_duplicate_attempt_id_across_runs_both_no_grade(self) -> None:
+        """run1 att-x NO grade, run2 att-x NO grade → still ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-x")],
+            [],  # NO grade
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_a", attempt_id="att-x")],  # duplicate attempt_id!
+            [],  # NO grade
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Duplicate attempt_id.*across"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run1, run2],
+                registry,
+                policy,
+            )
+
+    def test_score_leakage_prevention(self) -> None:
+        """run1 task_a no grade, run2 task_b same attempt_id with grade=1.0 → ValueError.
+
+        Proves run2's grade never enters run1's attempt scoring.
+        No DimensionScoreResult is produced.
+        """
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+                TaskScoringSpec(task_id="task_b", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-x")],
+            [],  # task_a has NO grade
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_b", attempt_id="att-x")],  # same attempt_id!
+            [_make_grade("g1", "att-x", "task_b", 1.0)],  # grade with normalized_score=1.0
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Duplicate attempt_id.*across"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run1, run2],
+                registry,
+                policy,
+            )
+
     def test_legitimate_two_run_aggregation_still_passes(self) -> None:
         """Two separate runs with distinct attempt_ids → legitimate aggregation."""
         registry = TaskScoringRegistry(
