@@ -211,13 +211,97 @@ class BenchmarkSource(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+# ---------------------------------------------------------------------------
+# Item Aggregate Result — score computed with fixed denominator
+# ---------------------------------------------------------------------------
+
+
+class ItemAggregateResult(BaseModel):
+    """Aggregate result computed from BenchmarkItemResults.
+
+    Score is ALWAYS computed against ``planned_item_count`` — failures and
+    ungradable items do NOT shrink the denominator.  Coverage metrics are
+    reported separately so that incomplete runs or provider errors are
+    visible in the report.
+    """
+
+    planned_item_count: int = Field(..., ge=0, description="Total planned items")
+    graded_item_count: int = Field(..., ge=0, description="Items with status GRADED")
+    failure_count: int = Field(..., ge=0, description="Items with status FAILURE")
+    ungradable_count: int = Field(..., ge=0, description="Items with status UNGRADABLE")
+    correct_count: int = Field(..., ge=0, description="GRADED items with normalized_score >= 1.0")
+    wrong_count: int = Field(..., ge=0, description="GRADED items with normalized_score < 1.0")
+    coverage: float = Field(..., ge=0.0, le=1.0, description="graded_item_count / planned_item_count")
+    execution_coverage: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="(graded + failure) / planned_item_count",
+    )
+    raw_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="sum(normalized_score of graded items) / planned_item_count",
+    )
+    normalized_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Same as raw_score for objective benchmarks",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
+def aggregate_item_results(
+    items: Sequence[BenchmarkItemResult],
+    *,
+    planned_item_count: int | None = None,
+) -> ItemAggregateResult:
+    """Aggregate item results with a **fixed** denominator.
+
+    ``planned_item_count`` defaults to ``len(items)`` when not provided, but
+    callers SHOULD always pass the canonical planned count so that the
+    denominator never shrinks when items fail.
+
+    Score formula::
+
+        raw_score = sum(graded normalized_score) / planned_item_count
+        normalized_score = raw_score
+    """
+    if planned_item_count is None:
+        planned_item_count = len(items)
+    planned = planned_item_count
+
+    graded = [it for it in items if it.status == ItemStatus.GRADED]
+    failed = [it for it in items if it.status == ItemStatus.FAILURE]
+    ungradable = [it for it in items if it.status == ItemStatus.UNGRADABLE]
+
+    correct = sum(1 for it in graded if it.normalized_score >= 1.0)
+    total_score = sum(it.normalized_score for it in graded)
+
+    raw_score = total_score / planned if planned > 0 else 0.0
+
+    return ItemAggregateResult(
+        planned_item_count=planned,
+        graded_item_count=len(graded),
+        failure_count=len(failed),
+        ungradable_count=len(ungradable),
+        correct_count=correct,
+        wrong_count=len(graded) - correct,
+        coverage=len(graded) / planned if planned > 0 else 0.0,
+        execution_coverage=(len(graded) + len(failed)) / planned if planned > 0 else 0.0,
+        raw_score=raw_score,
+        normalized_score=raw_score,
+    )
+
+
 def compute_item_aggregate_score(items: list[BenchmarkItemResult]) -> float | None:
-    """Compute the mean normalized_score of GRADED items only.
+    """Deprecated: use ``aggregate_item_results()`` for fixed-denominator scoring.
 
-    UNGRADABLE and FAILURE items are excluded from the aggregate
-    but are reported separately via item status.
-
-    Returns None if there are no graded items.
+    Kept for backward-compatibility.  Returns the mean of GRADED items
+    only, which shrinks the denominator when failures/ungradable exist.
     """
     graded = [it for it in items if it.status == ItemStatus.GRADED]
     if not graded:
@@ -226,16 +310,21 @@ def compute_item_aggregate_score(items: list[BenchmarkItemResult]) -> float | No
 
 
 def item_aggregate_summary(items: list[BenchmarkItemResult]) -> dict[str, object]:
-    """Return a summary dict of item-level aggregate statistics."""
-    graded = [it for it in items if it.status == ItemStatus.GRADED]
-    failed = [it for it in items if it.status == ItemStatus.FAILURE]
+    """Return a summary dict of item-level aggregate statistics.
+
+    Uses ``aggregate_item_results()`` internally for fixed-denominator scoring.
+    """
+    agg = aggregate_item_results(items)
     return {
-        "total_items": len(items),
-        "graded_count": len(graded),
-        "failure_count": len(failed),
-        "ungradable_count": len(items) - len(graded) - len(failed),
-        "correct_count": sum(1 for it in graded if it.normalized_score >= 1.0),
-        "item_aggregate_score": compute_item_aggregate_score(items),
+        "total_items": agg.planned_item_count,
+        "graded_count": agg.graded_item_count,
+        "failure_count": agg.failure_count,
+        "ungradable_count": agg.ungradable_count,
+        "correct_count": agg.correct_count,
+        "wrong_count": agg.wrong_count,
+        "coverage": agg.coverage,
+        "execution_coverage": agg.execution_coverage,
+        "item_aggregate_score": agg.normalized_score,
     }
 
 
@@ -399,6 +488,51 @@ class TaskAttempt(BenchmarkProvenance):
             raise ValueError(f"failure must be None when status is {self.status.value}")
         return self
 
+    @model_validator(mode="after")
+    def _check_item_results_consistency(self) -> TaskAttempt:
+        """Validate item_results: unique item_id, correct attempt_id and task_id.
+
+        Duplicate item_ids within a single TaskAttempt are rejected.
+        Every item's attempt_id must match the parent attempt_id, and
+        every item's task_id must match the parent task_id.
+        """
+        seen: set[str] = set()
+        for item in self.item_results:
+            if item.item_id in seen:
+                raise ValueError(
+                    f"Duplicate item_id '{item.item_id}' in TaskAttempt "
+                    f"'{self.attempt_id}' — item_ids must be unique within an attempt"
+                )
+            seen.add(item.item_id)
+            if item.attempt_id != self.attempt_id:
+                raise ValueError(
+                    f"Item '{item.item_id}' has attempt_id='{item.attempt_id}' "
+                    f"but parent TaskAttempt has attempt_id='{self.attempt_id}'"
+                )
+            if item.task_id != self.task_id:
+                raise ValueError(
+                    f"Item '{item.item_id}' has task_id='{item.task_id}' "
+                    f"but parent TaskAttempt has task_id='{self.task_id}'"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _check_item_evidence_closure(self) -> TaskAttempt:
+        """Validate that every item evidence_refs ⊆ parent TaskAttempt evidence_refs.
+
+        This ensures item-level evidence cannot reference evidence that the
+        TaskAttempt doesn't know about.
+        """
+        parent_refs = set(self.evidence_refs)
+        for item in self.item_results:
+            for ref in item.evidence_refs:
+                if ref not in parent_refs:
+                    raise ValueError(
+                        f"Item '{item.item_id}' references evidence '{ref}' "
+                        f"which is not in TaskAttempt '{self.attempt_id}' evidence_refs"
+                    )
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Item-Level Results
@@ -414,6 +548,14 @@ class BenchmarkItemResult(BaseModel):
 
     Provenance is traceable through ``attempt_id`` → ``TaskAttempt``
     without duplicating all provenance fields.
+
+    Status consistency invariants (enforced by model validator):
+      - GRADED: raw_score / normalized_score may be any value in [0,1];
+        error_message must be None.
+      - UNGRADABLE: raw_score and normalized_score must both be 0.0;
+        error_message must be set (the reason).
+      - FAILURE: raw_score and normalized_score must both be 0.0;
+        error_message must be set (the failure description).
     """
 
     item_id: NonEmptyStr = Field(..., description="Unique item identifier (e.g. item-001)")
@@ -441,6 +583,32 @@ class BenchmarkItemResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional item metadata")
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _check_status_consistency(self) -> BenchmarkItemResult:
+        """Enforce status ↔ score / error_message invariants."""
+        if self.status == ItemStatus.GRADED:
+            if self.error_message is not None:
+                raise ValueError(
+                    f"GRADED item '{self.item_id}' must not have error_message, got '{self.error_message}'"
+                )
+        elif self.status == ItemStatus.FAILURE:
+            if self.raw_score > 0.0 or self.normalized_score > 0.0:
+                raise ValueError(
+                    f"FAILURE item '{self.item_id}' must have raw_score=0.0 and "
+                    f"normalized_score=0.0, got raw={self.raw_score}, norm={self.normalized_score}"
+                )
+            if self.error_message is None:
+                raise ValueError(f"FAILURE item '{self.item_id}' must have error_message set")
+        elif self.status == ItemStatus.UNGRADABLE:
+            if self.raw_score > 0.0 or self.normalized_score > 0.0:
+                raise ValueError(
+                    f"UNGRADABLE item '{self.item_id}' must have raw_score=0.0 and "
+                    f"normalized_score=0.0, got raw={self.raw_score}, norm={self.normalized_score}"
+                )
+            if self.error_message is None:
+                raise ValueError(f"UNGRADABLE item '{self.item_id}' must have error_message set")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +672,6 @@ class BenchmarkRunResult(BenchmarkProvenance):
 
     run_id: NonEmptyStr = Field(..., description="Unique run identifier")
     task_attempts: list[TaskAttempt] = Field(default_factory=list, description="All task attempts")
-    item_results: list[BenchmarkItemResult] = Field(default_factory=list, description="All per-item results")
     grade_results: list[GradeResult] = Field(default_factory=list, description="All grading results")
     dimensions: list[DimensionResult] = Field(default_factory=list, description="Per-dimension aggregate results")
     started_at: datetime | None = Field(default=None, description="Run start time")

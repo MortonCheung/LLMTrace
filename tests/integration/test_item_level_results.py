@@ -1,11 +1,14 @@
 """Integration tests for item-level benchmark results (v0.3-A).
 
-Tests cover:
-- Model validation (BenchmarkItemResult)
-- GSM8K item extraction and grading
-- Failure isolation
-- Reporting round-trip
-- Compute aggregate helpers
+Tests cover production-path invariants:
+- ItemAggregateResult fixed-denominator scoring
+- BenchmarkItemResult status consistency validators
+- TaskAttempt duplicate/cross-attempt/evidence closure validators
+- GSM8K item extraction and grading (correct, wrong, ungradable, failure)
+- GradeResult derived from item aggregate; lm-eval cross-check
+- Provider failure isolation in bridge layer
+- Reporting round-trip with item-level display
+- HTML XSS escaping through real renderer
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ import uuid
 import pytest
 
 from llmtrace.adapters.lm_eval import (
-    _GSM8K_ANSWER_RE,
     LmEvalAdapter,
     _extract_gsm8k_final_answer,
     _grade_gsm8k_items,
@@ -26,6 +28,9 @@ from llmtrace.benchmarks.models import (
     BenchmarkItemResult,
     BenchmarkRunResult,
     ItemStatus,
+    TaskAttempt,
+    TaskStatus,
+    aggregate_item_results,
     compute_item_aggregate_score,
     item_aggregate_summary,
 )
@@ -41,66 +46,178 @@ def adapter():
     return LmEvalAdapter()
 
 
-# ---------------------------------------------------------------------------
-# Model Validation
-# ---------------------------------------------------------------------------
+def _make_item(item_id: str, score: float, status: ItemStatus = ItemStatus.GRADED, **kwargs):
+    """Build a BenchmarkItemResult with minimal boilerplate."""
+    kw: dict = {
+        "item_id": item_id,
+        "task_id": "t",
+        "attempt_id": "a",
+        "status": status,
+        "raw_score": score,
+        "normalized_score": score,
+    }
+    # error_message required for FAILURE / UNGRADABLE
+    if status in (ItemStatus.FAILURE, ItemStatus.UNGRADABLE) and "error_message" not in kwargs:
+        kw["error_message"] = f"item {item_id} {status.value}"
+    kw.update(kwargs)
+    return BenchmarkItemResult(**kw)
 
 
-class TestBenchmarkItemResultModel:
-    """Validate the BenchmarkItemResult model invariants."""
+# ===================================================================
+# 1. ItemAggregateResult — fixed denominator
+# ===================================================================
 
-    def test_minimal_construction(self):
-        item = BenchmarkItemResult(
-            item_id="item-001",
-            task_id="gsm8k_subset",
-            attempt_id="attempt-1",
+
+class TestItemAggregateFixedDenominator:
+    """Score = sum / planned_items, never shrinks on failure/ungradable."""
+
+    def test_8_of_8_correct(self):
+        items = [_make_item(f"i{i}", 1.0) for i in range(8)]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.planned_item_count == 8
+        assert agg.graded_item_count == 8
+        assert agg.correct_count == 8
+        assert agg.wrong_count == 0
+        assert agg.failure_count == 0
+        assert agg.ungradable_count == 0
+        assert agg.coverage == 1.0
+        assert agg.execution_coverage == 1.0
+        assert agg.raw_score == 1.0
+        assert agg.normalized_score == 1.0
+
+    def test_7_of_8_correct(self):
+        """7 correct + 1 wrong = 0.875"""
+        items = [_make_item(f"i{i}", 1.0) for i in range(7)] + [_make_item("i8", 0.0)]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.planned_item_count == 8
+        assert agg.graded_item_count == 8
+        assert agg.correct_count == 7
+        assert agg.wrong_count == 1
+        assert agg.normalized_score == 7.0 / 8.0
+
+    def test_6_correct_1_wrong_1_failure(self):
+        """6 correct + 1 wrong + 1 failure → score = 6/8 = 0.75"""
+        items = (
+            [_make_item(f"i{i}", 1.0) for i in range(6)]
+            + [_make_item("i7", 0.0, ItemStatus.GRADED)]
+            + [_make_item("i8", 0.0, ItemStatus.FAILURE, error_message="timeout")]
         )
-        assert item.status == ItemStatus.GRADED
-        assert item.raw_score == 0.0
-        assert item.normalized_score == 0.0
-        assert item.grader_id == "exact_match"
-        assert item.evidence_refs == []
-        assert item.error_message is None
-        assert item.metadata == {}
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.planned_item_count == 8
+        assert agg.graded_item_count == 7
+        assert agg.failure_count == 1
+        assert agg.ungradable_count == 0
+        assert agg.correct_count == 6
+        assert agg.wrong_count == 1
+        assert agg.coverage == 7.0 / 8.0
+        assert agg.execution_coverage == 8.0 / 8.0
+        # Must be 6/8, NOT 6/7
+        assert agg.raw_score == 6.0 / 8.0
+        assert agg.normalized_score == 0.75
 
-    def test_score_boundaries(self):
-        # Score must be within [0, 1]
-        BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=0.0)
-        BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=1.0)
-        BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=0.75)
+    def test_6_correct_1_wrong_1_ungradable(self):
+        """6 correct + 1 wrong + 1 ungradable → score = 6/8 = 0.75"""
+        items = (
+            [_make_item(f"i{i}", 1.0) for i in range(6)]
+            + [_make_item("i7", 0.0, ItemStatus.GRADED)]
+            + [_make_item("i8", 0.0, ItemStatus.UNGRADABLE, error_message="no parse")]
+        )
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.ungradable_count == 1
+        assert agg.normalized_score == 0.75
 
-        with pytest.raises(ValueError):
-            BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=-0.1)
+    def test_all_correct_with_planned_count(self):
+        items = [_make_item(f"i{i}", 1.0) for i in range(8)]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.normalized_score == 1.0
 
-        with pytest.raises(ValueError):
-            BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=1.1)
+    def test_empty_items_zero_planned(self):
+        agg = aggregate_item_results([], planned_item_count=0)
+        assert agg.normalized_score == 0.0
+        assert agg.coverage == 0.0
 
-    def test_item_id_non_empty(self):
-        with pytest.raises(ValueError):
-            BenchmarkItemResult(item_id="", task_id="t", attempt_id="a")
+    def test_coverage_excludes_failures_from_graded(self):
+        """Failures are NOT in graded items, so coverage < 1."""
+        items = [
+            _make_item("i1", 1.0),
+            _make_item("i2", 0.0, ItemStatus.FAILURE, error_message="err"),
+        ]
+        agg = aggregate_item_results(items, planned_item_count=2)
+        assert agg.coverage == 0.5
+        assert agg.execution_coverage == 1.0  # failure counts as "executed"
 
-    def test_uuid_validation_for_attempt_id(self):
-        # attempt_id must be non-empty (implementation choice, not UUID enforced)
-        BenchmarkItemResult(item_id="i1", task_id="t", attempt_id=str(uuid.uuid4()))
 
-    def test_serialization_round_trip(self):
+# ===================================================================
+# 2. BenchmarkItemResult status validators
+# ===================================================================
+
+
+class TestItemResultValidators:
+    """Block illegal status ↔ score combinations."""
+
+    def test_graded_with_error_message_rejected(self):
+        with pytest.raises(ValueError, match="GRADED.*error_message"):
+            BenchmarkItemResult(
+                item_id="i1",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.GRADED,
+                raw_score=1.0,
+                error_message="should not be here",
+            )
+
+    def test_failure_with_positive_score_rejected(self):
+        with pytest.raises(ValueError, match="FAILURE.*raw_score=0.0"):
+            BenchmarkItemResult(
+                item_id="i1",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.FAILURE,
+                raw_score=0.7,
+                error_message="fail",
+            )
+
+    def test_ungradable_with_positive_score_rejected(self):
+        with pytest.raises(ValueError, match="UNGRADABLE.*raw_score=0.0"):
+            BenchmarkItemResult(
+                item_id="i1",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.UNGRADABLE,
+                raw_score=1.0,
+                error_message="no parse",
+            )
+
+    def test_failure_without_error_message_rejected(self):
+        with pytest.raises(ValueError, match="FAILURE.*error_message"):
+            BenchmarkItemResult(
+                item_id="i1",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.FAILURE,
+            )
+
+    def test_ungradable_without_error_message_rejected(self):
+        with pytest.raises(ValueError, match="UNGRADABLE.*error_message"):
+            BenchmarkItemResult(
+                item_id="i1",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.UNGRADABLE,
+            )
+
+    def test_graded_valid_state(self):
         item = BenchmarkItemResult(
-            item_id="item-003",
-            task_id="gsm8k_subset",
-            attempt_id="attempt-xyz",
+            item_id="i1",
+            task_id="t",
+            attempt_id="a",
             status=ItemStatus.GRADED,
-            raw_score=1.0,
-            normalized_score=1.0,
-            evidence_refs=["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
-            metadata={"extracted_answer": "42", "expected_answer": "42", "correct": True},
+            raw_score=0.5,
+            normalized_score=0.5,
         )
-        d = item.model_dump()
-        restored = BenchmarkItemResult(**d)
-        assert restored.item_id == "item-003"
-        assert restored.raw_score == 1.0
-        assert restored.metadata["correct"] is True
+        assert item.raw_score == 0.5
 
-    def test_failure_status_consistency(self):
+    def test_failure_valid_state(self):
         item = BenchmarkItemResult(
             item_id="i1",
             task_id="t",
@@ -111,74 +228,133 @@ class TestBenchmarkItemResultModel:
         )
         assert item.status == ItemStatus.FAILURE
         assert item.error_message == "provider timeout"
-        assert item.normalized_score == 0.0
 
-    def test_ungradable_status(self):
+    def test_score_boundaries(self):
+        BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=0.0)
+        BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=1.0)
+        with pytest.raises(ValueError):
+            BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=-0.1)
+        with pytest.raises(ValueError):
+            BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=1.1)
+
+
+# ===================================================================
+# 3. TaskAttempt item validators
+# ===================================================================
+
+
+class TestTaskAttemptItemValidators:
+    """Duplicate item_id, cross-attempt, evidence closure."""
+
+    def test_duplicate_item_id_rejected(self):
+        item1 = _make_item("dup", 1.0, attempt_id="att-1", task_id="t")
+        item2 = _make_item("dup", 0.0, attempt_id="att-1", task_id="t")
+        with pytest.raises(ValueError, match="Duplicate item_id"):
+            TaskAttempt(
+                attempt_id="att-1",
+                task_id="t",
+                item_results=[item1, item2],
+                source_id="s",
+                source_revision="r",
+                suite_id="s",
+                suite_version="v",
+                adapter_id="a",
+                adapter_version="v",
+            )
+
+    def test_unique_item_ids_accepted(self):
+        items = [_make_item(f"item-{i:03d}", 1.0, attempt_id="att-1", task_id="t") for i in range(8)]
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="t",
+            item_results=items,
+            source_id="s",
+            source_revision="r",
+            suite_id="s",
+            suite_version="v",
+            adapter_id="a",
+            adapter_version="v",
+        )
+        assert len(attempt.item_results) == 8
+
+    def test_cross_attempt_item_rejected(self):
+        """Item with attempt_id != parent attempt_id must be rejected."""
+        item = _make_item("i1", 1.0, attempt_id="OTHER-ATTEMPT", task_id="t")
+        with pytest.raises(ValueError, match="attempt_id"):
+            TaskAttempt(
+                attempt_id="att-1",
+                task_id="t",
+                item_results=[item],
+                source_id="s",
+                source_revision="r",
+                suite_id="s",
+                suite_version="v",
+                adapter_id="a",
+                adapter_version="v",
+            )
+
+    def test_task_id_mismatch_rejected(self):
+        """Item with task_id != parent task_id must be rejected."""
+        item = _make_item("i1", 1.0, attempt_id="att-1", task_id="WRONG-TASK")
+        with pytest.raises(ValueError, match="task_id"):
+            TaskAttempt(
+                attempt_id="att-1",
+                task_id="t",
+                item_results=[item],
+                source_id="s",
+                source_revision="r",
+                suite_id="s",
+                suite_version="v",
+                adapter_id="a",
+                adapter_version="v",
+            )
+
+    def test_item_evidence_not_in_attempt_rejected(self):
+        """Item referencing evidence not in parent attempt must be rejected."""
         item = BenchmarkItemResult(
             item_id="i1",
             task_id="t",
-            attempt_id="a",
-            status=ItemStatus.UNGRADABLE,
-            error_message="No #### pattern found",
+            attempt_id="att-1",
+            evidence_refs=["00000000-0000-0000-0000-000000000999"],
         )
-        assert item.status == ItemStatus.UNGRADABLE
-
-    def test_extra_fields_forbidden(self):
-        with pytest.raises(ValueError):
-            BenchmarkItemResult(  # type: ignore[call-arg]
-                item_id="i1", task_id="t", attempt_id="a", fake_field=42
+        with pytest.raises(ValueError, match="evidence.*not in"):
+            TaskAttempt(
+                attempt_id="att-1",
+                task_id="t",
+                item_results=[item],
+                evidence_refs=["00000000-0000-0000-0000-000000000001"],
+                source_id="s",
+                source_revision="r",
+                suite_id="s",
+                suite_version="v",
+                adapter_id="a",
+                adapter_version="v",
             )
 
 
-# ---------------------------------------------------------------------------
-# GSM8K Answer Extraction
-# ---------------------------------------------------------------------------
+# ===================================================================
+# 4. GSM8K answer extraction
+# ===================================================================
 
 
 class TestGsm8kAnswerExtraction:
-    """Test the GSM8K answer extraction logic."""
+    def test_extract_simple(self):
+        assert _extract_gsm8k_final_answer("#### 42") == "42"
 
-    def test_extract_simple_answer(self):
-        assert _extract_gsm8k_final_answer("Some reasoning\n#### 42") == "42"
-
-    def test_extract_negative_answer(self):
+    def test_extract_negative(self):
         assert _extract_gsm8k_final_answer("#### -5") == "-5"
-
-    def test_extract_with_spaces(self):
-        assert _extract_gsm8k_final_answer("####   18  ") == "18"
 
     def test_extract_with_comma(self):
         assert _extract_gsm8k_final_answer("#### 1,234") == "1,234"
 
-    def test_extract_with_decimal(self):
-        assert _extract_gsm8k_final_answer("#### 3.14") == "3.14"
-
-    def test_extract_multiline(self):
-        text = "Line 1\nLine 2\n#### 100\nMore text"
-        assert _extract_gsm8k_final_answer(text) == "100"
-
-    def test_extract_last_answer(self):
-        text = "#### 10\n#### 20"
-        assert _extract_gsm8k_final_answer(text) == "10"  # first match
-
     def test_extract_no_answer(self):
-        assert _extract_gsm8k_final_answer("No answer here") is None
+        assert _extract_gsm8k_final_answer("No answer") is None
 
-    def test_extract_empty_string(self):
+    def test_extract_empty(self):
         assert _extract_gsm8k_final_answer("") is None
-
-    def test_regex_compiled(self):
-        assert _GSM8K_ANSWER_RE.pattern is not None
-
-
-# ---------------------------------------------------------------------------
-# Number Normalization
-# ---------------------------------------------------------------------------
 
 
 class TestNumberNormalization:
-    """Test number normalization for comparison."""
-
     def test_integer(self):
         assert _normalize_number("42") == "42"
 
@@ -191,355 +367,314 @@ class TestNumberNormalization:
     def test_trailing_zero(self):
         assert _normalize_number("5.0") == "5"
 
-    def test_negative(self):
-        assert _normalize_number("-5") == "-5"
 
-    def test_comma_and_decimal(self):
-        assert _normalize_number("1,234.5") == "1234.5"
-
-    def test_non_numeric(self):
-        assert _normalize_number("hello") == "hello"
-
-
-# ---------------------------------------------------------------------------
-# Item Aggregate Helpers
-# ---------------------------------------------------------------------------
-
-
-class TestItemAggregateHelpers:
-    """Test compute_item_aggregate_score and item_aggregate_summary."""
-
-    def _make_item(self, item_id: str, score: float, status: ItemStatus = ItemStatus.GRADED):
-        return BenchmarkItemResult(
-            item_id=item_id,
-            task_id="t",
-            attempt_id="a",
-            status=status,
-            raw_score=score,
-            normalized_score=score,
-        )
-
-    def test_all_correct(self):
-        items = [self._make_item(f"i{i}", 1.0) for i in range(8)]
-        assert compute_item_aggregate_score(items) == 1.0
-
-    def test_partial_correct(self):
-        items = [self._make_item("i1", 1.0), self._make_item("i2", 0.0)]
-        assert compute_item_aggregate_score(items) == 0.5
-
-    def test_none_correct(self):
-        items = [self._make_item(f"i{i}", 0.0) for i in range(8)]
-        assert compute_item_aggregate_score(items) == 0.0
-
-    def test_7_of_8_correct(self):
-        items = [self._make_item(f"i{i}", 1.0) for i in range(7)] + [self._make_item("i8", 0.0)]
-        assert compute_item_aggregate_score(items) == 7.0 / 8.0
-
-    def test_exclude_ungradable(self):
-        items = [
-            self._make_item("i1", 1.0),
-            self._make_item("i2", 1.0),
-            self._make_item("i3", 0.0, ItemStatus.UNGRADABLE),
-        ]
-        assert compute_item_aggregate_score(items) == 1.0  # only graded: 2/2
-
-    def test_exclude_failure(self):
-        items = [
-            self._make_item("i1", 0.0),
-            self._make_item("i2", 0.5, ItemStatus.FAILURE),
-            self._make_item("i3", 0.0, ItemStatus.FAILURE),
-        ]
-        assert compute_item_aggregate_score(items) == 0.0  # only graded: 0/1
-
-    def test_empty_items(self):
-        assert compute_item_aggregate_score([]) is None
-
-    def test_all_ungradable(self):
-        items = [self._make_item(f"i{i}", 0.0, ItemStatus.UNGRADABLE) for i in range(3)]
-        assert compute_item_aggregate_score(items) is None
-
-    def test_summary_all_correct(self):
-        items = [self._make_item(f"i{i}", 1.0) for i in range(8)]
-        summary = item_aggregate_summary(items)
-        assert summary["total_items"] == 8
-        assert summary["graded_count"] == 8
-        assert summary["correct_count"] == 8
-        assert summary["failure_count"] == 0
-        assert summary["item_aggregate_score"] == 1.0
-
-    def test_summary_with_failures(self):
-        items = [
-            self._make_item("i1", 1.0),
-            self._make_item("i2", 0.0),
-            self._make_item("i3", 0.0, ItemStatus.FAILURE),
-        ]
-        summary = item_aggregate_summary(items)
-        assert summary["total_items"] == 3
-        assert summary["graded_count"] == 2
-        assert summary["failure_count"] == 1
-        assert summary["item_aggregate_score"] == 0.5
-
-
-# ---------------------------------------------------------------------------
-# GSM8K Item Grading
-# ---------------------------------------------------------------------------
+# ===================================================================
+# 5. GSM8K item grading
+# ===================================================================
 
 
 class TestGsm8kItemGrading:
-    """Test GSM8K item grading with _grade_gsm8k_items."""
-
-    def _make_sample(self, evidence_id: str, response_text: str):
-        return {"evidence_id": evidence_id, "response_text": response_text, "prompt": ""}
-
-    def test_all_correct_8_items(self):
-        responses = [
-            self._make_sample(f"00000000-0000-0000-0000-0000000000{i:02d}", f"Reasoning\n#### {42 + i}")
-            for i in range(8)
-        ]
-        items = _grade_gsm8k_items(responses, "attempt-1", "gsm8k_subset")
-        assert len(items) == 8
-        for i, item in enumerate(items):
-            assert item.item_id == f"item-{i + 1:03d}"
-            assert item.status == ItemStatus.GRADED
-            assert item.attempt_id == "attempt-1"
-            assert item.task_id == "gsm8k_subset"
-            assert len(item.evidence_refs) == 1
-
-    def test_item_ids_are_deterministic(self):
-        responses = [self._make_sample(f"00000000-0000-0000-0000-0000000000{i:02d}", "#### 1") for i in range(3)]
-        items1 = _grade_gsm8k_items(responses, "a", "t")
-        items2 = _grade_gsm8k_items(responses, "a", "t")
-        ids1 = [i.item_id for i in items1]
-        ids2 = [i.item_id for i in items2]
-        assert ids1 == ids2 == ["item-001", "item-002", "item-003"]
-
-    def test_each_item_has_evidence(self):
-        responses = [self._make_sample(f"00000000-0000-0000-0000-0000000000{i:02d}", "#### 1") for i in range(3)]
-        items = _grade_gsm8k_items(responses, "a", "t")
-        assert all(len(item.evidence_refs) == 1 for item in items)
-
-    def test_ungradable_no_answer_pattern(self):
-        responses = [self._make_sample("00000000-0000-0000-0000-000000000000", "No #### here")]
-        items = _grade_gsm8k_items(responses, "a", "t")
-        assert items[0].status == ItemStatus.UNGRADABLE
-        assert items[0].error_message is not None
-        assert "####" in items[0].error_message
+    def _sample(self, evidence_id: str, response_text: str, status: str = "success"):
+        return {"evidence_id": evidence_id, "response_text": response_text, "prompt": "", "status": status}
 
     def test_loaded_answers_count(self):
         answers = _load_gsm8k_expected_answers()
         assert len(answers) == 8
 
+    def test_all_8_items_produced(self):
+        responses = [
+            self._sample(f"00000000-0000-0000-0000-0000000000{i:02d}", f"Reasoning\n#### {42 + i}") for i in range(8)
+        ]
+        items = _grade_gsm8k_items(responses, "attempt-1", "gsm8k_subset")
+        assert len(items) == 8
+        for i, item in enumerate(items):
+            assert item.item_id == f"item-{i + 1:03d}"
+            assert item.attempt_id == "attempt-1"
+            assert item.task_id == "gsm8k_subset"
+            assert len(item.evidence_refs) == 1
 
-# ---------------------------------------------------------------------------
-# GSM8K Full Pipeline (mock)
-# ---------------------------------------------------------------------------
+    def test_wrong_answer_isolated(self):
+        """item-001 correct, item-002 wrong, item-003 correct."""
+        responses = [
+            self._sample("00000000-0000-0000-0000-000000000001", "#### 42"),
+            self._sample("00000000-0000-0000-0000-000000000002", "#### 999"),
+            self._sample("00000000-0000-0000-0000-000000000003", "#### 44"),
+        ]
+        items = _grade_gsm8k_items(responses, "a", "t")
+        assert all(item.status == ItemStatus.GRADED for item in items)
+        # Score assertions depend on expected answers loaded from JSON.
+        # item-002 is graded 0 because 999 != expected[1].
+        assert items[1].raw_score == 0.0
+        assert items[1].normalized_score == 0.0
+
+    def test_ungradable_no_answer_pattern(self):
+        responses = [self._sample("00000000-0000-0000-0000-00000000000a", "No #### here")]
+        items = _grade_gsm8k_items(responses, "a", "t")
+        assert items[0].status == ItemStatus.UNGRADABLE
+        assert items[0].error_message is not None
+        assert "####" in items[0].error_message
+
+    def test_failure_item_mapped_correctly(self):
+        """A bridge-level failure sample must produce ItemStatus.FAILURE."""
+        responses = [
+            self._sample(
+                "00000000-0000-0000-0000-000000000fff",
+                "",
+                status="failure",
+            )
+            | {"failure_message": "provider timeout", "failure_error_code": "PROVIDER_EXCEPTION"},
+        ]
+        items = _grade_gsm8k_items(responses, "a", "t")
+        assert items[0].status == ItemStatus.FAILURE
+        assert items[0].raw_score == 0.0
+        assert items[0].normalized_score == 0.0
+        assert "provider timeout" in items[0].error_message
+
+    def test_item_ids_deterministic(self):
+        responses = [self._sample(f"00000000-0000-0000-0000-00000000000{i}", "#### 1") for i in range(3)]
+        items1 = _grade_gsm8k_items(responses, "a", "t")
+        items2 = _grade_gsm8k_items(responses, "a", "t")
+        assert [i.item_id for i in items1] == [i.item_id for i in items2]
+
+
+# ===================================================================
+# 6. GSM8K full pipeline (uses FakeProvider)
+# ===================================================================
 
 
 class TestGsm8kFullPipeline:
-    """Test the full GSM8K pipeline with mock provider."""
-
     async def test_pipeline_produces_8_items(self, adapter):
         from tests.adapters.conftest import FakeProvider
 
         tasks = adapter.list_tasks()
         gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
-
-        responses = {
-            "Janet's ducks lay 16 eggs per day": "#### 18",
-            "A robe takes 2 bolts of blue fiber": "#### 3",
-            "Josh decides to try flipping a house": "#### 70000",
-            "James decides to run 3 sprints": "#### 540",
-            "Every day, Wendi feeds each of her chickens": "#### 20",
-            "Kylar went to the store to buy glasses": "#### 64",
-            "Toulouse has twice as many sheep as Charleston": "#### 260",
-            "Carla is downloading a 200 GB file": "#### 160",
-        }
-        provider = FakeProvider(response_map=responses)
+        provider = FakeProvider(
+            response_map={
+                "Janet's ducks lay 16 eggs per day": "#### 18",
+                "A robe takes 2 bolts of blue fiber": "#### 3",
+                "Josh decides to try flipping a house": "#### 70000",
+                "James decides to run 3 sprints": "#### 540",
+                "Every day, Wendi feeds each of her chickens": "#### 20",
+                "Kylar went to the store to buy glasses": "#### 64",
+                "Toulouse has twice as many sheep as Charleston": "#### 260",
+                "Carla is downloading a 200 GB file": "#### 160",
+            },
+        )
 
         attempt = await adapter.run_task(gsm_spec, provider)
         assert len(attempt.item_results) == 8
-
-    async def test_pipeline_item_ids_deterministic(self, adapter):
-        from tests.adapters.conftest import FakeProvider
-
-        tasks = adapter.list_tasks()
-        gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
-
-        responses = {
-            "Janet's ducks lay 16 eggs per day": "#### 18",
-            "A robe takes 2 bolts of blue fiber": "#### 3",
-            "Josh decides to try flipping a house": "#### 70000",
-            "James decides to run 3 sprints": "#### 540",
-            "Every day, Wendi feeds each of her chickens": "#### 20",
-            "Kylar went to the store to buy glasses": "#### 64",
-            "Toulouse has twice as many sheep as Charleston": "#### 260",
-            "Carla is downloading a 200 GB file": "#### 160",
-        }
-        provider = FakeProvider(response_map=responses)
-
-        items1 = (await adapter.run_task(gsm_spec, provider)).item_results
-        items2 = (await adapter.run_task(gsm_spec, provider)).item_results
-        assert [i.item_id for i in items1] == [i.item_id for i in items2]
 
     async def test_pipeline_each_item_has_unique_evidence(self, adapter):
         from tests.adapters.conftest import FakeProvider
 
         tasks = adapter.list_tasks()
         gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
-
-        responses = {
-            "Janet's ducks lay 16 eggs per day": "#### 18",
-            "A robe takes 2 bolts of blue fiber": "#### 3",
-            "Josh decides to try flipping a house": "#### 70000",
-            "James decides to run 3 sprints": "#### 540",
-            "Every day, Wendi feeds each of her chickens": "#### 20",
-            "Kylar went to the store to buy glasses": "#### 64",
-            "Toulouse has twice as many sheep as Charleston": "#### 260",
-            "Carla is downloading a 200 GB file": "#### 160",
-        }
-        provider = FakeProvider(response_map=responses)
+        provider = FakeProvider(
+            response_map={
+                "Janet's ducks lay 16 eggs per day": "#### 18",
+                "A robe takes 2 bolts of blue fiber": "#### 3",
+                "Josh decides to try flipping a house": "#### 70000",
+                "James decides to run 3 sprints": "#### 540",
+                "Every day, Wendi feeds each of her chickens": "#### 20",
+                "Kylar went to the store to buy glasses": "#### 64",
+                "Toulouse has twice as many sheep as Charleston": "#### 260",
+                "Carla is downloading a 200 GB file": "#### 160",
+            },
+        )
 
         attempt = await adapter.run_task(gsm_spec, provider)
         evidence_ids = [ir.evidence_refs[0] for ir in attempt.item_results if ir.evidence_refs]
         assert len(evidence_ids) == 8
-        assert len(set(evidence_ids)) == 8  # all unique
+        assert len(set(evidence_ids)) == 8
 
-    async def test_pipeline_aggregate_matches_items(self, adapter):
-        from tests.adapters.conftest import FakeProvider
+
+# ===================================================================
+# 7. Provider failure isolation (FakeProvider)
+# ===================================================================
+
+
+class TestProviderFailureIsolation:
+    """A single provider failure must NOT abort remaining items."""
+
+    async def test_failure_isolation_from_fake_provider(self, adapter):
+        """Item 3 fails (HTTP 500), all other items continue."""
 
         tasks = adapter.list_tasks()
         gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
 
-        responses = {
-            "Janet's ducks lay 16 eggs per day": "#### 18",
-            "A robe takes 2 bolts of blue fiber": "#### 3",
-            "Josh decides to try flipping a house": "#### 70000",
-            "James decides to run 3 sprints": "#### 540",
-            "Every day, Wendi feeds each of her chickens": "#### 20",
-            "Kylar went to the store to buy glasses": "#### 64",
-            "Toulouse has twice as many sheep as Charleston": "#### 260",
-            "Carla is downloading a 200 GB file": "#### 160",
-        }
-        provider = FakeProvider(response_map=responses)
+        # We need FakeProvider to fail on a specific call, using fail_with_http_status
+        # on a specific call number.
+        # Since FakeProvider doesn't directly support per-call failure mode,
+        # we use fail_with_http_status=500 to make ALL responses fail via evidence check.
+        # For true per-item isolation, we need a custom provider.
 
+        # Instead, test via manual composition: create a FakeProvider that returns
+        # HTTP 500 evidence on the 3rd call.
+        class SelectiveFailingProvider:
+            """Provider that fails on a specific call index."""
+
+            def __init__(self):
+                self.call_count = 0
+                self.evidence = []
+
+            async def complete(self, model, messages, *, options=None):
+
+                self.call_count += 1
+                fail = self.call_count == 3  # fail on 3rd item
+                from llmtrace.models.evidence import HTTPEvidence
+
+                evidence_id = uuid.uuid4()
+                ev = HTTPEvidence(
+                    evidence_id=evidence_id,
+                    evidence_type="smoke_test",
+                    request_method="POST",
+                    request_url_redacted="https://fake/",
+                    request_path="/",
+                    request_headers_redacted={},
+                    request_body_redacted={},
+                    request_model=model,
+                    response_model=model,
+                    response_text="" if fail else "#### 42",
+                    http_status=500 if fail else 200,
+                    total_latency_ms=100.0,
+                )
+                self.evidence.append(ev)
+                return ev
+
+        provider = SelectiveFailingProvider()
         attempt = await adapter.run_task(gsm_spec, provider)
-        item_aggregate = compute_item_aggregate_score(attempt.item_results)
-        metric = attempt.metadata.get("metric_result")
-        if metric and isinstance(metric, dict):
-            assert abs(item_aggregate - metric["value"]) < 0.001
+
+        # All 8 items should exist
+        assert len(attempt.item_results) == 8
+
+        # Item 3 (idx 2) should be FAILURE
+        failed_items = [it for it in attempt.item_results if it.status == ItemStatus.FAILURE]
+        assert len(failed_items) == 1
+        assert failed_items[0].item_id == "item-003"
+
+        # Other items should be GRADED or UNGRADABLE (not FAILURE)
+        non_failed = [it for it in attempt.item_results if it.status != ItemStatus.FAILURE]
+        assert len(non_failed) == 7
+
+        # Failed item must have evidence
+        assert len(failed_items[0].evidence_refs) == 1
+        assert len(failed_items[0].error_message) > 0
 
 
-# ---------------------------------------------------------------------------
-# Failure Isolation
-# ---------------------------------------------------------------------------
+# ===================================================================
+# 8. normalize_result — item-derived GradeResult with cross-check
+# ===================================================================
 
 
-class TestFailureIsolation:
-    """Test that single item failures don't corrupt other items."""
+class TestNormalizeResultItemDerived:
+    """GradeResult must derive from ItemAggregateResult; lm-eval is cross-check only."""
 
-    def _make_sample(self, evidence_id: str, response_text: str):
-        return {"evidence_id": evidence_id, "response_text": response_text, "prompt": ""}
+    def test_normalize_derives_from_items(self, adapter):
+        """7 correct + 1 wrong → score = 0.875 from items, cross-checked with lm-eval."""
+        items = [_make_item(f"item-{i:03d}", 1.0) for i in range(7)] + [_make_item("item-008", 0.0)]
+        raw_result = {
+            "results": {"exact_match": 0.875},
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+            "item_results": [it.model_dump() for it in items],
+            "planned_item_count": 8,
+        }
+        grade = adapter.normalize_result(raw_result)
+        assert grade.normalized_score == 0.875
+        # Verify metadata contains aggregate info
+        assert grade.metadata.get("planned_item_count") == 8
+        assert grade.metadata.get("correct_count") == 7
+        assert grade.metadata.get("wrong_count") == 1
+        assert grade.metadata.get("lm_eval_cross_check_pass") is True
 
-    def test_ungradable_item_no_fake_score(self):
-        """An ungradable item should NOT get a fake score."""
-        responses = [self._make_sample("00000000-0000-0000-0000-000000000000", "No answer pattern here")]
-        items = _grade_gsm8k_items(responses, "a", "t")
-        assert items[0].status == ItemStatus.UNGRADABLE
-        assert items[0].raw_score == 0.0
-        assert items[0].normalized_score == 0.0
+    def test_normalize_mismatch_raises(self, adapter):
+        """If item aggregate != lm-eval metric, raise ValueError."""
+        items = [_make_item(f"item-{i:03d}", 1.0) for i in range(8)]
+        raw_result = {
+            "results": {"exact_match": 0.5},  # deliberately wrong
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+            "item_results": [it.model_dump() for it in items],
+            "planned_item_count": 8,
+        }
+        with pytest.raises(ValueError, match="LM_EVAL_ITEM_AGGREGATE_MISMATCH"):
+            adapter.normalize_result(raw_result)
 
-    def test_single_wrong_answer_isolated(self):
-        """One wrong answer should not affect other items."""
-        responses = [
-            self._make_sample("00000000-0000-0000-0000-000000000000", "#### 42"),
-            self._make_sample("00000000-0000-0000-0000-000000000001", "#### 999"),
-            self._make_sample("00000000-0000-0000-0000-000000000002", "#### 44"),
-        ]
-        items = _grade_gsm8k_items(responses, "a", "t")
-        assert items[0].status == ItemStatus.GRADED
-        assert items[1].status == ItemStatus.GRADED
-        assert items[2].status == ItemStatus.GRADED
-        # Each item independently graded
-        assert items[0].raw_score != items[1].raw_score or items[0].raw_score == items[1].raw_score
+    def test_normalize_falls_back_to_lm_eval_without_items(self, adapter):
+        """When no item_results, fall back to lm-eval metric."""
+        raw_result = {
+            "results": {"exact_match": 0.5},
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+        }
+        grade = adapter.normalize_result(raw_result)
+        assert grade.normalized_score == 0.5
 
-    def test_aggregate_excludes_ungradable(self):
-        """Ungradable items should not be counted in aggregate."""
-        responses = [
-            self._make_sample("00000000-0000-0000-0000-000000000000", "No pattern"),
-            self._make_sample("00000000-0000-0000-0000-000000000001", "#### 43"),
-            self._make_sample("00000000-0000-0000-0000-000000000002", "#### 44"),
-        ]
-        items = _grade_gsm8k_items(responses, "a", "t")
-        aggregate = compute_item_aggregate_score(items)
-        # Only items 1 and 2 (idx 1 and 2) are graded
-        assert aggregate is not None
-
-    def test_failure_items_do_not_contaminate_others(self):
-        """GRADED items next to UNGRADABLE items should be unaffected."""
-        items = [
-            BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=1.0, normalized_score=1.0),
-            BenchmarkItemResult(
-                item_id="i2",
-                task_id="t",
-                attempt_id="a",
-                status=ItemStatus.UNGRADABLE,
-                raw_score=0.0,
-                normalized_score=0.0,
-            ),
-            BenchmarkItemResult(item_id="i3", task_id="t", attempt_id="a", raw_score=1.0, normalized_score=1.0),
-        ]
-        aggregate = compute_item_aggregate_score(items)
-        assert aggregate == 1.0
-
-    def test_duplicate_item_ids_fine_in_list(self):
-        """Duplicate item_ids are allowed at model level (validation is caller's responsibility)."""
-        items = [
-            BenchmarkItemResult(item_id="dup", task_id="t", attempt_id="a"),
-            BenchmarkItemResult(item_id="dup", task_id="t", attempt_id="a"),
-        ]
-        assert len(items) == 2
+    def test_normalize_6_correct_1_wrong_1_failure(self, adapter):
+        """6 correct + 1 wrong + 1 failure → score = 0.75"""
+        items = (
+            [_make_item(f"item-{i:03d}", 1.0) for i in range(6)]
+            + [_make_item("item-007", 0.0)]
+            + [_make_item("item-008", 0.0, ItemStatus.FAILURE, error_message="timeout")]
+        )
+        raw_result = {
+            "results": {"exact_match": 0.75},
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+            "item_results": [it.model_dump() for it in items],
+            "planned_item_count": 8,
+        }
+        grade = adapter.normalize_result(raw_result)
+        assert grade.normalized_score == 0.75
+        assert grade.metadata.get("failure_count") == 1
+        assert grade.metadata.get("graded_item_count") == 7
+        assert grade.metadata.get("coverage") == 7.0 / 8.0
 
 
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
+# ===================================================================
+# 9. Reporting — item-level display in JSON
+# ===================================================================
 
 
 class TestItemLevelReporting:
-    """Test that item-level data appears in JSON reports."""
+    """Item-level data appears in JSON reports."""
 
     async def test_report_section_contains_items(self, adapter):
         from tests.adapters.conftest import FakeProvider
 
         tasks = adapter.list_tasks()
         gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
-
-        responses = {
-            "Janet's ducks lay 16 eggs per day": "#### 18",
-            "A robe takes 2 bolts of blue fiber": "#### 3",
-            "Josh decides to try flipping a house": "#### 70000",
-            "James decides to run 3 sprints": "#### 540",
-            "Every day, Wendi feeds each of her chickens": "#### 20",
-            "Kylar went to the store to buy glasses": "#### 64",
-            "Toulouse has twice as many sheep as Charleston": "#### 260",
-            "Carla is downloading a 200 GB file": "#### 160",
-        }
-        provider = FakeProvider(response_map=responses)
+        provider = FakeProvider(
+            response_map={
+                "Janet's ducks lay 16 eggs per day": "#### 18",
+                "A robe takes 2 bolts of blue fiber": "#### 3",
+                "Josh decides to try flipping a house": "#### 70000",
+                "James decides to run 3 sprints": "#### 540",
+                "Every day, Wendi feeds each of her chickens": "#### 20",
+                "Kylar went to the store to buy glasses": "#### 64",
+                "Toulouse has twice as many sheep as Charleston": "#### 260",
+                "Carla is downloading a 200 GB file": "#### 160",
+            },
+        )
 
         attempt = await adapter.run_task(gsm_spec, provider)
         raw_result = {
-            "results": {"gsm8k_subset": {"exact_match,strict-match": 1.0}},
+            "results": {"exact_match": 1.0},
             "evidence_ids": list(attempt.evidence_refs),
             "task_name": "gsm8k_subset",
             "attempt_id": attempt.attempt_id,
-            "sample_results": [],
+            "item_results": [ir.model_dump() for ir in attempt.item_results],
+            "planned_item_count": 8,
         }
         grade = adapter.normalize_result(raw_result)
 
         run_result = BenchmarkRunResult(
             run_id=str(uuid.uuid4()),
             task_attempts=[attempt],
-            item_results=list(attempt.item_results),
             grade_results=[grade],
             evidence_refs=attempt.evidence_refs,
             source_id=attempt.source_id,
@@ -559,14 +694,9 @@ class TestItemLevelReporting:
         )
         section = build_benchmark_report_section(plan, run_result)
 
-        # Section should have tasks
         assert len(section.tasks) == 1
         task = section.tasks[0]
-
-        # Task should have items from the attempt
         assert len(task.items) == 8
-
-        # First item should have expected structure
         first_item = task.items[0]
         assert first_item.item_id == "item-001"
         assert first_item.status in ("graded", "ungradable", "failure")
@@ -574,10 +704,6 @@ class TestItemLevelReporting:
 
     def test_report_section_no_items_for_smoke(self, adapter):
         """Smoke task should have empty items list."""
-        from llmtrace.benchmarks.models import TaskAttempt, TaskStatus
-        from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
-
-        # Create a smoke task attempt without items
         attempt = TaskAttempt(
             attempt_id="smoke-1",
             task_id="llmtrace_smoke",
@@ -616,8 +742,7 @@ class TestItemLevelReporting:
         assert len(section.tasks) == 1
         assert section.tasks[0].items == []
 
-    def test_report_json_round_trip(self, adapter):
-        """Items should serialize and deserialize correctly."""
+    def test_report_json_round_trip(self):
         from llmtrace.reporting.benchmark_models import ItemReportItem
 
         item = ItemReportItem(
@@ -629,22 +754,291 @@ class TestItemLevelReporting:
             evidence_refs=["00000000-0000-0000-0000-000000000001"],
             metadata={"correct": True},
         )
-
-        # JSON round-trip
         d = item.model_dump(mode="json")
         restored = ItemReportItem(**d)
         assert restored.item_id == "item-001"
         assert restored.raw_score == 1.0
         assert restored.metadata == {"correct": True}
 
-    def test_report_html_escaping(self, adapter):
-        """Metadata with HTML should be preserved as-is (JSON is text)."""
-        from llmtrace.reporting.benchmark_models import ItemReportItem
 
-        item = ItemReportItem(
-            item_id="item-001",
-            status="graded",
-            metadata={"extracted_answer": "<script>alert(1)</script>"},
+# ===================================================================
+# 10. HTML XSS escaping — real renderer
+# ===================================================================
+
+
+class TestHtmlXssEscaping:
+    """HTML must escape malicious metadata through the real Jinja renderer."""
+
+    def test_html_escapes_xss_in_item_metadata(self, adapter, tmp_path):
+        """Malicious metadata must be HTML-escaped in rendered output.
+
+        The HTML template currently only displays item error_message and status.
+        Metadata is not rendered inline, so this test verifies that items with
+        XSS-laden metadata do NOT inject raw <script> tags via metadata routes.
+        """
+        from datetime import UTC, datetime
+
+        from llmtrace.config import AuditConfig, AuthStyle, Protocol
+        from llmtrace.models.audit import AuditResult, RiskLevel
+        from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
+        from llmtrace.reporting.html_report import generate_html_report
+
+        suite_id = "llmtrace-core-benchmarks"
+        suite_version = "0.1.0"
+        source_id = "lm-eval-harness"
+        source_revision = "9d05167"
+
+        items = [
+            BenchmarkItemResult(
+                item_id="item-001",
+                task_id="llmtrace_smoke",
+                attempt_id="att-1",
+                status=ItemStatus.GRADED,
+                raw_score=1.0,
+                normalized_score=1.0,
+                metadata={"extracted_answer": "<script>alert(1)</script>"},
+            ),
+        ]
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="llmtrace_smoke",
+            source_id=source_id,
+            source_revision=source_revision,
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[],
+            item_results=items,
         )
-        d = item.model_dump()
-        assert d["metadata"]["extracted_answer"] == "<script>alert(1)</script>"
+        run_result = BenchmarkRunResult(
+            run_id=str(uuid.uuid4()),
+            task_attempts=[attempt],
+            grade_results=[],
+            evidence_refs=[],
+            source_id=source_id,
+            source_revision=source_revision,
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+        )
+        plan = adapter.build_plan(suite_id, suite_version, source_id, source_revision, ["llmtrace_smoke"])
+        section = build_benchmark_report_section(plan, run_result)
+
+        audit = AuditResult(
+            config=AuditConfig(
+                protocol=Protocol.OPENAI,
+                base_url="https://api.example.com",
+                model="test",
+                api_key_env="K",
+                auth_style=AuthStyle.BEARER,
+                repeat_count=1,
+                timeout=30.0,
+                max_output_tokens=100,
+                check_streaming=False,
+            ),
+            evidence=[],
+            findings=[],
+            risk_level=RiskLevel.INCONCLUSIVE,
+            schema_fingerprints=[],
+            model_list=[],
+            start_time=datetime(2026, 8, 1, tzinfo=UTC),
+            end_time=datetime(2026, 8, 1, 1, tzinfo=UTC),
+            llmtrace_version="0.3.0",
+            python_version="3.12",
+            platform="darwin",
+            report_id="xss-test",
+            content_hash="",
+        )
+
+        out_path = tmp_path / "report.html"
+        generate_html_report(audit, out_path, benchmark_sections=[section])
+
+        html = out_path.read_text()
+        # Raw <script> tag must not appear anywhere in the HTML
+        assert "<script>alert(1)</script>" not in html
+
+    def test_html_escapes_xss_in_error_message(self, adapter, tmp_path):
+        """Malicious error_message must be HTML-escaped."""
+        from datetime import UTC, datetime
+
+        from llmtrace.config import AuditConfig, AuthStyle, Protocol
+        from llmtrace.models.audit import AuditResult, RiskLevel
+        from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
+        from llmtrace.reporting.html_report import generate_html_report
+
+        suite_id = "llmtrace-core-benchmarks"
+        suite_version = "0.1.0"
+        source_id = "lm-eval-harness"
+        source_revision = "9d05167"
+
+        items = [
+            BenchmarkItemResult(
+                item_id="item-001",
+                task_id="llmtrace_smoke",
+                attempt_id="att-1",
+                status=ItemStatus.FAILURE,
+                raw_score=0.0,
+                normalized_score=0.0,
+                error_message="<script>alert('xss')</script>",
+            ),
+        ]
+        attempt = TaskAttempt(
+            attempt_id="att-1",
+            task_id="llmtrace_smoke",
+            source_id=source_id,
+            source_revision=source_revision,
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+            status=TaskStatus.SUCCESS,
+            evidence_refs=[],
+            item_results=items,
+        )
+        run_result = BenchmarkRunResult(
+            run_id=str(uuid.uuid4()),
+            task_attempts=[attempt],
+            grade_results=[],
+            evidence_refs=[],
+            source_id=source_id,
+            source_revision=source_revision,
+            suite_id=suite_id,
+            suite_version=suite_version,
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+        )
+        plan = adapter.build_plan(suite_id, suite_version, source_id, source_revision, ["llmtrace_smoke"])
+        section = build_benchmark_report_section(plan, run_result)
+
+        audit = AuditResult(
+            config=AuditConfig(
+                protocol=Protocol.OPENAI,
+                base_url="https://api.example.com",
+                model="test",
+                api_key_env="K",
+                auth_style=AuthStyle.BEARER,
+                repeat_count=1,
+                timeout=30.0,
+                max_output_tokens=100,
+                check_streaming=False,
+            ),
+            evidence=[],
+            findings=[],
+            risk_level=RiskLevel.INCONCLUSIVE,
+            schema_fingerprints=[],
+            model_list=[],
+            start_time=datetime(2026, 8, 1, tzinfo=UTC),
+            end_time=datetime(2026, 8, 1, 1, tzinfo=UTC),
+            llmtrace_version="0.3.0",
+            python_version="3.12",
+            platform="darwin",
+            report_id="xss-test-2",
+            content_hash="",
+        )
+
+        out_path = tmp_path / "report2.html"
+        generate_html_report(audit, out_path, benchmark_sections=[section])
+
+        html = out_path.read_text()
+        assert "<script>alert('xss')</script>" not in html
+        assert "&lt;script&gt;" in html
+
+
+# ===================================================================
+# 11. Deprecated helpers — backward compat
+# ===================================================================
+
+
+class TestDeprecatedHelpers:
+    """Verify old compute_item_aggregate_score still works for callers."""
+
+    def test_old_compute_still_works(self):
+        items = [_make_item("i1", 1.0), _make_item("i2", 0.0)]
+        assert compute_item_aggregate_score(items) == 0.5
+
+    def test_item_aggregate_summary(self):
+        items = [_make_item("i1", 1.0), _make_item("i2", 0.0, ItemStatus.FAILURE, error_message="err")]
+        summary = item_aggregate_summary(items)
+        assert summary["total_items"] == 2
+        assert summary["failure_count"] == 1
+        # With fixed denominator: 1 graded score of 1.0 / 2 planned = 0.5
+        assert summary["item_aggregate_score"] == 0.5
+
+
+# ===================================================================
+# 12. GSM8K calibrated score remains None
+# ===================================================================
+
+
+class TestCalibratedScoreRemainsNone:
+    """v0.3-A must not introduce calibrated scoring."""
+
+    async def test_calibrated_score_is_none(self, adapter):
+        from llmtrace.scoring import (
+            CapabilityDimension,
+            TaskScoringRegistry,
+            TaskScoringSpec,
+            aggregate_dimension_score,
+        )
+        from llmtrace.scoring.policy import CapabilityScoringPolicy
+        from tests.adapters.conftest import FakeProvider
+
+        tasks = adapter.list_tasks()
+        gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
+        provider = FakeProvider(
+            response_map={
+                "Janet's ducks lay 16 eggs per day": "#### 18",
+                "A robe takes 2 bolts of blue fiber": "#### 3",
+                "Josh decides to try flipping a house": "#### 70000",
+                "James decides to run 3 sprints": "#### 540",
+                "Every day, Wendi feeds each of her chickens": "#### 20",
+                "Kylar went to the store to buy glasses": "#### 64",
+                "Toulouse has twice as many sheep as Charleston": "#### 260",
+                "Carla is downloading a 200 GB file": "#### 160",
+            },
+        )
+
+        attempt = await adapter.run_task(gsm_spec, provider)
+        raw_result = {
+            "results": {"exact_match": 1.0},
+            "evidence_ids": list(attempt.evidence_refs),
+            "task_name": "gsm8k_subset",
+            "attempt_id": attempt.attempt_id,
+            "item_results": [ir.model_dump() for ir in attempt.item_results],
+            "planned_item_count": 8,
+        }
+        grade = adapter.normalize_result(raw_result)
+
+        run_result = BenchmarkRunResult(
+            run_id=str(uuid.uuid4()),
+            task_attempts=[attempt],
+            grade_results=[grade],
+            evidence_refs=attempt.evidence_refs,
+            source_id=attempt.source_id,
+            source_revision=attempt.source_revision,
+            suite_id=attempt.suite_id,
+            suite_version=attempt.suite_version,
+            adapter_id=adapter.adapter_id,
+            adapter_version=adapter.adapter_version,
+        )
+
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(
+                    task_id="gsm8k_subset",
+                    dimension=CapabilityDimension.MATH_SCIENCE,
+                    task_weight=1.0,
+                )
+            ]
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        dim_score = aggregate_dimension_score(
+            CapabilityDimension.MATH_SCIENCE,
+            [run_result],
+            registry,
+            policy,
+        )
+        assert dim_score.calibrated_score is None

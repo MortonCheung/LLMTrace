@@ -11,7 +11,6 @@ pytest.importorskip("lm_eval")
 
 from llmtrace.adapters.lm_eval_bridge import (
     ProviderBackedLM,
-    ProviderEvidenceError,
     UnsupportedRequestTypeError,
 )
 
@@ -167,86 +166,104 @@ class TestGenerationKwargs:
 
 
 class TestProviderEvidenceFailure:
-    """Section 4: Evidence failure checking via ProviderEvidenceError."""
+    """Section 4: Evidence failure checking via ProviderEvidenceError.
 
-    def test_exception_type_on_evidence_raises(self, exception_evidence_provider: object) -> None:
-        """Evidence with exception_type raises ProviderEvidenceError."""
+    With v0.3-A failure isolation, generate_until() catches
+    ProviderEvidenceError per-request and records the failure in
+    _sample_results rather than propagating the exception.
+    """
+
+    def test_failure_evidence_is_recorded(self, exception_evidence_provider: object) -> None:
+        """Evidence with exception_type is recorded as failure in sample_results."""
         from tests.adapters.conftest import FakeProvider
 
         provider = exception_evidence_provider
         assert isinstance(provider, FakeProvider)
 
-        lm = ProviderBackedLM(provider=provider, model_name="test", evidence_registry={})
-        with pytest.raises(ProviderEvidenceError) as exc_info:
-            lm.generate_until([_make_instance("test")])
+        registry: dict[str, object] = {}
+        lm = ProviderBackedLM(provider=provider, model_name="test", evidence_registry=registry)
 
-        err = exc_info.value
-        assert err.error_code == "PROVIDER_EXCEPTION"
-        assert err.exception_type == "ConnectionError"
+        # With failure isolation, generate_until does NOT raise
+        results = lm.generate_until([_make_instance("test")])
+
+        # Returns sentinel for failed item
+        assert results == [""]
+
         # Evidence is still saved to registry
-        reg = lm._evidence_registry
-        assert len(reg) == 1
+        assert len(registry) == 1
 
-    def test_http_401_raises(self, http_401_provider: object) -> None:
-        """Evidence with HTTP 401 raises ProviderEvidenceError."""
+        # Sample results contain failure entry
+        assert len(lm.sample_results) == 1
+        sr = lm.sample_results[0]
+        assert sr["status"] == "failure"
+        assert sr["failure_error_code"] == "PROVIDER_EXCEPTION"
+
+    def test_http_401_is_recorded(self, http_401_provider: object) -> None:
+        """Evidence with HTTP 401 is recorded as failure in sample_results."""
         from tests.adapters.conftest import FakeProvider
 
         provider = http_401_provider
         assert isinstance(provider, FakeProvider)
 
         lm = ProviderBackedLM(provider=provider, model_name="test")
-        with pytest.raises(ProviderEvidenceError) as exc_info:
-            lm.generate_until([_make_instance("test")])
+        results = lm.generate_until([_make_instance("test")])
 
-        err = exc_info.value
-        assert err.error_code == "PROVIDER_HTTP_ERROR"
-        assert err.http_status == 401
-        assert err.category is not None
+        # Does not raise — failure is isolated
+        assert results == [""]
+        assert len(lm.sample_results) == 1
+        sr = lm.sample_results[0]
+        assert sr["status"] == "failure"
+        assert sr["failure_error_code"] == "PROVIDER_HTTP_ERROR"
+        assert sr.get("failure_category") is not None
 
-    def test_http_429_raises(self, http_429_provider: object) -> None:
-        """Evidence with HTTP 429 raises ProviderEvidenceError."""
+    def test_http_429_is_recorded(self, http_429_provider: object) -> None:
+        """Evidence with HTTP 429 is recorded as failure in sample_results."""
         from tests.adapters.conftest import FakeProvider
 
         provider = http_429_provider
         assert isinstance(provider, FakeProvider)
 
         lm = ProviderBackedLM(provider=provider, model_name="test")
-        with pytest.raises(ProviderEvidenceError) as exc_info:
-            lm.generate_until([_make_instance("test")])
+        results = lm.generate_until([_make_instance("test")])
 
-        err = exc_info.value
-        assert err.http_status == 429
+        assert results == [""]
+        assert len(lm.sample_results) == 1
+        assert lm.sample_results[0]["status"] == "failure"
 
-    def test_http_500_raises(self, http_500_provider: object) -> None:
-        """Evidence with HTTP 500 raises ProviderEvidenceError."""
+    def test_http_500_is_recorded(self, http_500_provider: object) -> None:
+        """Evidence with HTTP 500 is recorded as failure in sample_results."""
         from tests.adapters.conftest import FakeProvider
 
         provider = http_500_provider
         assert isinstance(provider, FakeProvider)
 
         lm = ProviderBackedLM(provider=provider, model_name="test")
-        with pytest.raises(ProviderEvidenceError) as exc_info:
-            lm.generate_until([_make_instance("test")])
+        results = lm.generate_until([_make_instance("test")])
 
-        err = exc_info.value
-        assert err.http_status == 500
+        assert results == [""]
+        assert len(lm.sample_results) == 1
+        assert lm.sample_results[0]["status"] == "failure"
 
-    def test_empty_response_text_raises(self, empty_response_provider: object) -> None:
-        """Evidence with empty response_text raises ProviderEvidenceError."""
+    def test_empty_response_text_is_recorded(self, empty_response_provider: object) -> None:
+        """Evidence with empty response_text is recorded as failure in sample_results."""
         from tests.adapters.conftest import FakeProvider
 
         provider = empty_response_provider
         assert isinstance(provider, FakeProvider)
 
-        lm = ProviderBackedLM(provider=provider, model_name="test", evidence_registry={})
-        with pytest.raises(ProviderEvidenceError) as exc_info:
-            lm.generate_until([_make_instance("test")])
+        registry: dict[str, object] = {}
+        lm = ProviderBackedLM(provider=provider, model_name="test", evidence_registry=registry)
 
-        err = exc_info.value
-        assert err.error_code == "PROVIDER_EMPTY_RESPONSE"
+        results = lm.generate_until([_make_instance("test")])
+
+        assert results == [""]
+        assert len(lm.sample_results) == 1
+        sr = lm.sample_results[0]
+        assert sr["status"] == "failure"
+        assert sr["failure_error_code"] == "PROVIDER_EMPTY_RESPONSE"
+
         # Evidence is still saved
-        reg = lm._evidence_registry
-        assert len(reg) == 1
+        assert len(registry) == 1
 
 
 class TestProviderBackedLMOptionsConsistency:

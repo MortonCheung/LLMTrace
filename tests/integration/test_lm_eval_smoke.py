@@ -185,11 +185,17 @@ class TestLmEvalSmokePipeline:
 
 
 class TestLmEvalSmokeFailureModes:
-    """Section 4: Evidence-based failure modes."""
+    """Section 4: Evidence-based failure modes.
+
+    With v0.3-A failure isolation, individual item failures no longer
+    abort the entire task.  The TaskAttempt remains SUCCESS when the
+    task runs to completion — per-item failures are captured in
+    item_results (for benchmark tasks) or sample_results metadata.
+    """
 
     @pytest.mark.asyncio
     async def test_exception_evidence_causes_failure(self, exception_evidence_provider: object) -> None:
-        """Evidence with exception_type produces FAILURE with evidence_refs."""
+        """Evidence with exception_type produces SUCCESS task with evidence_refs preserved."""
         from tests.adapters.conftest import FakeProvider
 
         provider = exception_evidence_provider
@@ -203,15 +209,14 @@ class TestLmEvalSmokeFailureModes:
         task = TaskSpec(task_id="llmtrace_smoke", name="Smoke", num_samples=4)
         attempt = await adapter.run_task(task, provider)
 
-        assert attempt.status == TaskStatus.FAILURE
-        assert attempt.failure is not None
-        assert attempt.failure.error_code == "PROVIDER_EXCEPTION"
+        # Task completes successfully — failure is isolated to individual items
+        assert attempt.status == TaskStatus.SUCCESS
         # evidence_refs still contain the failed evidence
         assert len(attempt.evidence_refs) > 0
 
     @pytest.mark.asyncio
     async def test_http_401_causes_failure(self, http_401_provider: object) -> None:
-        """Evidence with HTTP 401 produces FAILURE."""
+        """Evidence with HTTP 401 produces SUCCESS with evidence preserved."""
         from tests.adapters.conftest import FakeProvider
 
         provider = http_401_provider
@@ -225,12 +230,11 @@ class TestLmEvalSmokeFailureModes:
         task = TaskSpec(task_id="llmtrace_smoke", name="Smoke", num_samples=4)
         attempt = await adapter.run_task(task, provider)
 
-        assert attempt.status == TaskStatus.FAILURE
-        assert attempt.failure is not None
+        assert attempt.status == TaskStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_http_500_causes_failure(self, http_500_provider: object) -> None:
-        """Evidence with HTTP 500 produces FAILURE."""
+        """Evidence with HTTP 500 produces SUCCESS with evidence preserved."""
         from tests.adapters.conftest import FakeProvider
 
         provider = http_500_provider
@@ -244,12 +248,11 @@ class TestLmEvalSmokeFailureModes:
         task = TaskSpec(task_id="llmtrace_smoke", name="Smoke", num_samples=4)
         attempt = await adapter.run_task(task, provider)
 
-        assert attempt.status == TaskStatus.FAILURE
-        assert attempt.failure is not None
+        assert attempt.status == TaskStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_empty_response_causes_failure(self, empty_response_provider: object) -> None:
-        """Evidence with empty response_text produces FAILURE."""
+        """Evidence with empty response_text produces SUCCESS with evidence preserved."""
         from tests.adapters.conftest import FakeProvider
 
         provider = empty_response_provider
@@ -263,9 +266,7 @@ class TestLmEvalSmokeFailureModes:
         task = TaskSpec(task_id="llmtrace_smoke", name="Smoke", num_samples=4)
         attempt = await adapter.run_task(task, provider)
 
-        assert attempt.status == TaskStatus.FAILURE
-        assert attempt.failure is not None
-        assert attempt.failure.error_code == "PROVIDER_EMPTY_RESPONSE"
+        assert attempt.status == TaskStatus.SUCCESS
 
 
 class TestLmEvalSmokeGenerationKwargs:
@@ -505,7 +506,7 @@ class TestTempDirectoryCleanup:
     async def test_tempdir_cleaned_after_provider_error(
         self, monkeypatch: pytest.MonkeyPatch, exception_evidence_provider: object
     ) -> None:
-        """After a provider error, the temp dir is also cleaned up."""
+        """After running with failure isolation, the temp dir is cleaned up."""
         from tests.adapters.conftest import FakeProvider
 
         provider = exception_evidence_provider
@@ -529,12 +530,11 @@ class TestTempDirectoryCleanup:
             generation_kwargs={"until": ["\n"]},
         )
         task = TaskSpec(task_id="llmtrace_smoke", name="Smoke", num_samples=4)
-        attempt = await adapter.run_task(task, provider)
+        await adapter.run_task(task, provider)
 
-        assert attempt.status == TaskStatus.FAILURE
         assert len(captured_paths) == 1
         captured = captured_paths[0]
-        assert not captured.exists(), f"Temporary directory not cleaned up after error: {captured}"
+        assert not captured.exists(), f"Temporary directory not cleaned up after run: {captured}"
 
 
 # ---------------------------------------------------------------------------

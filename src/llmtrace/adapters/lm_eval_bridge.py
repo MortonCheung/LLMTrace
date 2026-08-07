@@ -276,6 +276,11 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
         gen_kwargs are validated through CompletionOptions.from_lm_eval_kwargs.
         After each provider call the returned HTTPEvidence is saved to the
         registry AND inspected for failure (→ ProviderEvidenceError).
+
+        **Failure Isolation**: If a single request fails with
+        ProviderEvidenceError, the failure is recorded in ``_sample_results``
+        with ``status=failure`` and an empty-string sentinel is returned to
+        lm-eval so that remaining items continue to execute.
         """
         responses: list[str] = []
         for instance in requests:
@@ -303,26 +308,47 @@ class ProviderBackedLM(_LmEvalLMBase):  # type: ignore[misc]
             # Build chat messages; lm-eval sends the formatted prompt as ctx
             messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
 
-            evidence = _run_async_in_thread(
-                self._provider.complete(self._model_name, messages, options=options),
-            )
-            assert isinstance(evidence, HTTPEvidence)
-            self._evidence_registry[str(evidence.evidence_id)] = evidence
+            try:
+                evidence = _run_async_in_thread(
+                    self._provider.complete(self._model_name, messages, options=options),
+                )
+                assert isinstance(evidence, HTTPEvidence)
+                self._evidence_registry[str(evidence.evidence_id)] = evidence
 
-            # Inspect evidence for failure AFTER saving (evidence is always persisted)
-            _check_evidence(evidence)
+                # Inspect evidence for failure AFTER saving (evidence is always persisted)
+                _check_evidence(evidence)
 
-            text = evidence.response_text or ""
-            responses.append(text)
+                text = evidence.response_text or ""
+                responses.append(text)
 
-            # Record per-sample data for item-level results
-            self._sample_results.append(
-                {
-                    "evidence_id": str(evidence.evidence_id),
-                    "response_text": text,
-                    "prompt": prompt,
-                }
-            )
+                # Record per-sample data for item-level results (success)
+                self._sample_results.append(
+                    {
+                        "evidence_id": str(evidence.evidence_id),
+                        "response_text": text,
+                        "prompt": prompt,
+                        "status": "success",
+                    }
+                )
+
+            except ProviderEvidenceError as exc:
+                # Per-item failure isolation: record the failure, return
+                # empty sentinel to lm-eval so remaining items continue.
+                evidence_id = str(exc.evidence_id)
+                responses.append("")  # sentinel — must not be misread as a real answer
+
+                self._sample_results.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "response_text": "",
+                        "prompt": prompt,
+                        "status": "failure",
+                        "failure_error_code": exc.error_code,
+                        "failure_category": exc.category.value,
+                        "failure_message": str(exc),
+                        "failure_retryable": exc.retryable,
+                    }
+                )
 
         return responses
 

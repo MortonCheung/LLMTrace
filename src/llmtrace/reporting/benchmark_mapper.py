@@ -302,22 +302,37 @@ def _build_task_item(
     # Validate metadata via json_safety module
     validate_json_mapping(attempt.metadata)
 
-    # Build item-level report items
+    # Build item-level report items with consistency validation
     from llmtrace.reporting.benchmark_models import ItemReportItem
 
-    item_report_items: list[ItemReportItem] = [
-        ItemReportItem(
-            item_id=ir.item_id,
-            status=ir.status.value,
-            raw_score=ir.raw_score,
-            normalized_score=ir.normalized_score,
-            grader_id=ir.grader_id,
-            evidence_refs=list(ir.evidence_refs),
-            error_message=ir.error_message,
-            metadata=ir.metadata,
+    item_report_items: list[ItemReportItem] = []
+    for ir in attempt.item_results:
+        # Cross-check: item must reference the correct parent
+        if ir.task_id != attempt.task_id:
+            raise ValueError(
+                f"ItemReportItem task_id mismatch: item '{ir.item_id}' has "
+                f"task_id='{ir.task_id}' but parent TaskAttempt has "
+                f"task_id='{attempt.task_id}'"
+            )
+        if ir.attempt_id != attempt.attempt_id:
+            raise ValueError(
+                f"ItemReportItem attempt_id mismatch: item '{ir.item_id}' has "
+                f"attempt_id='{ir.attempt_id}' but parent TaskAttempt has "
+                f"attempt_id='{attempt.attempt_id}'"
+            )
+
+        item_report_items.append(
+            ItemReportItem(
+                item_id=ir.item_id,
+                status=ir.status.value,
+                raw_score=ir.raw_score,
+                normalized_score=ir.normalized_score,
+                grader_id=ir.grader_id,
+                evidence_refs=list(ir.evidence_refs),
+                error_message=ir.error_message,
+                metadata=ir.metadata,
+            )
         )
-        for ir in attempt.item_results
-    ]
 
     return TaskReportItem(
         task_id=attempt.task_id,

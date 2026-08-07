@@ -12,12 +12,14 @@ from llmtrace.benchmarks.models import (
     FailureCategory,
     GradeResult,
     GradeStatus,
+    ItemAggregateResult,
     ItemStatus,
     RunPlan,
     SuiteVersion,
     TaskAttempt,
     TaskSpec,
     TaskStatus,
+    aggregate_item_results,
     validate_evidence_refs,
 )
 
@@ -33,11 +35,13 @@ __all__ = [
     "FailureCategory",
     "GradeResult",
     "GradeStatus",
+    "ItemAggregateResult",
     "ItemStatus",
     "RunPlan",
     "SuiteVersion",
     "TaskAttempt",
     "TaskSpec",
     "TaskStatus",
+    "aggregate_item_results",
     "validate_evidence_refs",
 ]
