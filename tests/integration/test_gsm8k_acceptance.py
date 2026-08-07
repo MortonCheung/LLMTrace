@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from llmtrace.adapters.lm_eval import LmEvalAdapter
+from llmtrace.adapters.lm_eval import LmEvalAdapter, _build_grade_input
 from llmtrace.benchmarks.models import (
     BenchmarkRunResult,
     BenchmarkSource,
@@ -148,7 +148,11 @@ def _make_run_result(attempt, grade, adapter) -> BenchmarkRunResult:
 
 
 async def _run_gsm8k_pipeline(responses: dict[str, str] | None = None):
-    """Run the full GSM8K pipeline with the given mock responses."""
+    """Run the full GSM8K pipeline with the given mock responses.
+
+    Uses ``_build_grade_input()`` to ensure item_results flow
+    through the production normalization path — not lm-eval fallback.
+    """
     adapter = LmEvalAdapter()
     tasks = adapter.list_tasks()
     gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
@@ -157,15 +161,15 @@ async def _run_gsm8k_pipeline(responses: dict[str, str] | None = None):
 
     attempt = await adapter.run_task(gsm_spec, provider)
 
-    raw_result = {
-        "results": {},
-        "evidence_ids": attempt.evidence_refs,
-        "task_name": "gsm8k_subset",
-        "attempt_id": attempt.attempt_id,
-    }
-    # Transfer the exact_match score from metadata
+    # Extract lm-eval metric from attempt metadata for cross-check
     metric = attempt.metadata.get("metric_result")
-    raw_result["results"]["exact_match"] = metric["value"]
+    lm_eval_results = {"exact_match": metric["value"]} if metric else {}
+
+    raw_result = _build_grade_input(
+        attempt=attempt,
+        lm_eval_results=lm_eval_results,
+        planned_item_count=gsm_spec.num_samples,
+    )
     grade = adapter.normalize_result(raw_result)
 
     run_result = _make_run_result(attempt, grade, adapter)
@@ -227,6 +231,16 @@ class TestGsm8kAcceptance:
         assert grade.task_id == attempt.task_id
         assert grade.status == GradeStatus.GRADED
         assert 0.0 <= grade.normalized_score <= 1.0
+
+        # ---------- Item-level results ----------
+        assert len(attempt.item_results) == 8
+        # GradeResult must be derived from item aggregate
+        assert grade.metadata.get("planned_item_count") == 8
+        assert grade.metadata.get("graded_item_count") == 8
+        assert grade.metadata.get("item_aggregate_score") == grade.normalized_score
+        assert grade.metadata.get("lm_eval_cross_check_pass") is True
+        # For 8/8 correct mock: score = 1.0
+        assert grade.normalized_score == 1.0
 
         # ---------- BenchmarkRunResult ----------
         assert len(run_result.task_attempts) == 1

@@ -61,6 +61,7 @@ _SMOKE_DEFINITION = BenchmarkTaskDefinition(
     suite_id="llmtrace_smoke",
     suite_version="1.0.0",
     is_smoke=True,
+    requires_item_results=False,
     capability_score_eligible=False,
 )
 
@@ -401,10 +402,30 @@ class LmEvalAdapter(BenchmarkAdapter):
         task_name = str(raw_result.get("task_name", "unknown"))
 
         # ----------------------------------------------------------------
-        # 1. Derive score from item aggregate (canonical source)
+        # 0. Enforce item_results requirement (prevents silent fallback)
         # ----------------------------------------------------------------
+        defn = _get_task_def(task_name)
         item_results_raw: object = raw_result.get("item_results", [])
         planned_item_count_raw: object = raw_result.get("planned_item_count")
+
+        has_item_results = isinstance(item_results_raw, list) and len(item_results_raw) > 0
+        has_planned_count = planned_item_count_raw is not None
+
+        if defn.requires_item_results and (not has_item_results or not has_planned_count):
+            missing: list[str] = []
+            if not has_item_results:
+                missing.append("item_results")
+            if not has_planned_count:
+                missing.append("planned_item_count")
+            raise ValueError(
+                f"ITEM_RESULTS_REQUIRED: task '{task_name}' requires item-level "
+                f"results but {', '.join(missing)} is missing from raw_result. "
+                f"Use _build_grade_input() to construct the normalization input."
+            )
+
+        # ----------------------------------------------------------------
+        # 1. Derive score from item aggregate (canonical source)
+        # ----------------------------------------------------------------
 
         item_derived_score: float | None = None
         item_aggregate_meta: dict[str, object] = {}
@@ -434,7 +455,7 @@ class LmEvalAdapter(BenchmarkAdapter):
                         "ungradable_count": aggregate.ungradable_count,
                         "correct_count": aggregate.correct_count,
                         "wrong_count": aggregate.wrong_count,
-                        "coverage": aggregate.coverage,
+                        "grading_coverage": aggregate.grading_coverage,
                         "execution_coverage": aggregate.execution_coverage,
                         "item_aggregate_score": aggregate.normalized_score,
                     }
@@ -742,6 +763,36 @@ def _normalize_number(text: str) -> str:
         return cleaned
 
 
+def _build_grade_input(
+    *,
+    attempt: TaskAttempt,
+    lm_eval_results: dict[str, object],
+    planned_item_count: int | None = None,
+) -> dict[str, object]:
+    """Build the canonical ``raw_result`` dict for ``normalize_result()``.
+
+    This is the single construction point for the normalization input,
+    ensuring that every caller passes ``item_results`` and
+    ``planned_item_count`` when the task requires them.
+
+    Args:
+        attempt: The completed TaskAttempt (must carry item_results).
+        lm_eval_results: lm-eval raw metric dict, e.g. ``{"exact_match": 0.875}``.
+        planned_item_count: Planned item count; defaults to ``len(attempt.item_results)``.
+    """
+    if planned_item_count is None:
+        planned_item_count = len(attempt.item_results)
+
+    return {
+        "results": lm_eval_results,
+        "evidence_ids": list(attempt.evidence_refs),
+        "task_name": attempt.task_id,
+        "attempt_id": attempt.attempt_id,
+        "item_results": [ir.model_dump() for ir in attempt.item_results],
+        "planned_item_count": planned_item_count,
+    }
+
+
 def _grade_gsm8k_items(
     sample_results: list[dict[str, object]],
     attempt_id: str,
@@ -770,9 +821,20 @@ def _grade_gsm8k_items(
         sample_status = str(sample.get("status", "success"))
         evidence_id = str(sample.get("evidence_id", ""))
 
-        # Provider failure → ItemStatus.FAILURE
+        # Provider failure → ItemStatus.FAILURE with structured AdapterFailure
         if sample_status == "failure":
-            failure_message = str(sample.get("failure_message", "Provider failure"))
+            failure_category_str = str(sample.get("failure_category", ""))
+            try:
+                category = FailureCategory(failure_category_str)
+            except ValueError:
+                category = FailureCategory.PROVIDER
+
+            adapter_failure = AdapterFailure(
+                error_code=str(sample.get("failure_error_code", "PROVIDER_EXCEPTION")),
+                category=category,
+                message=str(sample.get("failure_message", "Provider failure")),
+                retryable=bool(sample.get("failure_retryable", False)),
+            )
             items.append(
                 BenchmarkItemResult(
                     item_id=item_id,
@@ -782,11 +844,7 @@ def _grade_gsm8k_items(
                     raw_score=0.0,
                     normalized_score=0.0,
                     evidence_refs=[evidence_id] if evidence_id else [],
-                    error_message=failure_message,
-                    metadata={
-                        "failure_error_code": sample.get("failure_error_code", ""),
-                        "failure_category": sample.get("failure_category", ""),
-                    },
+                    failure=adapter_failure,
                 )
             )
             continue

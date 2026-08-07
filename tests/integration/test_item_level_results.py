@@ -25,8 +25,10 @@ from llmtrace.adapters.lm_eval import (
     _normalize_number,
 )
 from llmtrace.benchmarks.models import (
+    AdapterFailure,
     BenchmarkItemResult,
     BenchmarkRunResult,
+    FailureCategory,
     ItemStatus,
     TaskAttempt,
     TaskStatus,
@@ -48,6 +50,7 @@ def adapter():
 
 def _make_item(item_id: str, score: float, status: ItemStatus = ItemStatus.GRADED, **kwargs):
     """Build a BenchmarkItemResult with minimal boilerplate."""
+
     kw: dict = {
         "item_id": item_id,
         "task_id": "t",
@@ -56,8 +59,14 @@ def _make_item(item_id: str, score: float, status: ItemStatus = ItemStatus.GRADE
         "raw_score": score,
         "normalized_score": score,
     }
-    # error_message required for FAILURE / UNGRADABLE
-    if status in (ItemStatus.FAILURE, ItemStatus.UNGRADABLE) and "error_message" not in kwargs:
+    # FAILURE requires failure (AdapterFailure) or error_message fallback
+    if status == ItemStatus.FAILURE:
+        if "failure" not in kwargs and "error_message" in kwargs:
+            kw["failure"] = AdapterFailure(
+                error_code="TEST_FAILURE",
+                message=kwargs.pop("error_message"),
+            )
+    elif status == ItemStatus.UNGRADABLE and "error_message" not in kwargs:
         kw["error_message"] = f"item {item_id} {status.value}"
     kw.update(kwargs)
     return BenchmarkItemResult(**kw)
@@ -80,7 +89,7 @@ class TestItemAggregateFixedDenominator:
         assert agg.wrong_count == 0
         assert agg.failure_count == 0
         assert agg.ungradable_count == 0
-        assert agg.coverage == 1.0
+        assert agg.grading_coverage == 1.0
         assert agg.execution_coverage == 1.0
         assert agg.raw_score == 1.0
         assert agg.normalized_score == 1.0
@@ -109,7 +118,7 @@ class TestItemAggregateFixedDenominator:
         assert agg.ungradable_count == 0
         assert agg.correct_count == 6
         assert agg.wrong_count == 1
-        assert agg.coverage == 7.0 / 8.0
+        assert agg.grading_coverage == 7.0 / 8.0
         assert agg.execution_coverage == 8.0 / 8.0
         # Must be 6/8, NOT 6/7
         assert agg.raw_score == 6.0 / 8.0
@@ -134,7 +143,7 @@ class TestItemAggregateFixedDenominator:
     def test_empty_items_zero_planned(self):
         agg = aggregate_item_results([], planned_item_count=0)
         assert agg.normalized_score == 0.0
-        assert agg.coverage == 0.0
+        assert agg.grading_coverage == 0.0
 
     def test_coverage_excludes_failures_from_graded(self):
         """Failures are NOT in graded items, so coverage < 1."""
@@ -143,7 +152,7 @@ class TestItemAggregateFixedDenominator:
             _make_item("i2", 0.0, ItemStatus.FAILURE, error_message="err"),
         ]
         agg = aggregate_item_results(items, planned_item_count=2)
-        assert agg.coverage == 0.5
+        assert agg.grading_coverage == 0.5
         assert agg.execution_coverage == 1.0  # failure counts as "executed"
 
 
@@ -167,6 +176,7 @@ class TestItemResultValidators:
             )
 
     def test_failure_with_positive_score_rejected(self):
+
         with pytest.raises(ValueError, match="FAILURE.*raw_score=0.0"):
             BenchmarkItemResult(
                 item_id="i1",
@@ -174,7 +184,7 @@ class TestItemResultValidators:
                 attempt_id="a",
                 status=ItemStatus.FAILURE,
                 raw_score=0.7,
-                error_message="fail",
+                failure=AdapterFailure(error_code="ERR", message="fail"),
             )
 
     def test_ungradable_with_positive_score_rejected(self):
@@ -188,8 +198,9 @@ class TestItemResultValidators:
                 error_message="no parse",
             )
 
-    def test_failure_without_error_message_rejected(self):
-        with pytest.raises(ValueError, match="FAILURE.*error_message"):
+    def test_failure_without_failure_rejected(self):
+        """FAILURE item must have failure (AdapterFailure) set."""
+        with pytest.raises(ValueError, match="FAILURE.*failure"):
             BenchmarkItemResult(
                 item_id="i1",
                 task_id="t",
@@ -218,16 +229,18 @@ class TestItemResultValidators:
         assert item.raw_score == 0.5
 
     def test_failure_valid_state(self):
+
         item = BenchmarkItemResult(
             item_id="i1",
             task_id="t",
             attempt_id="a",
             status=ItemStatus.FAILURE,
             raw_score=0.0,
-            error_message="provider timeout",
+            failure=AdapterFailure(error_code="ERR", message="provider timeout"),
         )
         assert item.status == ItemStatus.FAILURE
-        assert item.error_message == "provider timeout"
+        assert item.failure is not None
+        assert item.failure.message == "provider timeout"
 
     def test_score_boundaries(self):
         BenchmarkItemResult(item_id="i1", task_id="t", attempt_id="a", raw_score=0.0)
@@ -415,7 +428,7 @@ class TestGsm8kItemGrading:
         assert "####" in items[0].error_message
 
     def test_failure_item_mapped_correctly(self):
-        """A bridge-level failure sample must produce ItemStatus.FAILURE."""
+        """A bridge-level failure sample must produce ItemStatus.FAILURE with AdapterFailure."""
         responses = [
             self._sample(
                 "00000000-0000-0000-0000-000000000fff",
@@ -428,7 +441,9 @@ class TestGsm8kItemGrading:
         assert items[0].status == ItemStatus.FAILURE
         assert items[0].raw_score == 0.0
         assert items[0].normalized_score == 0.0
-        assert "provider timeout" in items[0].error_message
+        assert items[0].failure is not None
+        assert items[0].failure.message == "provider timeout"
+        assert items[0].failure.error_code == "PROVIDER_EXCEPTION"
 
     def test_item_ids_deterministic(self):
         responses = [self._sample(f"00000000-0000-0000-0000-00000000000{i}", "#### 1") for i in range(3)]
@@ -556,9 +571,10 @@ class TestProviderFailureIsolation:
         non_failed = [it for it in attempt.item_results if it.status != ItemStatus.FAILURE]
         assert len(non_failed) == 7
 
-        # Failed item must have evidence
+        # Failed item must have evidence and AdapterFailure
         assert len(failed_items[0].evidence_refs) == 1
-        assert len(failed_items[0].error_message) > 0
+        assert failed_items[0].failure is not None
+        assert isinstance(failed_items[0].failure, AdapterFailure)
 
 
 # ===================================================================
@@ -602,13 +618,13 @@ class TestNormalizeResultItemDerived:
         with pytest.raises(ValueError, match="LM_EVAL_ITEM_AGGREGATE_MISMATCH"):
             adapter.normalize_result(raw_result)
 
-    def test_normalize_falls_back_to_lm_eval_without_items(self, adapter):
-        """When no item_results, fall back to lm-eval metric."""
+    def test_normalize_smoke_falls_back_to_lm_eval_without_items(self, adapter):
+        """Smoke task without item_results still falls back to lm-eval metric."""
         raw_result = {
             "results": {"exact_match": 0.5},
             "evidence_ids": [],
-            "task_name": "gsm8k_subset",
-            "attempt_id": "att-1",
+            "task_name": "llmtrace_smoke",
+            "attempt_id": "att-smoke",
         }
         grade = adapter.normalize_result(raw_result)
         assert grade.normalized_score == 0.5
@@ -632,7 +648,7 @@ class TestNormalizeResultItemDerived:
         assert grade.normalized_score == 0.75
         assert grade.metadata.get("failure_count") == 1
         assert grade.metadata.get("graded_item_count") == 7
-        assert grade.metadata.get("coverage") == 7.0 / 8.0
+        assert grade.metadata.get("grading_coverage") == 7.0 / 8.0
 
 
 # ===================================================================
@@ -882,7 +898,7 @@ class TestHtmlXssEscaping:
                 status=ItemStatus.FAILURE,
                 raw_score=0.0,
                 normalized_score=0.0,
-                error_message="<script>alert('xss')</script>",
+                failure=AdapterFailure(error_code="XSS", message="<script>alert('xss')</script>"),
             ),
         ]
         attempt = TaskAttempt(
@@ -1042,3 +1058,273 @@ class TestCalibratedScoreRemainsNone:
             policy,
         )
         assert dim_score.calibrated_score is None
+
+
+# ===================================================================
+# 13. GSM8K fallback rejection — Section 19
+# ===================================================================
+
+
+class TestGsm8kFallbackRejection:
+    """GSM8K must NOT silently fall back to lm-eval aggregate when item_results missing."""
+
+    def test_gsm8k_without_item_results_raises(self, adapter):
+        """gsm8k_subset with no item_results must raise ITEM_RESULTS_REQUIRED."""
+        raw_result = {
+            "results": {"exact_match": 0.875},
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+        }
+        with pytest.raises(ValueError, match="ITEM_RESULTS_REQUIRED"):
+            adapter.normalize_result(raw_result)
+
+    def test_gsm8k_without_planned_count_raises(self, adapter):
+        """gsm8k_subset with item_results but no planned_item_count must raise."""
+        items = [_make_item(f"item-{i:03d}", 1.0) for i in range(8)]
+        raw_result = {
+            "results": {"exact_match": 0.875},
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+            "item_results": [it.model_dump() for it in items],
+        }
+        with pytest.raises(ValueError, match="ITEM_RESULTS_REQUIRED"):
+            adapter.normalize_result(raw_result)
+
+    def test_gsm8k_with_all_required_fields_works(self, adapter):
+        """gsm8k_subset with item_results AND planned_item_count must work."""
+        items = [_make_item(f"item-{i:03d}", 1.0) for i in range(8)]
+        raw_result = {
+            "results": {"exact_match": 1.0},
+            "evidence_ids": [],
+            "task_name": "gsm8k_subset",
+            "attempt_id": "att-1",
+            "item_results": [it.model_dump() for it in items],
+            "planned_item_count": 8,
+        }
+        grade = adapter.normalize_result(raw_result)
+        assert grade.normalized_score == 1.0
+
+
+# ===================================================================
+# 14. Smoke fallback regression — Section 20
+# ===================================================================
+
+
+class TestSmokeFallbackRegression:
+    """Smoke task must still allow lm-eval fallback without item_results."""
+
+    def test_smoke_without_item_results_works(self, adapter):
+        """Smoke with lm-eval metric but no item_results must produce GradeResult."""
+        raw_result = {
+            "results": {"exact_match": 1.0},
+            "evidence_ids": [],
+            "task_name": "llmtrace_smoke",
+            "attempt_id": "smoke-att",
+        }
+        grade = adapter.normalize_result(raw_result)
+        assert grade.status.value == "graded"
+        assert grade.normalized_score == 1.0
+
+    def test_smoke_without_any_results_ungradable(self, adapter):
+        """Smoke with no results at all → UNGRADABLE."""
+        raw_result = {
+            "results": {},
+            "evidence_ids": [],
+            "task_name": "llmtrace_smoke",
+            "attempt_id": "smoke-att-2",
+        }
+        grade = adapter.normalize_result(raw_result)
+        assert grade.status.value == "ungradable"
+
+
+# ===================================================================
+# 15. AdapterFailure state model tests — Section 21
+# ===================================================================
+
+
+class TestAdapterFailureStateModel:
+    """Validate BenchmarkItemResult status ↔ failure invariants."""
+
+    def test_failure_requires_structured_failure(self):
+        """FAILURE with failure=None → rejected."""
+        with pytest.raises(ValueError, match="FAILURE.*failure"):
+            BenchmarkItemResult(
+                item_id="i-fail",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.FAILURE,
+                failure=None,
+            )
+
+    def test_graded_cannot_carry_failure(self):
+        """GRADED with failure != None → rejected."""
+
+        with pytest.raises(ValueError, match="GRADED.*failure"):
+            BenchmarkItemResult(
+                item_id="i-grade",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.GRADED,
+                raw_score=1.0,
+                failure=AdapterFailure(error_code="ERR", message="e"),
+            )
+
+    def test_ungradable_cannot_carry_failure(self):
+        """UNGRADABLE with failure != None → rejected."""
+
+        with pytest.raises(ValueError, match="UNGRADABLE.*failure"):
+            BenchmarkItemResult(
+                item_id="i-ung",
+                task_id="t",
+                attempt_id="a",
+                status=ItemStatus.UNGRADABLE,
+                error_message="no parse",
+                failure=AdapterFailure(error_code="ERR", message="e"),
+            )
+
+    def test_failure_valid_state(self):
+        """FAILURE with valid failure → accepted."""
+
+        item = BenchmarkItemResult(
+            item_id="i-valid",
+            task_id="t",
+            attempt_id="a",
+            status=ItemStatus.FAILURE,
+            failure=AdapterFailure(
+                error_code="PROVIDER_TIMEOUT",
+                category=FailureCategory.TIMEOUT,
+                message="timeout",
+                retryable=True,
+            ),
+        )
+        assert item.failure.error_code == "PROVIDER_TIMEOUT"
+        assert item.failure.category == FailureCategory.TIMEOUT
+        assert item.failure.retryable is True
+
+    def test_graded_valid_state_no_failure(self):
+        """GRADED with failure=None → accepted."""
+        item = BenchmarkItemResult(
+            item_id="i-ok",
+            task_id="t",
+            attempt_id="a",
+            status=ItemStatus.GRADED,
+            raw_score=1.0,
+        )
+        assert item.failure is None
+        assert item.error_message is None
+
+    def test_ungradable_valid_state_no_failure(self):
+        """UNGRADABLE with failure=None → accepted."""
+        item = BenchmarkItemResult(
+            item_id="i-ung-ok",
+            task_id="t",
+            attempt_id="a",
+            status=ItemStatus.UNGRADABLE,
+            error_message="ungradable reason",
+        )
+        assert item.failure is None
+        assert item.error_message == "ungradable reason"
+
+
+# ===================================================================
+# 16. Provider failure AdapterFailure structure — Section 22
+# ===================================================================
+
+
+class TestProviderFailureAdapterFailure:
+    """Provider-failed items must have correct AdapterFailure fields."""
+
+    async def test_provider_failure_and_adapter_failure(self, adapter):
+        """Failed item has AdapterFailure with correct category, error_code, retryable."""
+        tasks = adapter.list_tasks()
+        gsm_spec = next(t for t in tasks if t.task_id == "gsm8k_subset")
+
+        class SelectiveFailingProvider:
+            def __init__(self):
+                self.call_count = 0
+                self.evidence = []
+
+            async def complete(self, model, messages, *, options=None):
+                self.call_count += 1
+                fail = self.call_count == 3
+                from llmtrace.models.evidence import HTTPEvidence
+
+                evidence_id = uuid.uuid4()
+                ev = HTTPEvidence(
+                    evidence_id=evidence_id,
+                    evidence_type="smoke_test",
+                    request_method="POST",
+                    request_url_redacted="https://fake/",
+                    request_path="/",
+                    request_headers_redacted={},
+                    request_body_redacted={},
+                    request_model=model,
+                    response_model=model,
+                    response_text="" if fail else "#### 42",
+                    http_status=500 if fail else 200,
+                    total_latency_ms=100.0,
+                )
+                self.evidence.append(ev)
+                return ev
+
+        provider = SelectiveFailingProvider()
+        attempt = await adapter.run_task(gsm_spec, provider)
+
+        failed_items = [it for it in attempt.item_results if it.status == ItemStatus.FAILURE]
+        assert len(failed_items) == 1
+        failed_item = failed_items[0]
+
+        assert failed_item.failure is not None
+
+        assert isinstance(failed_item.failure, AdapterFailure)
+        assert failed_item.failure.category in (
+            FailureCategory.PROVIDER,
+            FailureCategory.UNKNOWN,
+        )
+        assert len(failed_item.failure.error_code) > 0
+        # retryable may be True or False — just check it's a bool
+        assert isinstance(failed_item.failure.retryable, bool)
+        assert len(failed_item.failure.message) > 0
+
+
+# ===================================================================
+# 17. execution_coverage tests — Section 23
+# ===================================================================
+
+
+class TestExecutionCoverage:
+    """execution_coverage includes GRADED + FAILURE + UNGRADABLE."""
+
+    def test_case_a_all_graded(self):
+        """8/8 GRADED → grading=1.0, execution=1.0."""
+        items = [_make_item(f"i{i}", 1.0) for i in range(8)]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.grading_coverage == 1.0
+        assert agg.execution_coverage == 1.0
+
+    def test_case_b_7_graded_1_failure(self):
+        """7 GRADED + 1 FAILURE → grading=7/8, execution=1.0."""
+        items = [_make_item(f"i{i}", 1.0) for i in range(7)] + [
+            _make_item("i7", 0.0, ItemStatus.FAILURE, error_message="err")
+        ]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.grading_coverage == 7.0 / 8.0
+        assert agg.execution_coverage == 1.0
+
+    def test_case_c_7_graded_1_ungradable(self):
+        """7 GRADED + 1 UNGRADABLE → grading=7/8, execution=1.0."""
+        items = [_make_item(f"i{i}", 1.0) for i in range(7)] + [
+            _make_item("i7", 0.0, ItemStatus.UNGRADABLE, error_message="no parse")
+        ]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.grading_coverage == 7.0 / 8.0
+        assert agg.execution_coverage == 1.0
+
+    def test_case_d_partial_execution(self):
+        """7 terminal items out of 8 planned → execution=7/8."""
+        items = [_make_item(f"i{i}", 1.0) for i in range(7)]
+        agg = aggregate_item_results(items, planned_item_count=8)
+        assert agg.grading_coverage == 7.0 / 8.0
+        assert agg.execution_coverage == 7.0 / 8.0

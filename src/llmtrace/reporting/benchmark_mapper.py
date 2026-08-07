@@ -330,6 +330,9 @@ def _build_task_item(
                 grader_id=ir.grader_id,
                 evidence_refs=list(ir.evidence_refs),
                 error_message=ir.error_message,
+                failure_message=ir.failure.message if ir.failure else None,
+                failure_category=ir.failure.category.value if ir.failure else None,
+                failure_error_code=ir.failure.error_code if ir.failure else None,
                 metadata=ir.metadata,
             )
         )

@@ -158,6 +158,9 @@ class ItemReportItem(BaseModel):
     grader_id: str | None = Field(default=None)
     evidence_refs: list[str] = Field(default_factory=list)
     error_message: str | None = Field(default=None)
+    failure_message: str | None = Field(default=None, description="Failure message for display (from AdapterFailure)")
+    failure_category: str | None = Field(default=None, description="Failure category for display")
+    failure_error_code: str | None = Field(default=None, description="Machine-readable error code")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -231,12 +231,17 @@ class ItemAggregateResult(BaseModel):
     ungradable_count: int = Field(..., ge=0, description="Items with status UNGRADABLE")
     correct_count: int = Field(..., ge=0, description="GRADED items with normalized_score >= 1.0")
     wrong_count: int = Field(..., ge=0, description="GRADED items with normalized_score < 1.0")
-    coverage: float = Field(..., ge=0.0, le=1.0, description="graded_item_count / planned_item_count")
+    grading_coverage: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="graded_item_count / planned_item_count — proportion of items successfully graded",
+    )
     execution_coverage: float = Field(
         ...,
         ge=0.0,
         le=1.0,
-        description="(graded + failure) / planned_item_count",
+        description="(graded + failure + ungradable) / planned — proportion of items that reached a terminal state",
     )
     raw_score: float = Field(
         ...,
@@ -290,8 +295,8 @@ def aggregate_item_results(
         ungradable_count=len(ungradable),
         correct_count=correct,
         wrong_count=len(graded) - correct,
-        coverage=len(graded) / planned if planned > 0 else 0.0,
-        execution_coverage=(len(graded) + len(failed)) / planned if planned > 0 else 0.0,
+        grading_coverage=len(graded) / planned if planned > 0 else 0.0,
+        execution_coverage=((len(graded) + len(failed) + len(ungradable)) / planned if planned > 0 else 0.0),
         raw_score=raw_score,
         normalized_score=raw_score,
     )
@@ -322,7 +327,7 @@ def item_aggregate_summary(items: list[BenchmarkItemResult]) -> dict[str, object
         "ungradable_count": agg.ungradable_count,
         "correct_count": agg.correct_count,
         "wrong_count": agg.wrong_count,
-        "coverage": agg.coverage,
+        "grading_coverage": agg.grading_coverage,
         "execution_coverage": agg.execution_coverage,
         "item_aggregate_score": agg.normalized_score,
     }
@@ -579,28 +584,44 @@ class BenchmarkItemResult(BaseModel):
         default_factory=list,
         description="Evidence UUIDs referenced by this item",
     )
-    error_message: str | None = Field(default=None, description="Error message if grading failed")
+    failure: AdapterFailure | None = Field(
+        default=None,
+        description="Structured failure info; set ONLY when status is FAILURE",
+    )
+    error_message: str | None = Field(default=None, description="Human-readable error description (optional)")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional item metadata")
 
     model_config = {"extra": "forbid"}
 
     @model_validator(mode="after")
     def _check_status_consistency(self) -> BenchmarkItemResult:
-        """Enforce status ↔ score / error_message invariants."""
+        """Enforce status ↔ score / failure / error_message invariants.
+
+        GRADED    → failure=None, error_message=None, score allowed in [0, 1]
+        FAILURE   → failure is not None, score=0, error_message optional
+        UNGRADABLE → failure=None, error_message must be set, score=0
+        """
         if self.status == ItemStatus.GRADED:
+            if self.failure is not None:
+                raise ValueError(f"GRADED item '{self.item_id}' must not have failure set")
             if self.error_message is not None:
                 raise ValueError(
                     f"GRADED item '{self.item_id}' must not have error_message, got '{self.error_message}'"
                 )
         elif self.status == ItemStatus.FAILURE:
+            if self.failure is None:
+                raise ValueError(f"FAILURE item '{self.item_id}' must have failure set (AdapterFailure)")
             if self.raw_score > 0.0 or self.normalized_score > 0.0:
                 raise ValueError(
                     f"FAILURE item '{self.item_id}' must have raw_score=0.0 and "
                     f"normalized_score=0.0, got raw={self.raw_score}, norm={self.normalized_score}"
                 )
-            if self.error_message is None:
-                raise ValueError(f"FAILURE item '{self.item_id}' must have error_message set")
         elif self.status == ItemStatus.UNGRADABLE:
+            if self.failure is not None:
+                raise ValueError(
+                    f"UNGRADABLE item '{self.item_id}' must not have failure set "
+                    "(use FAILURE status for provider/adapter failures)"
+                )
             if self.raw_score > 0.0 or self.normalized_score > 0.0:
                 raise ValueError(
                     f"UNGRADABLE item '{self.item_id}' must have raw_score=0.0 and "
@@ -822,14 +843,16 @@ class BenchmarkTaskDefinition(BaseModel):
     suite_version: NonEmptyStr = Field(..., description="Suite version string")
     adapter_id: NonEmptyStr = Field(default="lm-eval", description="Adapter identifier")
     is_smoke: bool = Field(default=False, description="Whether this is a smoke / integrity check task")
-    capability_score_eligible: bool = Field(
-        default=True, description="Whether this task can contribute to capability scoring"
+    requires_item_results: bool = Field(
+        default=True,
+        description="If True, normalize_result() MUST receive item_results; missing them is an error",
     )
-    metric: NonEmptyStr = Field(default="exact_match", description="Default metric name")
-    filter_: NonEmptyStr = Field(default="none", alias="filter", description="Default filter name")
-    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional task metadata")
+    capability_score_eligible: bool = Field(default=True, description="May contribute to capability profile scores")
+    metric: NonEmptyStr = Field(default="exact_match", description="Primary metric name used by this task")
+    filter_: NonEmptyStr = Field(default="none", description="lm-eval filter name (e.g. 'get-answer')")
+    metadata: dict[str, object] = Field(default_factory=dict, description="Additional task-level metadata")
 
-    model_config = {"frozen": True, "extra": "forbid"}
+    model_config = {"extra": "forbid", "frozen": True}
 
     def provenance_dict(self) -> dict[str, str]:
         """Return provenance fields as a plain dict suitable for model constructors."""
@@ -891,7 +914,7 @@ class SmokeTaskManifest(BaseModel):
             is_smoke=True,
             capability_score_eligible=False,
             metric=self.metric,
-            filter=self.filter,
+            filter_=self.filter,
         )
 
 
