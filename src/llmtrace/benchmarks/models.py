@@ -137,8 +137,13 @@ def _parse_uuid(value: str) -> str:
     return str(UUID(value))
 
 
-def _normalize_evidence_refs(refs: list[str]) -> list[str]:
-    """Deduplicate and normalise evidence UUIDs, preserving first-seen order."""
+def normalize_evidence_tuple(refs: tuple[str, ...]) -> tuple[str, ...]:
+    """Deduplicate and normalise evidence UUIDs, preserving first-seen order.
+
+    Shared by benchmarks and scoring layers — every model that carries
+    evidence references must use this (or the EvidenceRefs annotated type
+    for list fields).
+    """
     seen: set[str] = set()
     out: list[str] = []
     for r in refs:
@@ -146,7 +151,12 @@ def _normalize_evidence_refs(refs: list[str]) -> list[str]:
         if norm not in seen:
             seen.add(norm)
             out.append(norm)
-    return out
+    return tuple(out)
+
+
+def _normalize_evidence_refs(refs: list[str]) -> list[str]:
+    """Deduplicate and normalise evidence UUIDs (list variant)."""
+    return list(normalize_evidence_tuple(tuple(refs)))
 
 
 # Shared evidence-reference field type: UUID validation + normalisation + dedup

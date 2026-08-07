@@ -851,3 +851,178 @@ class TestCapabilityProfile:
         )
         with pytest.raises(AttributeError):
             result.evidence_refs.append("fake")  # type: ignore[union-attr]
+
+    # -- NEW: cross-run pairing rejection ---------------------------------
+
+    def test_duplicate_attempt_id_within_one_run_raises(self) -> None:
+        """Two attempts with the same attempt_id in one run → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [
+                _make_attempt("task_a", attempt_id="att-x"),
+                _make_attempt("task_a", attempt_id="att-x"),  # duplicate!
+            ],
+            [],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Duplicate attempt_id.*within"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+            )
+
+    def test_duplicate_attempt_id_across_two_runs_raises(self) -> None:
+        """Same attempt_id in two different runs → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+                TaskScoringSpec(task_id="task_b", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-x")],
+            [_make_grade("g1", "att-x", "task_a", 0.8)],
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_b", attempt_id="att-x")],  # same attempt_id!
+            [_make_grade("g2", "att-x", "task_b", 0.6)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Duplicate attempt_id.*across"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run1, run2],
+                registry,
+                policy,
+            )
+
+    def test_grade_crosses_run_boundary_raises(self) -> None:
+        """Grade in run2 referencing attempt only in run1 → orphan ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [],
+        )
+        run2 = _make_run(
+            "run-2",
+            [],
+            [_make_grade("g1", "att-a", "task_a", 0.8)],  # grade references run1's attempt
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="Orphan GradeResult"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run1, run2],
+                registry,
+                policy,
+            )
+
+    def test_legitimate_two_run_aggregation_still_passes(self) -> None:
+        """Two separate runs with distinct attempt_ids → legitimate aggregation."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+                TaskScoringSpec(task_id="task_b", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run1 = _make_run(
+            "run-1",
+            [_make_attempt("task_a", attempt_id="att-a")],
+            [_make_grade("g1", "att-a", "task_a", 0.8)],
+        )
+        run2 = _make_run(
+            "run-2",
+            [_make_attempt("task_b", attempt_id="att-b")],
+            [_make_grade("g2", "att-b", "task_b", 0.6)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        result = aggregate_dimension_score(
+            CapabilityDimension.REASONING,
+            [run1, run2],
+            registry,
+            policy,
+        )
+        assert result.graded_task_count == 2
+        assert abs(result.task_coverage - 1.0) < 1e-9
+
+    # -- NEW: non-finite calibration rejection ----------------------------
+
+    def test_nan_calibration_raises(self) -> None:
+        """Calibrator returning NaN → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="non-finite"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+                calibrator=_FakeCalibrator(float("nan")),
+            )
+
+    def test_inf_calibration_raises(self) -> None:
+        """Calibrator returning +Infinity → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="non-finite"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+                calibrator=_FakeCalibrator(float("inf")),
+            )
+
+    def test_neg_inf_calibration_raises(self) -> None:
+        """Calibrator returning -Infinity → ValueError."""
+        registry = TaskScoringRegistry(
+            [
+                TaskScoringSpec(task_id="task_a", dimension=CapabilityDimension.REASONING, task_weight=1.0),
+            ]
+        )
+        run = _make_run(
+            "run-1",
+            [_make_attempt("task_a")],
+            [_make_grade("g1", "att-task_a", "task_a", 0.8)],
+        )
+        policy = CapabilityScoringPolicy.create_v1()
+        with pytest.raises(ValueError, match="non-finite"):
+            aggregate_dimension_score(
+                CapabilityDimension.REASONING,
+                [run],
+                registry,
+                policy,
+                calibrator=_FakeCalibrator(float("-inf")),
+            )
