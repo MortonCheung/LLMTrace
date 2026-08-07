@@ -19,6 +19,7 @@ from llmtrace.adapters.lm_eval_runner import (
 )
 from llmtrace.benchmarks.models import (
     AdapterFailure,
+    BenchmarkTaskDefinition,
     BudgetEstimate,
     CompletionOptions,
     CompletionProvider,
@@ -41,17 +42,49 @@ except ImportError:
     _LM_EVAL_VERSION = "unknown"
 
 # ---------------------------------------------------------------------------
-# Fixed smoke task identity (single source of truth)
+# Task identity registry — single source of truth for all known tasks
 # ---------------------------------------------------------------------------
 
 # Built-in trusted task root — not configurable by callers.
 _BUILTIN_RESOURCES = Path(__file__).resolve().parent / "_resources"
 BUILTIN_SMOKE_TASK_ROOT = str(_BUILTIN_RESOURCES)
 
+_SMOKE_DEFINITION = BenchmarkTaskDefinition(
+    task_id="llmtrace_smoke",
+    source_id="lm-eval",
+    source_revision="0000000-smoke",
+    suite_id="llmtrace_smoke",
+    suite_version="1.0.0",
+    is_smoke=True,
+    capability_score_eligible=False,
+)
+
+_GSM8K_DEFINITION = BenchmarkTaskDefinition(
+    task_id="gsm8k_subset",
+    source_id="gsm8k",
+    source_revision="pending-verification",  # See gsm8k_subset.yaml metadata for checksum
+    suite_id="llmtrace-v0.2-acceptance",
+    suite_version="0.1.0",
+    is_smoke=False,
+    capability_score_eligible=True,
+    metadata={
+        "benchmark_source": "openai/gsm8k",
+        "upstream_task": "gsm8k",
+        "upstream_dataset": "openai/gsm8k",
+    },
+)
+
+# Canonical task registry — every task_id MUST be registered here.
+_TASK_REGISTRY: dict[str, BenchmarkTaskDefinition] = {
+    "llmtrace_smoke": _SMOKE_DEFINITION,
+    "gsm8k_subset": _GSM8K_DEFINITION,
+}
+
+# Legacy: kept for test backward-compatibility.
 _SMOKE_MANIFEST = SmokeTaskManifest()
 
 _SMOKE_TASK_SPEC = TaskSpec(
-    task_id=_SMOKE_MANIFEST.task_id,
+    task_id=_SMOKE_DEFINITION.task_id,
     name="LLMTrace Smoke Task",
     description="Deterministic format-following smoke test for lm-eval adapter validation",
     category="smoke",
@@ -67,16 +100,9 @@ _GSM8K_SUBSET_SPEC = TaskSpec(
 )
 
 _KNOWN_TASKS: dict[str, TaskSpec] = {
-    _SMOKE_MANIFEST.task_id: _SMOKE_TASK_SPEC,
+    _SMOKE_DEFINITION.task_id: _SMOKE_TASK_SPEC,
     "gsm8k_subset": _GSM8K_SUBSET_SPEC,
 }
-
-
-def _make_smoke_metadata(**extra: object) -> dict[str, object]:
-    """Build metadata dict with mandatory smoke task flag."""
-    meta: dict[str, object] = {"llmtrace_smoke_task": True}
-    meta.update(extra)
-    return meta
 
 
 class LmEvalAdapter(BenchmarkAdapter):
@@ -194,12 +220,15 @@ class LmEvalAdapter(BenchmarkAdapter):
     ) -> TaskAttempt:
         """Run a single lm-eval task via the LmEvalRunner.
 
-        On ProviderEvidenceError, captures the structured failure with
-        evidence_refs still pointing to the failed Evidence.
-
-        The ``provider`` argument must implement the CompletionProvider protocol.
+        Task provenance is read from ``_TASK_REGISTRY`` so every code path
+        — success, options-inconsistent, result-invalid, provider-error,
+        setup-error, and unexpected exception — returns a TaskAttempt with
+        consistent task identity.
         """
+        task_id = task_spec.task_id
+        defn = _get_task_def(task_id)
         attempt_id = str(uuid4())
+
         try:
             runner = LmEvalRunner(
                 provider=provider,
@@ -209,7 +238,7 @@ class LmEvalAdapter(BenchmarkAdapter):
             )
 
             result = runner.run_task(
-                task_name=task_spec.task_id,
+                task_name=task_id,
                 num_fewshot=0,
                 batch_size=1,
             )
@@ -220,18 +249,14 @@ class LmEvalAdapter(BenchmarkAdapter):
 
             # Check for options inconsistency
             if result.get("options_inconsistent"):
-                return TaskAttempt(
+                return _build_attempt(
                     attempt_id=attempt_id,
-                    source_id=_SMOKE_MANIFEST.source_id,
-                    source_revision=_SMOKE_MANIFEST.source_revision,
-                    suite_id=_SMOKE_MANIFEST.suite_id,
-                    suite_version=_SMOKE_MANIFEST.suite_version,
-                    task_id=task_spec.task_id,
+                    task_id=task_id,
+                    defn=defn,
                     adapter_id=self.adapter_id,
                     adapter_version=self.adapter_version,
                     status=TaskStatus.FAILURE,
                     evidence_refs=evidence_refs,
-                    metadata=_make_smoke_metadata(),
                     failure=AdapterFailure(
                         error_code="LM_EVAL_OPTIONS_INCONSISTENT",
                         category=FailureCategory.ADAPTER,
@@ -247,18 +272,14 @@ class LmEvalAdapter(BenchmarkAdapter):
             metric_result = _extract_metric_result(result, self.adapter_version, actual_options)
 
             if metric_result is None:
-                return TaskAttempt(
+                return _build_attempt(
                     attempt_id=attempt_id,
-                    source_id=_SMOKE_MANIFEST.source_id,
-                    source_revision=_SMOKE_MANIFEST.source_revision,
-                    suite_id=_SMOKE_MANIFEST.suite_id,
-                    suite_version=_SMOKE_MANIFEST.suite_version,
-                    task_id=task_spec.task_id,
+                    task_id=task_id,
+                    defn=defn,
                     adapter_id=self.adapter_id,
                     adapter_version=self.adapter_version,
                     status=TaskStatus.FAILURE,
                     evidence_refs=evidence_refs,
-                    metadata=_make_smoke_metadata(),
                     failure=AdapterFailure(
                         error_code="LM_EVAL_RESULT_INVALID",
                         category=FailureCategory.ADAPTER,
@@ -271,36 +292,27 @@ class LmEvalAdapter(BenchmarkAdapter):
                     ),
                 )
 
-            return TaskAttempt(
+            return _build_attempt(
                 attempt_id=attempt_id,
-                source_id=_SMOKE_MANIFEST.source_id,
-                source_revision=_SMOKE_MANIFEST.source_revision,
-                suite_id=_SMOKE_MANIFEST.suite_id,
-                suite_version=_SMOKE_MANIFEST.suite_version,
-                task_id=task_spec.task_id,
+                task_id=task_id,
+                defn=defn,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.SUCCESS,
                 evidence_refs=evidence_refs,
-                metadata=_make_smoke_metadata(
-                    metric_result=metric_result.model_dump(),
-                ),
+                metric_result=metric_result.model_dump(),
             )
 
         except ProviderEvidenceError as exc:
             evidence_refs = [str(exc.evidence_id)]
-            return TaskAttempt(
+            return _build_attempt(
                 attempt_id=attempt_id,
-                source_id=_SMOKE_MANIFEST.source_id,
-                source_revision=_SMOKE_MANIFEST.source_revision,
-                suite_id=_SMOKE_MANIFEST.suite_id,
-                suite_version=_SMOKE_MANIFEST.suite_version,
-                task_id=task_spec.task_id,
+                task_id=task_id,
+                defn=defn,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
                 evidence_refs=evidence_refs,
-                metadata=_make_smoke_metadata(),
                 failure=AdapterFailure(
                     error_code=exc.error_code,
                     category=exc.category,
@@ -315,17 +327,14 @@ class LmEvalAdapter(BenchmarkAdapter):
             )
 
         except (LmEvalNotInstalledError, LmEvalSecurityError, LmEvalValidationError) as exc:
-            return TaskAttempt(
+            return _build_attempt(
                 attempt_id=attempt_id,
-                source_id=_SMOKE_MANIFEST.source_id,
-                source_revision=_SMOKE_MANIFEST.source_revision,
-                suite_id=_SMOKE_MANIFEST.suite_id,
-                suite_version=_SMOKE_MANIFEST.suite_version,
-                task_id=task_spec.task_id,
+                task_id=task_id,
+                defn=defn,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
-                metadata=_make_smoke_metadata(),
+                evidence_refs=[],
                 failure=AdapterFailure(
                     error_code="LM_EVAL_SETUP_ERROR",
                     category=FailureCategory.ADAPTER,
@@ -336,17 +345,14 @@ class LmEvalAdapter(BenchmarkAdapter):
             )
 
         except Exception as exc:
-            return TaskAttempt(
+            return _build_attempt(
                 attempt_id=attempt_id,
-                source_id=_SMOKE_MANIFEST.source_id,
-                source_revision=_SMOKE_MANIFEST.source_revision,
-                suite_id=_SMOKE_MANIFEST.suite_id,
-                suite_version=_SMOKE_MANIFEST.suite_version,
-                task_id=task_spec.task_id,
+                task_id=task_id,
+                defn=defn,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
                 status=TaskStatus.FAILURE,
-                metadata=_make_smoke_metadata(),
+                evidence_refs=[],
                 failure=AdapterFailure(
                     error_code="LM_EVAL_RUN_ERROR",
                     category=FailureCategory.ADAPTER,
@@ -362,6 +368,10 @@ class LmEvalAdapter(BenchmarkAdapter):
         Only accepts exact_match or exact_match,<filter> metrics.
         Values outside [0, 1] or non-numeric are rejected as UNGRADABLE.
         No fallback to "first numeric metric".
+
+        Provenance is read from ``_TASK_REGISTRY`` via the task_name in the
+        raw_result, so GradeResult always carries the same identity as the
+        corresponding TaskAttempt.
         """
         results: dict[str, object] = raw_result.get("results", {})  # type: ignore[assignment]
         evidence_ids_raw = raw_result.get("evidence_ids", [])
@@ -387,13 +397,15 @@ class LmEvalAdapter(BenchmarkAdapter):
                 f"exact_match value {raw_score} is outside [0, 1]",
             )
 
+        defn = _get_task_def(task_name)
+
         return GradeResult(
             grade_id=str(uuid4()),
             attempt_id=str(raw_result.get("attempt_id", "unknown")),
-            source_id=_SMOKE_MANIFEST.source_id,
-            source_revision=_SMOKE_MANIFEST.source_revision,
-            suite_id=_SMOKE_MANIFEST.suite_id,
-            suite_version=_SMOKE_MANIFEST.suite_version,
+            source_id=defn.source_id,
+            source_revision=defn.source_revision,
+            suite_id=defn.suite_id,
+            suite_version=defn.suite_version,
             task_id=task_name,
             adapter_id=self.adapter_id,
             adapter_version=self.adapter_version,
@@ -469,14 +481,15 @@ def _find_exact_match(results: dict[str, object]) -> tuple[str | None, float]:
 
 
 def _ungradable(task_name: str, error_message: str) -> GradeResult:
-    """Create an UNGRADABLE GradeResult."""
+    """Create an UNGRADABLE GradeResult with provenance from the task registry."""
+    defn = _get_task_def(task_name)
     return GradeResult(
         grade_id=str(uuid4()),
         attempt_id="unknown",
-        source_id=_SMOKE_MANIFEST.source_id,
-        source_revision=_SMOKE_MANIFEST.source_revision,
-        suite_id=_SMOKE_MANIFEST.suite_id,
-        suite_version=_SMOKE_MANIFEST.suite_version,
+        source_id=defn.source_id,
+        source_revision=defn.source_revision,
+        suite_id=defn.suite_id,
+        suite_version=defn.suite_version,
         task_id=task_name,
         adapter_id="lm-eval",
         adapter_version=_LM_EVAL_VERSION,
@@ -486,6 +499,44 @@ def _ungradable(task_name: str, error_message: str) -> GradeResult:
         status=GradeStatus.UNGRADABLE,
         error_message=error_message,
         evidence_refs=[],
+    )
+
+
+def _get_task_def(task_id: str) -> BenchmarkTaskDefinition:
+    """Look up a task definition from the canonical registry.
+
+    Falls back to the smoke definition for unknown tasks so that
+    error paths never return provenance-less objects.
+    """
+    return _TASK_REGISTRY.get(task_id, _SMOKE_DEFINITION)
+
+
+def _build_attempt(
+    *,
+    attempt_id: str,
+    task_id: str,
+    defn: BenchmarkTaskDefinition,
+    adapter_id: str,
+    adapter_version: str,
+    status: TaskStatus,
+    evidence_refs: list[str],
+    metric_result: dict[str, object] | None = None,
+    failure: AdapterFailure | None = None,
+) -> TaskAttempt:
+    """Build a TaskAttempt with provenance and metadata from the task definition."""
+    return TaskAttempt(
+        attempt_id=attempt_id,
+        source_id=defn.source_id,
+        source_revision=defn.source_revision,
+        suite_id=defn.suite_id,
+        suite_version=defn.suite_version,
+        task_id=task_id,
+        adapter_id=adapter_id,
+        adapter_version=adapter_version,
+        status=status,
+        evidence_refs=evidence_refs,
+        metadata=defn.task_metadata(metric_result=metric_result),
+        failure=failure,
     )
 
 

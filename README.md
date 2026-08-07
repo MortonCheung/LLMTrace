@@ -4,9 +4,9 @@
 
 ## 当前版本能做什么
 
-v0.1 实现首个纵向闭环：输入中转站地址、协议、模型名称和密钥环境变量，自动采集原始协议证据、运行基础探针、计算风险、输出终端摘要，并生成可复查的 JSON 与 HTML 报告。
+v0.2 已完成 v0.1 证据审计 MVP 与基准评测基础设施。
 
-### 核心能力
+### v0.1 证据审计（基础能力）
 
 - 统一执行链：每次请求只发送一次，探针直接返回真实证据（Evidence）与发现（Finding），CLI 仅负责编排汇总
 - 每条证据带唯一 `evidence_id`（UUID），所有 Finding 的 `evidence_refs` 引用真实存在的证据 ID
@@ -18,6 +18,14 @@ v0.1 实现首个纵向闭环：输入中转站地址、协议、模型名称和
 - 请求次数以统一 AuditPlan 为准：dry-run 计划次数与实际执行完全一致；报告证据数与实际 HTTP 请求计数通过 Mock Server 调试接口独立核验
 - 多报告跨时间漂移比较
 - 密钥自动脱敏，不写入报告
+
+### v0.2 基准评测基础设施（新增）
+
+- **lm-evaluation-harness Adapter**：通过 `ProviderBackedLM` 桥接 LLMTrace Provider，支持 generate_until 任务
+- **GSM8K 验收切片**：8 样本固定子集，可溯源至 openai/gsm8k，固定顺序与 ID，可复现
+- **Benchmark 报告**：JSON/HTML 报告、Evidence closure validation、provenance 完整性
+- **能力评分基础**：TaskScoringRegistry → Dimension Aggregation → CapabilityProfile
+- **当前评分边界**：仅输出 raw_normalized_score / dimension_score / provisional_raw_index；calibrated_score 为 None（正式 0-100 需要 Reference Calibration）
 
 ## 当前版本不能证明什么
 
@@ -111,8 +119,8 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 
 | 版本 | 内容 |
 |------|------|
-| v0.1 | 证据审计 MVP（当前版本） |
-| v0.2 | 轻量能力基准 |
+| v0.1 | 证据审计 MVP（已完成） |
+| v0.2 | 轻量能力基准（已完成：lm-eval Adapter, GSM8K acceptance, Capability Scoring 基础） |
 | v0.3 | 官方参考模型对照 |
 | v0.4 | 跨时间路由漂移 |
 | v0.5 | LLMmap 指纹适配 |
