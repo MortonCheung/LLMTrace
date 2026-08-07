@@ -12,7 +12,9 @@ and that smoke tasks and real benchmarks are never confused:
 
 import uuid
 from unittest.mock import patch
+
 import pytest
+
 from llmtrace.adapters.lm_eval import (
     _SMOKE_MANIFEST,
     _TASK_REGISTRY,
@@ -28,7 +30,6 @@ from llmtrace.benchmarks.models import (
 from llmtrace.reporting.benchmark_mapper import _is_smoke_task_from_metadata
 from llmtrace.scoring.aggregator import TaskScoringRegistry
 from llmtrace.scoring.models import CapabilityDimension, TaskScoringSpec
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -201,7 +202,7 @@ class TestTaskAttemptProvenanceFailure:
 
         from tests.adapters.conftest import FakeProvider
 
-        provider = FakeProvider(response_text="unparseable output")
+        provider = FakeProvider()
 
         task = TaskSpec(task_id="gsm8k_subset", name="GSM8K", num_samples=1)
 

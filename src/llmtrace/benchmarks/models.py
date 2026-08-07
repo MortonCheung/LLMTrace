@@ -640,7 +640,7 @@ class SmokeTaskManifest(BaseModel):
             is_smoke=True,
             capability_score_eligible=False,
             metric=self.metric,
-            filter=self.filter_,
+            filter=self.filter,
         )
 
 
