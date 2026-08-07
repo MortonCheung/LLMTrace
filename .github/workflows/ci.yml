@@ -62,7 +62,7 @@ jobs:
           pip install -e ".[dev,lm-eval]"
 
       - name: Run lm-eval adapter integration tests
-        run: pytest tests/adapters/test_lm_eval*.py tests/integration/test_lm_eval*.py tests/integration/test_gsm8k*.py tests/integration/test_provenance_integrity.py
+        run: pytest tests/adapters/test_lm_eval*.py tests/integration/test_lm_eval*.py tests/integration/test_gsm8k*.py tests/integration/test_provenance_integrity.py tests/integration/test_item_level_results.py
 
   packaging:
     runs-on: ubuntu-latest
