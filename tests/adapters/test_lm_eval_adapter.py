@@ -30,7 +30,7 @@ class TestLmEvalAdapterListTasks:
     def test_list_tasks_returns_smoke_task(self) -> None:
         adapter = LmEvalAdapter()
         tasks = adapter.list_tasks()
-        assert len(tasks) == 1
+        assert len(tasks) >= 1
         assert tasks[0].task_id == "llmtrace_smoke"
         assert tasks[0].num_samples == 4
 

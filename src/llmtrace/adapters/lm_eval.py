@@ -58,8 +58,17 @@ _SMOKE_TASK_SPEC = TaskSpec(
     num_samples=4,
 )
 
+_GSM8K_SUBSET_SPEC = TaskSpec(
+    task_id="gsm8k_subset",
+    name="GSM8K Acceptance Subset",
+    description="Fixed 8-sample subset of GSM8K grade-school math word problems (openai/gsm8k, MIT license)",
+    category="benchmark",
+    num_samples=8,
+)
+
 _KNOWN_TASKS: dict[str, TaskSpec] = {
     _SMOKE_MANIFEST.task_id: _SMOKE_TASK_SPEC,
+    "gsm8k_subset": _GSM8K_SUBSET_SPEC,
 }
 
 

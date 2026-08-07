@@ -83,7 +83,7 @@ class TestSmokeFullReportGolden:
         async def _run() -> None:
             adapter = LmEvalAdapter()
             task_specs = adapter.list_tasks()
-            smoke_spec = task_specs[0]
+            smoke_spec = next(t for t in task_specs if t.task_id == "llmtrace_smoke")
 
             plan = build_plan(
                 suite_id="llmtrace_smoke",

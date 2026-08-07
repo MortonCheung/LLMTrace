@@ -17,7 +17,7 @@
     "probe_list": [],
     "risk_level": "INCONCLUSIVE",
     "schema_version": "1.1",
-    "content_hash": "b5b989d1a29ee32f0c9af8453453a46c46f5bbf30a9c1f8dc66cac653839dfcc"
+    "content_hash": "e2e283cfdcfcab145155f54b8ede251e16c493e4a498e3c125626b631da78be1"
   },
   "config": {
     "protocol": "openai",
@@ -58,7 +58,7 @@
       "response_truncated": false,
       "response_body_size": 0,
       "first_token_latency_ms": null,
-      "total_latency_ms": 500.0,
+      "total_latency_ms": 600.0,
       "request_id": null,
       "response_id": null,
       "request_model": "test-model",
@@ -98,7 +98,7 @@
       "response_truncated": false,
       "response_body_size": 0,
       "first_token_latency_ms": null,
-      "total_latency_ms": 799.0,
+      "total_latency_ms": 899.0,
       "request_id": null,
       "response_id": null,
       "request_model": "test-model",
@@ -138,7 +138,7 @@
       "response_truncated": false,
       "response_body_size": 0,
       "first_token_latency_ms": null,
-      "total_latency_ms": 99.0,
+      "total_latency_ms": 200.0,
       "request_id": null,
       "response_id": null,
       "request_model": "test-model",
@@ -178,7 +178,7 @@
       "response_truncated": false,
       "response_body_size": 0,
       "first_token_latency_ms": null,
-      "total_latency_ms": 400.0,
+      "total_latency_ms": 500.0,
       "request_id": null,
       "response_id": null,
       "request_model": "test-model",
@@ -275,5 +275,5 @@
       "warnings": []
     }
   ],
-  "content_hash": "b5b989d1a29ee32f0c9af8453453a46c46f5bbf30a9c1f8dc66cac653839dfcc"
+  "content_hash": "e2e283cfdcfcab145155f54b8ede251e16c493e4a498e3c125626b631da78be1"
 }

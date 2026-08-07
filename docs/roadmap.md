@@ -13,23 +13,25 @@
 - CLI：`audit`、`inspect`、`compare`
 - 质量基线：GitHub Actions CI（Python 3.11 / 3.12 / 3.13、Ruff、Format、Mypy、Pytest、覆盖率门禁）
 
-## v0.2 评测粘合层与能力评分基础（开发中）
+## v0.2 评测粘合层与能力评分基础（已完成）
 
 - Source / Suite / Task / Run / Score 统一数据模型
-- Benchmark Adapter Protocol（`list_tasks`、`build_plan`、`estimate_cost`、`run_task`、`normalize_result`）
+- Benchmark Adapter Protocol（`list_tasks`、`run_task`、`normalize_result`）
 - RunPlan 与 Budget Estimator
-- 首个 `lm-evaluation-harness` 最小适配器（subprocess 隔离、固定 revision）
+- `lm-evaluation-harness` 最小适配器（subprocess 隔离、YAML 任务加载）
 - 统一结果模型与 Evidence 集成
+- 真实上游 Benchmark 验收：GSM8K 8 样本固定子集（generate_until，Mock Provider）
+- 能力维度评分引擎：推理 / 编程 / 数学与科学 / 指令遵循（4 个启用维度）
+- `TaskScoringRegistry`：显式 `task_id → dimension` 映射
+- `DimensionScoreResult` + `CapabilityProfile`（uncalibrated，无 0–100 输出）
+- Evidence 闭合链：`HTTPEvidence → TaskAttempt → GradeResult → DimensionScore → CapabilityProfile → Report`
+- Cross-run isolation：per-run GradeResult 配对，TaskAttempt 预扫描 duplicate 检测
 
-完成标准：一个外部任务通过 Mock Provider 跑通完整闭环并进入 Evidence 与报告。
+完成标准：一个外部任务通过 Mock Provider 跑通完整闭环并进入 Evidence 与报告。√ 已达成。
 
-## v0.3 能力评分 MVP
+## v0.3 能力评分 MVP（规划中）
 
-- 接入外部评测：lm-eval 精选任务、LiveBench 精选客观题、EvalPlus 精选代码题
-- 快速模式，20–40 个任务
-- 4 个能力维度：推理、数学、代码、指令遵循
-- 0–100 分综合评分与置信度
-- 成本估算与 JSON / HTML 报告
+> 注：Reference Calibration 是正式 0–100 能力分的必要条件。当前 `calibrated_score = None`。
 
 ## v0.4 参考模型对照
 

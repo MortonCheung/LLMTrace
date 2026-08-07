@@ -36,7 +36,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 # Only these task names are allowed
-_TRUSTED_TASK_WHITELIST: frozenset[str] = frozenset({"llmtrace_smoke"})
+_TRUSTED_TASK_WHITELIST: frozenset[str] = frozenset({"llmtrace_smoke", "gsm8k_subset"})
 
 # Only generate_until is allowed
 _TRUSTED_OUTPUT_TYPES: frozenset[str] = frozenset({"generate_until"})
