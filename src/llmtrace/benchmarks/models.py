@@ -554,18 +554,32 @@ class BenchmarkItemResult(BaseModel):
     Provenance is traceable through ``attempt_id`` → ``TaskAttempt``
     without duplicating all provenance fields.
 
+    source_sample_id and input_sha256 provide immutable identity
+    tracking from upstream data sources down to individual samples.
+
     Status consistency invariants (enforced by model validator):
       - GRADED: raw_score / normalized_score may be any value in [0,1];
         error_message must be None.
       - UNGRADABLE: raw_score and normalized_score must both be 0.0;
         error_message must be set (the reason).
       - FAILURE: raw_score and normalized_score must both be 0.0;
-        error_message must be set (the failure description).
+        failure must be set.
     """
 
     item_id: NonEmptyStr = Field(..., description="Unique item identifier (e.g. item-001)")
     task_id: NonEmptyStr = Field(..., description="Parent task identifier")
     attempt_id: NonEmptyStr = Field(..., description="Parent TaskAttempt identifier")
+    source_sample_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Upstream sample identifier for immutable item identity tracking",
+    )
+    input_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        description="SHA-256 hash of the original input prompt (lowercase hex)",
+    )
     status: ItemStatus = Field(default=ItemStatus.GRADED, description="Item grading status")
     raw_score: float = Field(
         default=0.0,
@@ -592,6 +606,20 @@ class BenchmarkItemResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional item metadata")
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _check_input_sha256_format(self) -> BenchmarkItemResult:
+        """Validate input_sha256 is valid lowercase hex SHA-256 when set."""
+        if self.input_sha256 is not None:
+            if len(self.input_sha256) != 64:
+                raise ValueError(f"input_sha256 must be exactly 64 hex characters, got {len(self.input_sha256)}")
+            try:
+                int(self.input_sha256, 16)
+            except ValueError as err:
+                raise ValueError(f"input_sha256 must be valid lowercase hex: {self.input_sha256}") from err
+            if self.input_sha256 != self.input_sha256.lower():
+                raise ValueError("input_sha256 must be lowercase hex")
+        return self
 
     @model_validator(mode="after")
     def _check_status_consistency(self) -> BenchmarkItemResult:

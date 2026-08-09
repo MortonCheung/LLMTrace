@@ -1,0 +1,99 @@
+{
+  "source_id": "humaneval",
+  "source_url": "https://github.com/openai/human-eval",
+  "upstream_revision": "human-eval-v1-2021",
+  "license": "MIT",
+  "subset_version": "quick_v1",
+  "selection_algorithm": "sha256",
+  "selection_seed": "llmtrace_quick_v1:humaneval",
+  "sample_count": 8,
+  "items": [
+    {
+      "source_sample_id": "HumanEval/0",
+      "input_sha256": "595223a40111ebefc773fc1c3c57bab01b71c13c4ebfbbb5154a59be6ca6efa5",
+      "prompt": "from typing import List\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n",
+      "entry_point": "has_close_elements",
+      "tests": [
+        "assert has_close_elements([1.0, 2.0, 3.0], 0.5) == False",
+        "assert has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3) == True",
+        "assert has_close_elements([1.0, 2.0, 3.9, 4.0, 5.0, 2.2], 0.3) == True",
+        "assert has_close_elements([1.0, 2.0, 3.9, 4.0, 5.0, 2.2], 0.05) == False"
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/3",
+      "input_sha256": "db4715ce4d25254157c58cd2c7c56036aa6a7ddc90016513b3322d7073613544",
+      "prompt": "from typing import List\ndef mean_absolute_deviation(numbers: List[float]) -> float:\n    \"\"\" For a given list of input numbers, calculate Mean Absolute Deviation about the mean.\n    >>> mean_absolute_deviation([1.0, 2.0, 3.0, 4.0])\n    1.0\n    \"\"\"\n",
+      "entry_point": "mean_absolute_deviation",
+      "tests": [
+        "assert abs(mean_absolute_deviation([1.0, 2.0, 3.0, 4.0]) - 1.0) < 1e-6",
+        "assert abs(mean_absolute_deviation([1.0, 2.0, 3.0]) - 2.0/3.0) < 1e-6"
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/7",
+      "input_sha256": "ba00f36bc2f111ff813ff88e1bd9cbf1ea57857581771bffe60c76e68673a7fd",
+      "prompt": "from typing import List\ndef filter_by_substring(strings: List[str], substring: str) -> List[str]:\n    \"\"\" Filter an input list of strings only for ones that contain given substring.\n    >>> filter_by_substring([], \"a\")\n    []\n    >>> filter_by_substring([\"abc\", \"bacd\", \"cde\", \"array\"], \"a\")\n    [\"abc\", \"bacd\", \"array\"]\n    \"\"\"\n",
+      "entry_point": "filter_by_substring",
+      "tests": [
+        "assert filter_by_substring([], \"a\") == []",
+        "assert filter_by_substring([\"abc\", \"bacd\", \"cde\", \"array\"], \"a\") == [\"abc\", \"bacd\", \"array\"]",
+        "assert filter_by_substring([\"hello\", \"world\"], \"x\") == []"
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/9",
+      "input_sha256": "a4dab3f2498284e1b7d5f8f897afa371331075ffde87de2cde1097d8a200aa8c",
+      "prompt": "from typing import List\ndef rolling_max(numbers: List[int]) -> List[int]:\n    \"\"\" From a given list of integers, generate a list of rolling maximum element found until given moment in the sequence.\n    >>> rolling_max([1, 2, 3, 2, 3, 4, 2])\n    [1, 2, 3, 3, 3, 4, 4]\n    \"\"\"\n",
+      "entry_point": "rolling_max",
+      "tests": [
+        "assert rolling_max([1, 2, 3, 2, 3, 4, 2]) == [1, 2, 3, 3, 3, 4, 4]",
+        "assert rolling_max([]) == []",
+        "assert rolling_max([5]) == [5]"
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/11",
+      "input_sha256": "b279241276011f1c19b1023f3107d1b2078bf243b3768826abf0aad0532865b5",
+      "prompt": "def string_xor(a: str, b: str) -> str:\n    \"\"\" Input are two strings a and b consisting only of 1s and 0s. Perform binary XOR on these inputs and return result also as a string.\n    >>> string_xor(\"010\", \"110\")\n    \"100\"\n    \"\"\"\n",
+      "entry_point": "string_xor",
+      "tests": [
+        "assert string_xor(\"010\", \"110\") == \"100\"",
+        "assert string_xor(\"111000\", \"101010\") == \"010010\"",
+        "assert string_xor(\"1\", \"1\") == \"0\""
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/13",
+      "input_sha256": "687e7650165dcd2af3e091990e90c665a6cc4e48cb0d6716ec3bc4ce76ad0efd",
+      "prompt": "def greatest_common_divisor(a: int, b: int) -> int:\n    \"\"\" Return a greatest common divisor of two integers a and b.\n    >>> greatest_common_divisor(3, 5)\n    1\n    >>> greatest_common_divisor(25, 15)\n    5\n    \"\"\"\n",
+      "entry_point": "greatest_common_divisor",
+      "tests": [
+        "assert greatest_common_divisor(3, 5) == 1",
+        "assert greatest_common_divisor(25, 15) == 5",
+        "assert greatest_common_divisor(100, 10) == 10"
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/17",
+      "input_sha256": "7817ada927cdfe2430f0b925f357dc80282a767e20b22490bec2a0c648b8542a",
+      "prompt": "from typing import List\ndef parse_music(music_string: str) -> List[int]:\n    \"\"\" Parse a string representing musical notes in a special ASCII format and return a list of integers where each integer represents how many beats each note lasts.\n    o = whole note = 4 beats, o| = half note = 2 beats, .| = quarter note = 1 beat.\n    >>> parse_music(\"o o| .| o| o| .| .| .| o o\")\n    [4, 2, 1, 2, 2, 1, 1, 1, 4, 4]\n    \"\"\"\n",
+      "entry_point": "parse_music",
+      "tests": [
+        "assert parse_music(\"o o| .| o| o| .| .| .| o o\") == [4, 2, 1, 2, 2, 1, 1, 1, 4, 4]",
+        "assert parse_music(\"\") == []",
+        "assert parse_music(\"o\") == [4]"
+      ]
+    },
+    {
+      "source_sample_id": "HumanEval/20",
+      "input_sha256": "e989ee366d36ba36800be31bdb6cf7be208adf46a82297512c5e5f95688ee422",
+      "prompt": "from typing import List\ndef find_closest_elements(numbers: List[float]) -> tuple:\n    \"\"\" From a supplied list of numbers of length at least 2, find the two numbers that are closest to each other and return them in order of increasing value.\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n",
+      "entry_point": "find_closest_elements",
+      "tests": [
+        "assert find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2]) == (2.0, 2.2)",
+        "assert find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0]) == (2.0, 2.0)"
+      ]
+    }
+  ]
+}

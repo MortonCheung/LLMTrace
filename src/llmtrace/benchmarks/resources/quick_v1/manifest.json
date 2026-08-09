@@ -1,0 +1,59 @@
+{
+  "suite_id": "llmtrace_quick_v1",
+  "suite_version": "0.1.0",
+  "description": "LLMTrace Quick Suite v1 — 32-item, 4-dimension, fixed-subset benchmark",
+  "total_items": 32,
+  "tasks": {
+    "arc_challenge_quick_v1": {
+      "task_id": "arc_challenge_quick_v1",
+      "dimension": "reasoning",
+      "source_id": "arc_challenge",
+      "source_url": "https://allenai.org/data/arc",
+      "upstream_revision": "ARC-Challenge-2018",
+      "license": "CC BY-SA 4.0",
+      "subset_sha256": "9002e46c156509f3ec5d035e3c0c0efbe5f5e4c966ecdca3fdf0e35ca4504c9e",
+      "resource_file": "arc_challenge.json",
+      "sample_count": 8,
+      "adapter_id": "llmtrace-quick-v1"
+    },
+    "humaneval_quick_v1": {
+      "task_id": "humaneval_quick_v1",
+      "dimension": "coding",
+      "source_id": "humaneval",
+      "source_url": "https://github.com/openai/human-eval",
+      "upstream_revision": "human-eval-v1-2021",
+      "license": "MIT",
+      "subset_sha256": "2a91a426608d601eccbe482f0bba40f00bfc1c7404763e061117ba55c215e131",
+      "resource_file": "humaneval.json",
+      "sample_count": 8,
+      "adapter_id": "llmtrace-quick-v1"
+    },
+    "gsm8k_quick_v1": {
+      "task_id": "gsm8k_quick_v1",
+      "dimension": "math_science",
+      "source_id": "gsm8k",
+      "source_url": "https://github.com/openai/grade-school-math",
+      "upstream_revision": "gsm8k-main-2023",
+      "license": "MIT",
+      "subset_sha256": "dead99433d6960bc551b88da275bfd4efec85d71c0034f8e35dd7756e70a796a",
+      "resource_file": "gsm8k.json",
+      "sample_count": 8,
+      "adapter_id": "llmtrace-quick-v1"
+    },
+    "ifeval_quick_v1": {
+      "task_id": "ifeval_quick_v1",
+      "dimension": "instruction_following",
+      "source_id": "ifeval",
+      "source_url": "https://github.com/google-research/instruction-following-eval",
+      "upstream_revision": "ifeval-v1-2023",
+      "license": "Apache-2.0",
+      "subset_sha256": "33b17789bdd3509fbd0f6493aa132b3ebfbba3d6ad8e1971a3bd826261d083e8",
+      "resource_file": "ifeval.json",
+      "sample_count": 8,
+      "adapter_id": "llmtrace-quick-v1"
+    }
+  },
+  "selection_algorithm": "sha256",
+  "selection_seed_format": "llmtrace_quick_v1:{source_id}",
+  "created_at": "2026-08-07"
+}

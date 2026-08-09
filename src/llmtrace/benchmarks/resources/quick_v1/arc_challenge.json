@@ -1,0 +1,60 @@
+{
+  "source_id": "arc_challenge",
+  "source_url": "https://allenai.org/data/arc",
+  "upstream_revision": "ARC-Challenge-2018",
+  "license": "CC BY-SA 4.0",
+  "subset_version": "quick_v1",
+  "selection_algorithm": "sha256",
+  "selection_seed": "llmtrace_quick_v1:arc_challenge",
+  "sample_count": 8,
+  "items": [
+    {
+      "source_sample_id": "ARC-Challenge-2018:Mercury_2171814",
+      "input_sha256": "622384a9dd0636efcbb0f88e5fad1d347af4f56d74f7488526e66ca44c7d81e0",
+      "prompt": "Which planet is closest to the Sun?\n\n(A) Venus\n(B) Mercury\n(C) Earth\n(D) Mars\n\nAnswer with only the option letter.",
+      "answer": "B"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:Photosynthesis_2189732",
+      "input_sha256": "6188538b242426a7eee8e2e73378d9d139727732cdd41fdb0ca9c52f3542e6ae",
+      "prompt": "What gas do plants absorb from the atmosphere during photosynthesis?\n\n(A) Nitrogen\n(B) Oxygen\n(C) Carbon dioxide\n(D) Hydrogen\n\nAnswer with only the option letter.",
+      "answer": "C"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:WaterFreeze_2190834",
+      "input_sha256": "bcafd2041f936ba667117bd43ef21b555107e5925c72abce76c165a8d2ec2f40",
+      "prompt": "At what temperature does pure water freeze at standard pressure?\n\n(A) 0\u00b0C\n(B) 32\u00b0C\n(C) -10\u00b0C\n(D) 100\u00b0C\n\nAnswer with only the option letter.",
+      "answer": "A"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:CellNucleus_2201845",
+      "input_sha256": "6c847e9f1f7126b63c06e2428de3764a237568c166bdd27317ee40a78f691a2b",
+      "prompt": "Which organelle contains the genetic material in a eukaryotic cell?\n\n(A) Mitochondria\n(B) Ribosome\n(C) Nucleus\n(D) Golgi apparatus\n\nAnswer with only the option letter.",
+      "answer": "C"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:NewtonsLaw_2212956",
+      "input_sha256": "0d68841a0710df4be67b47ad2b2d4782fd708978f08ec7f2dd703e43cec695ea",
+      "prompt": "An object at rest will remain at rest unless acted upon by an external force. This is known as:\n\n(A) Newton Second Law\n(B) Newton First Law\n(C) Newton Third Law\n(D) Law of Gravitation\n\nAnswer with only the option letter.",
+      "answer": "B"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:ChemicalBond_2224067",
+      "input_sha256": "1cf2f3ed52be03aabede7c1e136b1540927c5fc257b1849249574a433a4e1056",
+      "prompt": "What type of bond is formed by the sharing of electron pairs between atoms?\n\n(A) Ionic bond\n(B) Metallic bond\n(C) Covalent bond\n(D) Hydrogen bond\n\nAnswer with only the option letter.",
+      "answer": "C"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:HumanHeart_2235178",
+      "input_sha256": "43d4a94cb3c4e707fb7246f34bdc8fb82efdaefe0f878d25eb8b619b3334d35e",
+      "prompt": "How many chambers does the human heart have?\n\n(A) 2\n(B) 3\n(C) 4\n(D) 6\n\nAnswer with only the option letter.",
+      "answer": "C"
+    },
+    {
+      "source_sample_id": "ARC-Challenge-2018:PlateTectonics_2246289",
+      "input_sha256": "6f388f5b903535b7407af71b23e26c99661554589748de05299e149af21fa800",
+      "prompt": "The theory that Earth lithosphere is divided into large plates that move is called:\n\n(A) Continental drift\n(B) Plate tectonics\n(C) Seafloor spreading\n(D) Subduction\n\nAnswer with only the option letter.",
+      "answer": "B"
+    }
+  ]
+}
