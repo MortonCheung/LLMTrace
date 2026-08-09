@@ -29,7 +29,40 @@
 
 完成标准：一个外部任务通过 Mock Provider 跑通完整闭环并进入 Evidence 与报告。√ 已达成。
 
-## v0.3 能力评分 MVP（规划中）
+## v0.3-A Item-Level Benchmark Foundation（已完成）
+
+- `BenchmarkItemResult` 逐题评分与独立 Evidence 引用
+- Item 级别 identity（`item_id`、`source_sample_id`、`input_sha256`）
+- `GradeResult` 完整状态模型（GRADED / UNGRADABLE / FAILURE）
+- `TaskAttempt.item_results` = canonical per-item truth
+- 固定 denominator 不变：`sum(graded normalized_score) / planned_item_count`
+- `normalize_result()` 强制验证 `planned_item_count` 与 `item_results` 长度一致性
+- `aggregate_item_results()` 统一聚合逻辑（grading_coverage、execution_coverage）
+- CodeExecutionBackend 抽象（Docker sandbox + InProcess fallback）
+
+完成标准：单一 GSM8K 8 样本子集跑通完整 item-level 闭环。√ 已达成。
+
+## v0.3-B Quick Suite（已完成）
+
+- 四维 32 题 Quick Suite：`llmtrace_quick_v1` v0.1.0
+  - `arc_challenge_quick_v1` → reasoning（8 题多选）
+  - `humaneval_quick_v1` → coding（8 题 pass@1，Docker sandbox）
+  - `gsm8k_quick_v1` → math_science（8 题 numeric exact match）
+  - `ifeval_quick_v1` → instruction_following（8 题 atomic constraint）
+- Immutable fixed subsets：SHA-256 排名算法，不可手工 cherry-pick
+- 逐题 provenance 追踪（`source_sample_id`、`input_sha256`）
+- TaskScoringRegistry 显式映射：`create_quick_registry()` 工厂函数
+- CapabilityProfile：`coverage_weight = 0.75`，`provisional_raw_index` 不重归一化
+- 所有 `calibrated_score` 保持 `None`
+- Docker 安全执行（`--network none`、非 root、read-only rootfs）
+- Provider failure isolation（单题失败不终止整套 32 题）
+- Mock Provider 全 pipeline acceptance tests + 30+ adversarial tests
+- JSON / HTML 报告 Quick Suite 汇总、UNCALIBRATED 警告
+- 质量：Ruff + Format + Mypy + Pytest 728 题 + Coverage 82.5%
+
+完成标准：四维全部 8/8 满分闭环 `provisional_raw_index = 0.75`。√ 已达成。
+
+## v0.3-C Reference Calibration（规划中）
 
 > 注：Reference Calibration 是正式 0–100 能力分的必要条件。当前 `calibrated_score = None`。
 

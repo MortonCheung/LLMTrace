@@ -1,0 +1,68 @@
+{
+  "source_id": "gsm8k",
+  "source_url": "https://github.com/openai/grade-school-math",
+  "upstream_revision": "gsm8k-main-2023",
+  "license": "MIT",
+  "subset_version": "quick_v1",
+  "selection_algorithm": "sha256",
+  "selection_seed": "llmtrace_quick_v1:gsm8k",
+  "sample_count": 8,
+  "items": [
+    {
+      "source_sample_id": "gsm8k:train:0",
+      "input_sha256": "24587552f52d09fc992ab019cca91842f0b1c7a5f728ac0dc46dab59477993b5",
+      "prompt": "Janet ducks eggs cost 3.20 per dozen. She sells each egg for 40 cents. What is her profit per egg in cents?",
+      "answer": "13",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:100",
+      "input_sha256": "af61a80349be31782854813a6f647423183b8727e02426580fa245f8d4f81369",
+      "prompt": "A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts in total does it take?",
+      "answer": "3",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:200",
+      "input_sha256": "bbe678cde41bac2a8717a3c7dc9e9458c67818c7c5c0327e22982d05392ed638",
+      "prompt": "Josh decides to try flipping a house. He buys a house for 80000 and then puts in 50000 in repairs. This increased the value of the house by 150%. How much profit did he make?",
+      "answer": "65000",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:300",
+      "input_sha256": "2e8fc28b2be60becb4712feab9ad7c96236d40cf8bebb94e5b2e6634d893450e",
+      "prompt": "James writes a 3-page letter to 2 different friends twice a week. How many pages does he write a year?",
+      "answer": "624",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:400",
+      "input_sha256": "922bb01991f9021652a70a10145417062f164211a83b40dcf1c61b6b67525daf",
+      "prompt": "Randy has 60 mango trees on his farm. He also has 5 less than half as many coconut trees as mango trees. How many trees does Randy have in all on his farm?",
+      "answer": "85",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:500",
+      "input_sha256": "552839a46772f224496ba78313f226fffb42cc823df3b1a377c7b0d5df281884",
+      "prompt": "Mark has a garden with flowers. He planted plants of three different colors in it. Ten of the plants are yellow. The number of purple plants is 80% of the number of yellow plants. There are only 25% as many green plants as yellow and purple combined. How many plants are there in total in Mark garden?",
+      "answer": "22.5",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:600",
+      "input_sha256": "5ba3a5c856aeb24b3f2754006ce8a4d8736723ab6e4069ea6dc38d598fbe9fc9",
+      "prompt": "A deep-sea monster rises from the waters once every hundred years to feast on a ship. In the first year, it ate three ships. In the second year, it ate 5 ships. In the third year, it ate 7 ships. How many ships had it consumed by the end of the fifth year?",
+      "answer": "35",
+      "answer_type": "numeric"
+    },
+    {
+      "source_sample_id": "gsm8k:train:700",
+      "input_sha256": "a365ca3ecb1e630186d70b49c079036e8cc801119ce6c35871a9d3e518dee794",
+      "prompt": "John buys 3 puzzles for 4 dollars each. He pays with a 20 dollar bill. How much change does he receive?",
+      "answer": "8",
+      "answer_type": "numeric"
+    }
+  ]
+}

@@ -324,6 +324,7 @@ def _build_task_item(
         item_report_items.append(
             ItemReportItem(
                 item_id=ir.item_id,
+                source_sample_id=ir.source_sample_id,
                 status=ir.status.value,
                 raw_score=ir.raw_score,
                 normalized_score=ir.normalized_score,

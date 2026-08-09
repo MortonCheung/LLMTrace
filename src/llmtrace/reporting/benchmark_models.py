@@ -152,6 +152,7 @@ class ItemReportItem(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     item_id: str = Field(..., min_length=1)
+    source_sample_id: str | None = Field(default=None, description="Upstream sample identifier")
     status: str = Field(..., description="graded / ungradable / failure")
     raw_score: float | None = Field(default=None, ge=0.0, le=1.0)
     normalized_score: float | None = Field(default=None, ge=0.0, le=1.0)

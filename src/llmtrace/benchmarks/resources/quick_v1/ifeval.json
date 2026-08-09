@@ -1,0 +1,160 @@
+{
+  "source_id": "ifeval",
+  "source_url": "https://github.com/google-research/instruction-following-eval",
+  "upstream_revision": "ifeval-v1-2023",
+  "license": "Apache-2.0",
+  "subset_version": "quick_v1",
+  "selection_algorithm": "sha256",
+  "selection_seed": "llmtrace_quick_v1:ifeval",
+  "sample_count": 8,
+  "items": [
+    {
+      "source_sample_id": "ifeval:keyword_frequency",
+      "input_sha256": "1e1f2614d3711749a896ace16d05f4b6ddf009a9a62a10e4b405e85b8bf0d779",
+      "prompt": "Write a paragraph about artificial intelligence. Your response must contain the word \"algorithm\" exactly 3 times.",
+      "constraints": [
+        {
+          "id": "keyword_count",
+          "type": "keyword_frequency",
+          "args": {
+            "keyword": "algorithm",
+            "count": 3,
+            "relation": "eq"
+          },
+          "description": "Response must contain \"algorithm\" exactly 3 times"
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:response_length_words",
+      "input_sha256": "31cab4b0c8ed88d73352d6b08327a7697d87a54b5ed13b9abafc4c8d51a41482",
+      "prompt": "Explain what machine learning is. Your entire response must be between 50 and 100 words.",
+      "constraints": [
+        {
+          "id": "word_count_range",
+          "type": "word_count",
+          "args": {
+            "min": 50,
+            "max": 100
+          },
+          "description": "Response must be between 50 and 100 words"
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:forbidden_words",
+      "input_sha256": "53d14b98ba4d58ae31e2d7bebbe50c92d5a0ae56be21f4bbd454d55d142fc9d9",
+      "prompt": "Describe how a computer works. Do not use the words \"computer\", \"data\", or \"information\" in your response.",
+      "constraints": [
+        {
+          "id": "ban_words_1",
+          "type": "forbidden_words",
+          "args": {
+            "words": [
+              "computer"
+            ]
+          },
+          "description": "Must not contain \"computer\""
+        },
+        {
+          "id": "ban_words_2",
+          "type": "forbidden_words",
+          "args": {
+            "words": [
+              "data"
+            ]
+          },
+          "description": "Must not contain \"data\""
+        },
+        {
+          "id": "ban_words_3",
+          "type": "forbidden_words",
+          "args": {
+            "words": [
+              "information"
+            ]
+          },
+          "description": "Must not contain \"information\""
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:sentence_count",
+      "input_sha256": "61406048c3cfe5c84ab6dc27146d01cd34fa86dd9723a3ec4bafa147647b0da7",
+      "prompt": "Write about the solar system. Your response must have exactly 5 sentences.",
+      "constraints": [
+        {
+          "id": "sentence_count",
+          "type": "sentence_count",
+          "args": {
+            "count": 5,
+            "relation": "eq"
+          },
+          "description": "Response must have exactly 5 sentences"
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:start_with_keyword",
+      "input_sha256": "7032d242b7c7a9de45be5508ddc10b090ddf7eb95718628b6782339dfd7c710a",
+      "prompt": "Write a short story about a robot. Your response must start with the word \"Once\".",
+      "constraints": [
+        {
+          "id": "start_word",
+          "type": "start_with",
+          "args": {
+            "word": "Once"
+          },
+          "description": "Response must start with \"Once\""
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:bullet_list",
+      "input_sha256": "14e44a5744496a1f9cf8ab3ea077deee8045f3889f45c4ee92f8b743d494ad4e",
+      "prompt": "List the benefits of exercise. Your response must be in bullet point format with at least 3 bullet points, each starting with \"-\".",
+      "constraints": [
+        {
+          "id": "bullet_count",
+          "type": "bullet_count",
+          "args": {
+            "min": 3
+          },
+          "description": "Must have at least 3 bullet points starting with \"-\""
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:paragraph_count",
+      "input_sha256": "37d69d222a24843fea8b7d7e660b60bf6d2f73567f86ab12f6f36cf1ca9a7ba5",
+      "prompt": "Write about climate change. Your response must have exactly 2 paragraphs separated by a blank line.",
+      "constraints": [
+        {
+          "id": "paragraph_count",
+          "type": "paragraph_count",
+          "args": {
+            "count": 2,
+            "relation": "eq"
+          },
+          "description": "Response must have exactly 2 paragraphs"
+        }
+      ]
+    },
+    {
+      "source_sample_id": "ifeval:uppercase_count",
+      "input_sha256": "2db169c1bbddec4af5fd2eafb022a3895ab898206598115cae1aa5fa57e9d769",
+      "prompt": "Write a response about technology. Include exactly 2 words that are fully UPPERCASE.",
+      "constraints": [
+        {
+          "id": "uppercase_count",
+          "type": "uppercase_word_count",
+          "args": {
+            "count": 2,
+            "relation": "eq"
+          },
+          "description": "Must contain exactly 2 fully uppercase words"
+        }
+      ]
+    }
+  ]
+}

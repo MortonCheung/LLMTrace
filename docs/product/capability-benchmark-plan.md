@@ -1,11 +1,32 @@
 # Capability Benchmark Plan
 
-> 状态：设计阶段  
-> 版本：0.1.0  
-> 原则：只做正式能力题集选择设计，不接真实题库。  
+> 状态：Quick Suite v1 已实现（v0.3-B）
+> 版本：0.3.0
+> 原则：只做正式能力题集选择设计，不接真实题库。
 > 约束：不下载数据集、不调用真实 API、不在此 PR 内接入正式题库。
 
 **重要提示：** 本文档中的所有 license、数据规模、维护状态、最新版本信息，在正式接入前必须重新通过官方来源核验。此处数据为设计阶段快照，可能已过时。
+
+---
+
+## 零、Quick Suite v1（已实现）
+
+`llmtrace_quick_v1` v0.1.0 — 四维 32 题低成本可复现 Quick Suite。
+
+| 维度 | task_id | Benchmark | 题数 | 评分方法 |
+|------|---------|-----------|------|----------|
+| reasoning | `arc_challenge_quick_v1` | ARC-Challenge | 8 | 选项准确率 |
+| coding | `humaneval_quick_v1` | HumanEval | 8 | pass@1（Docker sandbox） |
+| math_science | `gsm8k_quick_v1` | GSM8K | 8 | numeric exact match |
+| instruction_following | `ifeval_quick_v1` | IFEval | 8 | atomic constraint satisfaction |
+
+特性和约束：
+- Immutable fixed subsets（SHA-256 排名算法）
+- 逐题 provenance 追踪（`source_sample_id`、`input_sha256`）
+- 纯文本黑盒 API，无 LLM-as-a-Judge
+- 客观评分，固定 denominator
+- CapabilityProfile：`coverage_weight = 0.75`，不重归一化
+- 所有 `calibrated_score` 保持 `None`（v0.3-C 前）
 
 ---
 
