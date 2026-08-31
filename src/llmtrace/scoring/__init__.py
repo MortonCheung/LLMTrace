@@ -20,9 +20,11 @@ from llmtrace.scoring.aggregator import (
     aggregate_dimension_score,
 )
 from llmtrace.scoring.comparison import (
+    COMPARABLE_STATUSES,
     CapabilityComparator,
     ComparisonResult,
     DimensionDiff,
+    comparable_dimensions,
 )
 from llmtrace.scoring.errors import (
     AggregationError,
@@ -32,6 +34,7 @@ from llmtrace.scoring.errors import (
     InvalidPolicyError,
     ReferenceError,
     ReferenceNotFoundError,
+    ScoringPolicyMismatchError,
     SuiteMismatchError,
     SuiteVersionMismatchError,
     TaskRegistrationError,
@@ -63,6 +66,8 @@ __all__ = [
     "CapabilityComparator",
     "ComparisonResult",
     "DimensionDiff",
+    "COMPARABLE_STATUSES",
+    "comparable_dimensions",
     "ReferenceProvenance",
     "ReferenceRepository",
     "ReferenceSnapshot",
@@ -73,6 +78,7 @@ __all__ = [
     "InvalidPolicyError",
     "ReferenceError",
     "ReferenceNotFoundError",
+    "ScoringPolicyMismatchError",
     "SuiteMismatchError",
     "SuiteVersionMismatchError",
     "TaskRegistrationError",

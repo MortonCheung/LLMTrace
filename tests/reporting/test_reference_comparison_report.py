@@ -6,9 +6,16 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
 from llmtrace.scoring.comparison import CapabilityComparator, ComparisonResult
+from llmtrace.scoring.errors import (
+    IncompatibleCoverageError,
+    ScoringPolicyMismatchError,
+    SuiteMismatchError,
+)
 from llmtrace.scoring.models import (
     CapabilityDimension,
     CapabilityProfile,
@@ -169,3 +176,125 @@ class TestHtmlReferenceComparison:
 
         assert "detected as" not in html
         assert "candidate is GPT" not in html
+
+
+class TestIncompatibleComparisonNeverReachesReport:
+    """Fail closed: an incompatible pair must never produce a comparison section.
+
+    The reporting layer only accepts an already-validated ``ComparisonResult``,
+    so the guarantee is that the comparator refuses *before* such an object
+    exists.  These tests exercise the real comparator → report path.
+    """
+
+    def _render_without_comparison(self) -> dict[str, object]:
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path)
+            return dict(json.loads(output_path.read_text()))
+
+    def test_suite_mismatch_produces_no_reference_comparison(self) -> None:
+        with pytest.raises(SuiteMismatchError):
+            CapabilityComparator().compare(
+                _reference_snapshot(),
+                _candidate_profile(),
+                candidate_suite_id="llmtrace_quick_v2",
+                candidate_suite_version="0.1.0",
+                candidate_model_id="candidate-api",
+            )
+        assert "reference_comparison" not in self._render_without_comparison()
+
+    def test_scoring_policy_mismatch_produces_no_reference_comparison(self) -> None:
+        mismatched = CapabilityProfile(
+            scoring_policy_id="another-policy",
+            scoring_policy_version="0.2.0",
+            dimensions=_candidate_profile().dimensions,
+            coverage_weight=0.75,
+        )
+        with pytest.raises(ScoringPolicyMismatchError):
+            CapabilityComparator().compare(
+                _reference_snapshot(),
+                mismatched,
+                candidate_suite_id="llmtrace_quick_v1",
+                candidate_suite_version="0.1.0",
+                candidate_model_id="candidate-api",
+            )
+        assert "reference_comparison" not in self._render_without_comparison()
+
+    def test_unavailable_dimension_produces_no_reference_comparison(self) -> None:
+        """An unmeasured dimension must never appear in a report as a score drop."""
+        dims = tuple(
+            DimensionScoreResult(
+                dimension=dim,
+                status=(
+                    DimensionScoreStatus.UNAVAILABLE
+                    if dim is CapabilityDimension.MATH_SCIENCE
+                    else DimensionScoreStatus.UNCALIBRATED
+                ),
+                raw_normalized_score=score,
+            )
+            for dim, score in _CANDIDATE_SCORES.items()
+        )
+        partial = CapabilityProfile(
+            scoring_policy_id="llmtrace-capability-v1",
+            scoring_policy_version="0.1.0",
+            dimensions=dims,
+            coverage_weight=0.60,
+        )
+        with pytest.raises(IncompatibleCoverageError):
+            CapabilityComparator().compare(
+                _reference_snapshot(),
+                partial,
+                candidate_suite_id="llmtrace_quick_v1",
+                candidate_suite_version="0.1.0",
+                candidate_model_id="candidate-api",
+            )
+        assert "reference_comparison" not in self._render_without_comparison()
+
+
+class TestHtmlEscapingOfComparisonLabels:
+    """Labels are user/model supplied and must be Jinja-escaped in the HTML report."""
+
+    _HOSTILE_A = "<script>alert('a')</script>"
+    _HOSTILE_B = "<img src=x onerror=alert('b')>"
+
+    def _hostile_comparison(self) -> ComparisonResult:
+        snapshot = _reference_snapshot().model_copy(update={"model_id": self._HOSTILE_A})
+        return CapabilityComparator().compare(
+            snapshot,
+            _candidate_profile(),
+            candidate_suite_id="llmtrace_quick_v1",
+            candidate_suite_version="0.1.0",
+            candidate_model_id=self._HOSTILE_B,
+        )
+
+    def test_hostile_reference_label_is_escaped(self) -> None:
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, reference_comparison=self._hostile_comparison())
+            html = output_path.read_text()
+
+        assert "<script>alert" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_hostile_candidate_label_is_escaped(self) -> None:
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.html"
+            generate_html_report(result, output_path, reference_comparison=self._hostile_comparison())
+            html = output_path.read_text()
+
+        assert "<img src=x onerror" not in html
+        assert "&lt;img src=x onerror" in html
+
+    def test_hostile_label_is_escaped_in_json_without_execution(self) -> None:
+        """JSON must carry the raw label verbatim (escaping is an HTML concern only)."""
+        result = _make_minimal_audit_result()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "report.json"
+            generate_json_report(result, output_path, reference_comparison=self._hostile_comparison())
+            data = json.loads(output_path.read_text())
+
+        assert data["reference_comparison"]["model_a"] == self._HOSTILE_A
+        assert data["reference_comparison"]["model_b"] == self._HOSTILE_B

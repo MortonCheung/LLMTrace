@@ -72,11 +72,13 @@
     "provisional_raw_index": 0.657,
     "evidence_refs": [],
     "warnings": [],
-    "metadata": {}
+    "metadata": {
+      "_fixture_note": "TEST FIXTURE ONLY — not a real OpenAI model benchmark result. 'gpt-x' is a placeholder label used by tests; the scores below are synthetic values for exercising the reference comparison pipeline."
+    }
   },
   "provenance": {
-    "source_type": "benchmark_run",
-    "created_by": "llmtrace",
+    "source_type": "test_fixture",
+    "created_by": "llmtrace-test-fixture",
     "created_at": "2026-08-10T00:00:00Z",
     "suite_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
     "benchmark_revision": "quick-v1-2026-08",
