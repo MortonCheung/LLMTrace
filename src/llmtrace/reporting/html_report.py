@@ -7,6 +7,7 @@ from pathlib import Path
 
 from jinja2 import Environment, PackageLoader
 
+from llmtrace.analysis.behavior_drift import BehaviorDriftResult
 from llmtrace.analysis.risk import risk_explanation
 from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
@@ -41,11 +42,69 @@ def _evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
     }
 
 
+def _short_sha(digest: str) -> str:
+    """Return a shortened hash for display; the full digest stays in JSON."""
+    return f"{digest[:12]}…" if len(digest) > 12 else digest
+
+
+def _behavior_drift_to_template_data(drift: BehaviorDriftResult) -> dict[str, object]:
+    """Build Jinja-safe data for the Behavior Drift HTML section.
+
+    Full output hashes are intentionally NOT rendered here — only short
+    identifiers.  All string fields are treated as untrusted and escaped by
+    Jinja autoescape.
+    """
+    return {
+        "baseline_run_id": drift.baseline_run_id,
+        "current_run_id": drift.current_run_id,
+        "target_id": drift.target_id,
+        "candidate_model_id": drift.candidate_model_id,
+        "suite_id": drift.suite_id,
+        "suite_version": drift.suite_version,
+        "policy_id": drift.policy_id,
+        "policy_version": drift.policy_version,
+        "drift_level": drift.drift_level.value,
+        "total_items": drift.total_items,
+        "graded_overlap_count": drift.graded_overlap_count,
+        "graded_overlap_ratio": drift.graded_overlap_ratio,
+        "outcome_changed_count": drift.outcome_changed_count,
+        "status_changed_count": drift.status_changed_count,
+        "output_changed_count": drift.output_changed_count,
+        "response_model_change_count": drift.response_model_change_count,
+        "finish_reason_change_count": drift.finish_reason_change_count,
+        "dimension_diffs": [
+            {
+                "dimension": d.dimension.value,
+                "baseline": d.baseline_score,
+                "current": d.current_score,
+                "delta": d.delta,
+            }
+            for d in drift.dimension_diffs
+        ],
+        "item_diffs": [
+            {
+                "task_id": item.key.task_id,
+                "source_sample_id": item.key.source_sample_id,
+                "input_sha256_short": _short_sha(item.key.input_sha256),
+                "baseline_status": item.baseline_status.value,
+                "current_status": item.current_status.value,
+                "baseline_score": item.baseline_score,
+                "current_score": item.current_score,
+                "score_delta": item.score_delta,
+                "signals": [s.detector_id for s in item.signals if s.changed],
+            }
+            for item in drift.item_diffs
+        ],
+        "warnings": list(drift.warnings),
+    }
+
+
 def generate_html_report(
     result: AuditResult,
     output_path: Path,
     benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
     reference_comparison: ComparisonResult | None = None,
+    behavior_drift: BehaviorDriftResult | None = None,
 ) -> Path:
     """生成 HTML 报告."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +203,10 @@ def generate_html_report(
             ],
         }
 
+    behavior_drift_data: dict[str, object] | None = None
+    if behavior_drift is not None:
+        behavior_drift_data = _behavior_drift_to_template_data(behavior_drift)
+
     html = template.render(
         report_id=result.report_id,
         utc_time=result.start_time.isoformat() if result.start_time else "",
@@ -178,6 +241,7 @@ def generate_html_report(
         rid_rate=f"{len(rid_evidence)}/{len(evidence)}" if evidence else "N/A",
         benchmarks=benchmark_data,
         reference_comparison=reference_comparison_data,
+        behavior_drift=behavior_drift_data,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:

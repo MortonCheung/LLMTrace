@@ -4,7 +4,7 @@ Validates the complete chain:
   FakeProvider → LmEvalAdapter.list_tasks() → build_plan()
   → LmEvalAdapter.run_task() → LmEvalAdapter.normalize_result()
   → BenchmarkRunResult → build_benchmark_report_section()
-  → generate_json_report(schema 1.1)
+  → generate_json_report(schema 1.2)
 
 Full JSON comparison against pre-existing golden fixture.
 Includes evidence closure assertions and UUID monkeypatch isolation.

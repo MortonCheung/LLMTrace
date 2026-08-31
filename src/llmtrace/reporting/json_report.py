@@ -6,6 +6,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from llmtrace.analysis.behavior_drift import BehaviorDriftResult
 from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
@@ -15,7 +16,8 @@ from llmtrace.scoring.comparison import ComparisonResult
 from llmtrace.utilities.hashing import sha256_hash
 
 # Single source of truth for schema version
-SCHEMA_VERSION = "1.1"
+# 1.1 → 1.2: added the optional `behavior_drift` section (v0.3-D).
+SCHEMA_VERSION = "1.2"
 
 
 def evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -79,19 +81,79 @@ def _comparison_to_dict(comparison: ComparisonResult) -> dict[str, object]:
     }
 
 
+def _behavior_drift_to_dict(drift: BehaviorDriftResult) -> dict[str, object]:
+    """将 BehaviorDriftResult 序列化为 behavior_drift 段（不含完整输出文本）."""
+    return {
+        "baseline_run_id": drift.baseline_run_id,
+        "current_run_id": drift.current_run_id,
+        "target_id": drift.target_id,
+        "candidate_model_id": drift.candidate_model_id,
+        "suite_id": drift.suite_id,
+        "suite_version": drift.suite_version,
+        "policy_id": drift.policy_id,
+        "policy_version": drift.policy_version,
+        "drift_level": drift.drift_level.value,
+        "summary": {
+            "total_items": drift.total_items,
+            "graded_overlap_count": drift.graded_overlap_count,
+            "graded_overlap_ratio": drift.graded_overlap_ratio,
+            "outcome_changed_count": drift.outcome_changed_count,
+            "outcome_changed_ratio": drift.outcome_changed_ratio,
+            "status_changed_count": drift.status_changed_count,
+            "status_changed_ratio": drift.status_changed_ratio,
+            "output_changed_count": drift.output_changed_count,
+            "output_changed_ratio": drift.output_changed_ratio,
+            "response_model_change_count": drift.response_model_change_count,
+            "finish_reason_change_count": drift.finish_reason_change_count,
+        },
+        "dimension_drift": [
+            {
+                "dimension": d.dimension.value,
+                "baseline_score": d.baseline_score,
+                "current_score": d.current_score,
+                "delta": d.delta,
+                "absolute_delta": d.absolute_delta,
+            }
+            for d in drift.dimension_diffs
+        ],
+        "item_drift": [
+            {
+                "task_id": item.key.task_id,
+                "source_sample_id": item.key.source_sample_id,
+                "input_sha256": item.key.input_sha256,
+                "baseline_status": item.baseline_status.value,
+                "current_status": item.current_status.value,
+                "baseline_score": item.baseline_score,
+                "current_score": item.current_score,
+                "score_delta": item.score_delta,
+                "outcome_changed": item.outcome_changed,
+                "status_changed": item.status_changed,
+                "output_changed": item.output_changed,
+                "operational_changed": item.operational_changed,
+                "baseline_evidence_refs": list(item.baseline_evidence_refs),
+                "current_evidence_refs": list(item.current_evidence_refs),
+            }
+            for item in drift.item_diffs
+        ],
+        "warnings": list(drift.warnings),
+    }
+
+
 def generate_json_report(
     result: AuditResult,
     output_path: Path,
     benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
     reference_comparison: ComparisonResult | None = None,
+    behavior_drift: BehaviorDriftResult | None = None,
 ) -> Path:
-    """生成 JSON 报告（v1.1 — 支持 benchmark 段).
+    """生成 JSON 报告（v1.2 — 支持 benchmark 与 behavior_drift 段).
 
     Args:
         result: 审计结果.
         output_path: 输出文件路径.
         benchmark_sections: 可选 benchmark 报告段列表.
         reference_comparison: 可选 reference comparison 段（Reference Snapshot vs Candidate）.
+        behavior_drift: 可选 behavior drift 段（BehaviorRunSnapshot vs BehaviorRunSnapshot）.
 
     Returns:
         写入后的输出文件路径.
@@ -152,6 +214,9 @@ def generate_json_report(
 
     if reference_comparison is not None:
         report["reference_comparison"] = _comparison_to_dict(reference_comparison)
+
+    if behavior_drift is not None:
+        report["behavior_drift"] = _behavior_drift_to_dict(behavior_drift)
 
     # 计算内容哈希（包含 benchmarks）
     content_json = json.dumps(report, sort_keys=True, ensure_ascii=False)
