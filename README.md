@@ -4,8 +4,9 @@
 
 ## 当前版本能做什么
 
-当前已完成 v0.1 证据审计 MVP、v0.2 基准评测基础设施，以及 v0.3 能力评测收口
-（item-level 结果、Quick Suite 32 题、Reference Model Snapshot、Behavior Drift Foundation）。
+当前已完成 v0.1 证据审计 MVP、v0.2 基准评测基础设施、v0.3 能力评测收口
+（item-level 结果、Quick Suite 32 题、Reference Model Snapshot、Behavior Drift Foundation），
+以及 v0.3-E 一键统一审计执行链（`llmtrace run`）。
 
 ### v0.1 证据审计（基础能力）
 
@@ -34,6 +35,16 @@
 - **Quick Suite**：四维 32 题固定子集（ARC / HumanEval / GSM8K / IFEval 各 8 题，SHA-256 排名不可 cherry-pick）
 - **Reference Model Snapshot**：不可变、append-only 的参考模型能力画像；`CapabilityComparator` 带 fail-closed Compatibility Gate
 - **Behavior Drift Foundation**：对同一 Target API 两次可比运行做行为漂移分析，区分能力结果 / 回答表现 / 运行状态变化，不可比数据 fail closed
+
+### v0.3-E 统一审计执行链（新增）
+
+- **`llmtrace run`**：一键真实审计——只提供 API 地址、Key 环境变量、声明模型，自动跑通
+  协议审计 → Quick Suite 32 题 → CapabilityProfile → BehaviorRunSnapshot →（可选）历史漂移 / 参考对比 →
+  统一 JSON/HTML 报告 → append-only 本地工件
+- **真实 model 传播**：Quick Suite 使用用户声明的 model，不再硬编码 `test-model`
+- **安全 sandbox fail closed**：HumanEval 生产路径唯一允许 Docker sandbox，Docker 不可用则 preflight 失败、0 次 benchmark 请求
+- **中央 Evidence Recorder + Request Budget**：每个真实 HTTP 请求 exactly-once 记录，总请求数有硬上限
+- **append-only 工件库**：一次执行 = 一个不可变目录（manifest + 报告 + 能力画像 + 行为快照 + benchmark 结果），含 SHA-256 校验
 
 ## 语义边界：LLMTrace 能说什么、不能说什么
 
@@ -67,7 +78,27 @@ pip install -e ".[dev]"
 
 ## 使用示例
 
-### OpenAI-compatible 接口审计
+### 一键统一审计（推荐）
+
+```bash
+export MY_API_KEY="your-key"
+llmtrace run \
+  --protocol openai \
+  --base-url https://api.example.com/v1 \
+  --model claimed-model \
+  --api-key-env MY_API_KEY
+```
+
+一次 `run` 大约包含：协议探针（若干）+ Quick Suite 32 题 benchmark。实际请求数以
+`--dry-run` 为准；运行前会显示预计请求数、最大输出 token ceiling 与预计费用（未知），
+确认后才执行。`--yes` 跳过确认；`--compare-latest`（默认）自动与最新兼容历史运行做 Behavior Drift。
+
+```bash
+# 只显示执行计划，不发送任何请求（0 HTTP、0 工件、不要求 API key 存在）
+llmtrace run --protocol openai --base-url https://api.example.com/v1 --model demo --api-key-env MY_API_KEY --dry-run
+```
+
+### OpenAI-compatible 接口审计（protocol-only，legacy/advanced）
 
 ```bash
 export OPENAI_API_KEY="your-key"
@@ -144,6 +175,9 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 | v0.3-B | Quick Suite 32 题 4 维度（已完成） |
 | v0.3-C | Reference Model Snapshot（已完成） |
 | v0.3-D | Behavior Drift Foundation（已完成） |
-| v0.4 | 官方参考模型对照 |
-| v0.5 | 行为相似度与混合路由 |
-| v0.6 | 简易 Web 前端 |
+| v0.3-E | Unified Execution & Artifact Foundation（已完成：`llmtrace run`） |
+| v0.4 | Reference + Calibration |
+| v0.5 | Fingerprint + Routing |
+| v0.6 | Product Service / Web |
+
+详细权威路线以 [`docs/roadmap.md`](./docs/roadmap.md) 为准。

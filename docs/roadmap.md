@@ -149,21 +149,67 @@ Reference Comparison   != 模型身份识别
 稳定身份逐项对齐 → 插件化 Detector 分离 Outcome/Status/Output/Operational →
 版本化 Policy 得出保守 Drift Result，不可比时 fail closed，结论可回溯 Evidence。√ 已达成。
 
-## v0.4 参考模型对照
+## v0.3-E Unified Execution & Artifact Foundation（已完成）
 
-- ReferenceProfile 参考模型体系
-- 官方 API 实测基线数据
+一键真实审计执行链：用户只提供 API 地址、Key 环境变量与声明模型，`llmtrace run` 从头到尾
+跑通协议审计 + Quick Suite 32 题 + 能力画像 + 行为快照 + 统一报告 + append-only 工件。
+
+### 执行层（`src/llmtrace/execution/`）
+
+- `UnifiedAuditRunner`：PRECHECK → PLAN → PROTOCOL → BENCHMARK → SCORING → SNAPSHOT →
+  HISTORY/REFERENCE COMPARISON → REPORT/ARTIFACT COMMIT，每阶段可独立测试
+- `ProtocolAuditExecutor`：从旧 CLI 抽出的唯一协议编排（旧 `llmtrace audit` 复用同一实现）
+- `QuickSuiteRunner`：四维 32 题执行 service，保留 per-task provenance（不伪造单一 source）
+- `UnifiedExecutionPlan`：请求前构造（协议请求数 + 32 benchmark + 总上限 + 输出 token ceiling +
+  generation_config_sha256 + 需要安全 sandbox）
+- `RequestBudget`：Provider 层执法，请求前 consume，超出 fail closed（失败请求同样计入）
+- `EvidenceRecorder`：Provider 层中央证据收集，每个真实 HTTP 请求 exactly-once，
+  duplicate evidence_id fail closed
+- `RunArtifactRepository`：append-only 文件系统 store（staging + hash + 原子 rename，
+  manifest 最后写），一次执行 = 一个不可变目录
+
+### 关键修复
+
+- **真实 model 传播**：Quick Suite 从 `provider.config.model` 取 model，不再是硬编码 `test-model`；
+  `CLI --model → AuditConfig.model → Provider → QuickSuite → HTTPEvidence.request_model` 全链路一致
+- **安全 sandbox fail closed**：生产路径唯一允许 `DockerCodeExecutionBackend`；
+  Docker 不可用 → preflight fail、0 benchmark 请求；`_InProcessExecutionBackend` 仅单元测试可达
+- **Base URL 脱敏**：`redact_url` 处理 userinfo 凭据与敏感 query 值，report/manifest/console 不再明文泄漏
+
+### 报告
+
+- `SCHEMA_VERSION` 1.2 → 1.3
+- JSON/HTML 新增 `capability_profile` 段（明确 `UNCALIBRATED`，raw/provisional 分数不包装成 0–100）
+- JSON 新增 `execution` 元数据段；HTML 新增 Capability Profile 区域
+- `inspect` 识别 capability_profile / reference_comparison / behavior_drift / execution 段（向后兼容）
+
+### 语义边界
+
+- `llmtrace run` = 推荐一键统一审计；`llmtrace audit` = protocol-only legacy 命令（同一 executor）
+- `llmtrace compare` 仍是旧协议/运维漂移比较，语义不变，不与 Behavior Drift 混为一谈
+- 首次运行无历史 → `behavior_drift = None`（正常，不降级）；历史不兼容 → skip + 不降低 gate
+- 默认不拿测试 fixture 当官方 reference；reference/baseline 必须用户显式提供
+
+- 质量：Ruff + Format + Mypy + Pytest 全量回归 + 新增 execution 层测试
+
+完成标准：`llmtrace run` 一键完成真实审计，全链路可回溯 Evidence，无 secret 落盘，
+不可比数据 fail closed。√ 已达成。
+
+## v0.4 Reference + Calibration
+
+- 官方 Reference Model 体系与实测基线
+- 0–100 Calibration（正式能力分）
 - 声明模型差距与分项差距
-- 版本化参考组
+- 版本化参考组与 LiteLLM ReferenceProvider
 
-## v0.5 行为相似度与混合路由
+## v0.5 Fingerprint + Routing
 
 - 主动指纹题与行为向量
 - Top-K 相似度
 - Model Equality Testing 统计模式
 - 混合路由与跨时间动态降级
 
-## v0.6 简易 Web 前端
+## v0.6 Product Service / Web
 
 - 输入接口与成本确认
 - 开始测试与实时进度
