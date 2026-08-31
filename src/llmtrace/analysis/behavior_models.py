@@ -120,6 +120,18 @@ class BehaviorSuiteMismatchError(BehaviorDriftCompatibilityError):
     error_code = "BEHAVIOR_SUITE_MISMATCH"
 
 
+class BehaviorTargetMismatchError(BehaviorDriftCompatibilityError):
+    """Raised when two snapshots describe different target APIs."""
+
+    error_code = "BEHAVIOR_TARGET_MISMATCH"
+
+
+class BehaviorCandidateModelMismatchError(BehaviorDriftCompatibilityError):
+    """Raised when two snapshots use different candidate model labels."""
+
+    error_code = "BEHAVIOR_CANDIDATE_MODEL_MISMATCH"
+
+
 class BehaviorSuiteVersionMismatchError(BehaviorDriftCompatibilityError):
     error_code = "BEHAVIOR_SUITE_VERSION_MISMATCH"
 
@@ -168,6 +180,12 @@ class ItemEvidenceError(BehaviorSnapshotError):
     """An item's evidence reference is missing, unknown, or ambiguous."""
 
     error_code = "ITEM_EVIDENCE_ERROR"
+
+
+class DuplicateEvidenceError(BehaviorSnapshotError):
+    """Two distinct HTTPEvidence objects share the same evidence_id."""
+
+    error_code = "DUPLICATE_EVIDENCE"
 
 
 # ---------------------------------------------------------------------------

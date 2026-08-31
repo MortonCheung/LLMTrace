@@ -18,6 +18,7 @@ final drift level by themselves — they only emit local ``BehaviorSignal`` s.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -28,6 +29,7 @@ from llmtrace.scoring.models import CapabilityDimension
 
 from .behavior_models import (
     BehaviorAdapterMismatchError,
+    BehaviorCandidateModelMismatchError,
     BehaviorCoverageMismatchError,
     BehaviorDriftLevel,
     BehaviorDriftPolicy,
@@ -39,6 +41,7 @@ from .behavior_models import (
     BehaviorSourceMismatchError,
     BehaviorSuiteMismatchError,
     BehaviorSuiteVersionMismatchError,
+    BehaviorTargetMismatchError,
     GenerationConfigMismatchError,
 )
 
@@ -228,6 +231,14 @@ class DimensionDriftResult(BaseModel):
     current_score: float = Field(..., ge=0.0, le=1.0, description="Current raw_normalized_score")
     delta: float = Field(..., description="current - baseline")
     absolute_delta: float = Field(..., ge=0.0, description="abs(current - baseline)")
+    reliable_for_capability_drift: bool = Field(
+        default=True,
+        description=(
+            "False when the dimension's measurement coverage is not comparable "
+            "(e.g. provider failures / ungraded items), so the delta must not "
+            "drive a MATERIAL capability conclusion"
+        ),
+    )
 
     model_config = {"frozen": True, "extra": "forbid"}
 
@@ -397,6 +408,15 @@ class BehaviorDriftEngine:
     @staticmethod
     def _check_compatibility(baseline: BehaviorRunSnapshot, current: BehaviorRunSnapshot) -> None:
         """Fail closed unless every comparability axis matches, in order."""
+        if current.target_id != baseline.target_id:
+            raise BehaviorTargetMismatchError(
+                f"target mismatch: baseline '{baseline.target_id}' != current '{current.target_id}'"
+            )
+        if current.candidate_model_id != baseline.candidate_model_id:
+            raise BehaviorCandidateModelMismatchError(
+                f"candidate model mismatch: baseline '{baseline.candidate_model_id}' "
+                f"!= current '{current.candidate_model_id}'"
+            )
         if current.suite_id != baseline.suite_id:
             raise BehaviorSuiteMismatchError(
                 f"suite_id mismatch: baseline '{baseline.suite_id}' != current '{current.suite_id}'"
@@ -447,6 +467,13 @@ class BehaviorDriftEngine:
                 f"{sorted(d.value for d in baseline_dims)} != current {sorted(d.value for d in current_dims)}"
             )
 
+        baseline_coverage = baseline.capability_profile.coverage_weight
+        current_coverage = current.capability_profile.coverage_weight
+        if not math.isclose(current_coverage, baseline_coverage, rel_tol=1e-9, abs_tol=1e-9):
+            raise BehaviorCoverageMismatchError(
+                f"coverage_weight mismatch: baseline {baseline_coverage} != current {current_coverage}"
+            )
+
     # -- Dimension drift ---------------------------------------------------
 
     @staticmethod
@@ -454,6 +481,9 @@ class BehaviorDriftEngine:
         baseline: BehaviorRunSnapshot, current: BehaviorRunSnapshot
     ) -> tuple[DimensionDriftResult, ...]:
         current_by_dim = {d.dimension: d for d in current.capability_profile.dimensions}
+        baseline_items_by_task = BehaviorDriftEngine._items_by_task(baseline)
+        current_items_by_task = BehaviorDriftEngine._items_by_task(current)
+
         diffs: list[DimensionDriftResult] = []
         for b_dim in baseline.capability_profile.dimensions:
             c_dim = current_by_dim.get(b_dim.dimension)
@@ -467,9 +497,55 @@ class BehaviorDriftEngine:
                     current_score=c_dim.raw_normalized_score,
                     delta=delta,
                     absolute_delta=abs(delta),
+                    reliable_for_capability_drift=BehaviorDriftEngine._dimension_is_reliable(
+                        b_dim, c_dim, baseline_items_by_task, current_items_by_task
+                    ),
                 )
             )
         return tuple(diffs)
+
+    @staticmethod
+    def _items_by_task(snapshot: BehaviorRunSnapshot) -> dict[str, list[BehaviorItemObservation]]:
+        """Index observations by task_id."""
+        index: dict[str, list[BehaviorItemObservation]] = {}
+        for obs in snapshot.items:
+            index.setdefault(obs.key.task_id, []).append(obs)
+        return index
+
+    @staticmethod
+    def _dimension_is_reliable(
+        b_dim: Any,
+        c_dim: Any,
+        baseline_items_by_task: dict[str, list[BehaviorItemObservation]],
+        current_items_by_task: dict[str, list[BehaviorItemObservation]],
+    ) -> bool:
+        """Whether a dimension's delta reflects capability, not measurement loss.
+
+        A raw score drop is NOT a capability signal when it is accompanied by
+        degraded measurement (unfinished / failed / ungraded items).  The
+        dimension delta is still recorded — it is an auditable fact — but it
+        must not drive a MATERIAL capability conclusion.
+        """
+        # Task-level coverage must be full on both sides.
+        if not (
+            math.isclose(b_dim.task_coverage, 1.0, rel_tol=1e-9, abs_tol=1e-9)
+            and math.isclose(c_dim.task_coverage, 1.0, rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            return False
+        if b_dim.graded_task_count < b_dim.task_count or c_dim.graded_task_count < c_dim.task_count:
+            return False
+
+        # Item-level: every contributing item must be GRADED on both sides.
+        task_ids = set(b_dim.source_task_ids) | set(c_dim.source_task_ids)
+        for task_id in task_ids:
+            for obs in baseline_items_by_task.get(task_id, ()):
+                if obs.status != ItemStatus.GRADED:
+                    return False
+            for obs in current_items_by_task.get(task_id, ()):
+                if obs.status != ItemStatus.GRADED:
+                    return False
+
+        return True
 
     # -- Classification ----------------------------------------------------
 
@@ -495,7 +571,10 @@ class BehaviorDriftEngine:
             )
             return BehaviorDriftLevel.INCONCLUSIVE, warnings
 
-        material_dimension = any(d.absolute_delta >= policy.material_dimension_delta for d in dimension_diffs)
+        material_dimension = any(
+            d.absolute_delta >= policy.material_dimension_delta and d.reliable_for_capability_drift
+            for d in dimension_diffs
+        )
         material_outcome = outcome_changed_ratio >= policy.material_outcome_change_ratio
 
         if material_dimension or material_outcome:

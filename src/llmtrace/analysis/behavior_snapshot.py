@@ -14,6 +14,7 @@ from .behavior_models import (
     BehaviorItemKey,
     BehaviorItemObservation,
     BehaviorRunSnapshot,
+    DuplicateEvidenceError,
     DuplicateItemKeyError,
     ItemEvidenceError,
     MissingItemIdentityError,
@@ -71,7 +72,7 @@ class BehaviorSnapshotBuilder:
 
         suite_id, suite_version, adapter_id, adapter_version = self._uniform_context(run_results)
 
-        evidence_map: dict[str, HTTPEvidence] = {str(ev.evidence_id): ev for ev in evidence}
+        evidence_map = self._build_evidence_map(evidence)
 
         source_pairs = sorted({(rr.source_id, rr.source_revision) for rr in run_results})
         source_ids = tuple(pair[0] for pair in source_pairs)
@@ -152,11 +153,31 @@ class BehaviorSnapshotBuilder:
         return context
 
     @staticmethod
+    def _build_evidence_map(evidence: Sequence[HTTPEvidence]) -> dict[str, HTTPEvidence]:
+        """Build an evidence_id → HTTPEvidence map, rejecting duplicate ids.
+
+        A duplicate evidence_id would otherwise silently last-write-wins, which
+        is exactly the kind of ambiguity a snapshot must not paper over.
+        """
+        evidence_map: dict[str, HTTPEvidence] = {}
+        for ev in evidence:
+            eid = str(ev.evidence_id)
+            if eid in evidence_map:
+                raise DuplicateEvidenceError(f"duplicate evidence_id '{eid}'; each evidence must have a unique id")
+            evidence_map[eid] = ev
+        return evidence_map
+
+    @staticmethod
     def _derive_created_at(run_results: Sequence[BenchmarkRunResult]) -> datetime:
         finished = [r.finished_at for r in run_results if r.finished_at is not None]
         if finished:
             latest = max(finished)
-            return latest.astimezone(UTC) if latest.tzinfo is not None else latest.replace(tzinfo=UTC)
+            if latest.tzinfo is None or latest.tzinfo.utcoffset(latest) is None:
+                raise ValueError(
+                    f"finished_at must be timezone-aware, got naive datetime {latest.isoformat()}; "
+                    f"a historical instant without a timezone cannot be silently interpreted as UTC"
+                )
+            return latest.astimezone(UTC)
         return datetime.now(UTC)
 
     @staticmethod

@@ -84,6 +84,10 @@ def make_profile(
     *,
     statuses: dict[CapabilityDimension, DimensionScoreStatus] | None = None,
     coverage_weight: float = 0.75,
+    task_coverage: float = 1.0,
+    task_count: int = 1,
+    graded_task_count: int = 1,
+    source_task_ids: tuple[str, ...] = (),
 ) -> CapabilityProfile:
     score_map = scores if scores is not None else dict.fromkeys(_ALL_DIMENSIONS, 1.0)
     status_map = statuses or {}
@@ -96,6 +100,10 @@ def make_profile(
                 status=status_map.get(d, DimensionScoreStatus.UNCALIBRATED),
                 raw_normalized_score=score_map.get(d, 0.0),
                 global_weight=_DIM_WEIGHTS[d],
+                task_count=task_count,
+                graded_task_count=graded_task_count,
+                task_coverage=task_coverage,
+                source_task_ids=source_task_ids,
             )
             for d in _ALL_DIMENSIONS
         ),

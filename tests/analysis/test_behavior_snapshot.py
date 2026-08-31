@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
 from llmtrace.analysis.behavior_models import (
+    DuplicateEvidenceError,
     DuplicateItemKeyError,
     ItemEvidenceError,
     MissingItemIdentityError,
@@ -19,6 +21,7 @@ from llmtrace.benchmarks.models import (
     TaskAttempt,
     TaskStatus,
 )
+from llmtrace.models.evidence import HTTPEvidence
 
 from .conftest import (
     DEFAULT_ADAPTER_ID,
@@ -361,3 +364,69 @@ class TestBuilderMultiRun:
         )
         assert snap.created_at.tzinfo is not None
         assert snap.created_at.utcoffset() is not None
+
+
+class TestBuilderTimestampSafety:
+    def _run_with_finished_at(self, finished_at: datetime | None) -> tuple[BenchmarkRunResult, HTTPEvidence]:
+        ev = make_evidence()
+        item = _make_item(item_id="i1", source_sample_id="s1", evidence_refs=[str(ev.evidence_id)])
+        run = _make_run([item]).model_copy(update={"finished_at": finished_at})
+        return run, ev
+
+    def test_aware_finished_at_normalized_to_utc(self) -> None:
+        plus_eight = timezone(timedelta(hours=8))
+        run, ev = self._run_with_finished_at(datetime(2026, 8, 31, 8, 0, tzinfo=plus_eight))
+        snap = _BUILDER.build(
+            run_results=[run],
+            profile=make_profile(),
+            evidence=[ev],
+            target_id="t",
+            candidate_model_id="m",
+            generation_config={"temperature": 0.0},
+        )
+        assert snap.created_at.tzinfo is UTC
+        assert snap.created_at == datetime(2026, 8, 31, 0, 0, tzinfo=UTC)
+
+    def test_naive_finished_at_rejected(self) -> None:
+        run, ev = self._run_with_finished_at(datetime(2026, 8, 31, 8, 0, 0))
+        with pytest.raises(ValueError, match="timezone-aware"):
+            _BUILDER.build(
+                run_results=[run],
+                profile=make_profile(),
+                evidence=[ev],
+                target_id="t",
+                candidate_model_id="m",
+                generation_config={"temperature": 0.0},
+            )
+
+
+class TestBuilderDuplicateEvidence:
+    def test_duplicate_evidence_id_fails_closed(self) -> None:
+        eid = uuid4()
+        ev1 = HTTPEvidence(
+            evidence_id=eid,
+            request_method="POST",
+            request_url_redacted="https://api.example.com",
+            request_path="/",
+            request_headers_redacted={},
+            response_text="one",
+        )
+        ev2 = HTTPEvidence(
+            evidence_id=eid,
+            request_method="POST",
+            request_url_redacted="https://api.example.com",
+            request_path="/",
+            request_headers_redacted={},
+            response_text="two",
+        )
+        item = _make_item(item_id="i1", source_sample_id="s1", evidence_refs=[str(eid)])
+        run = _make_run([item])
+        with pytest.raises(DuplicateEvidenceError):
+            _BUILDER.build(
+                run_results=[run],
+                profile=make_profile(),
+                evidence=[ev1, ev2],
+                target_id="t",
+                candidate_model_id="m",
+                generation_config={"temperature": 0.0},
+            )

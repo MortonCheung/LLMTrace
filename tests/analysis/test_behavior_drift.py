@@ -6,6 +6,7 @@ import pytest
 
 from llmtrace.analysis.behavior_drift import (
     BehaviorAdapterMismatchError,
+    BehaviorCandidateModelMismatchError,
     BehaviorCoverageMismatchError,
     BehaviorDriftEngine,
     BehaviorDriftLevel,
@@ -15,6 +16,7 @@ from llmtrace.analysis.behavior_drift import (
     BehaviorSourceMismatchError,
     BehaviorSuiteMismatchError,
     BehaviorSuiteVersionMismatchError,
+    BehaviorTargetMismatchError,
     GenerationConfigMismatchError,
 )
 from llmtrace.analysis.behavior_models import BehaviorDriftPolicy
@@ -125,6 +127,28 @@ class TestCompatibilityGate:
         )
         with pytest.raises(BehaviorCoverageMismatchError):
             _compare(a, b)
+
+    def test_target_id_mismatch_fails_closed(self) -> None:
+        a = make_snapshot(items=_4_ITEMS, target_id="target-a")
+        b = make_snapshot(items=_4_ITEMS, target_id="target-b")
+        with pytest.raises(BehaviorTargetMismatchError) as excinfo:
+            _compare(a, b)
+        assert excinfo.value.error_code == "BEHAVIOR_TARGET_MISMATCH"
+
+    def test_candidate_model_id_mismatch_fails_closed(self) -> None:
+        a = make_snapshot(items=_4_ITEMS, candidate_model_id="gpt-x")
+        b = make_snapshot(items=_4_ITEMS, candidate_model_id="claude-x")
+        with pytest.raises(BehaviorCandidateModelMismatchError) as excinfo:
+            _compare(a, b)
+        assert excinfo.value.error_code == "BEHAVIOR_CANDIDATE_MODEL_MISMATCH"
+
+    def test_same_comparable_keys_but_different_coverage_weight_fails_closed(self) -> None:
+        """coverage_weight must match even when comparable dimension keys do."""
+        a = make_snapshot(items=_4_ITEMS, profile=make_profile(coverage_weight=0.75))
+        b = make_snapshot(items=_4_ITEMS, profile=make_profile(coverage_weight=0.60))
+        with pytest.raises(BehaviorCoverageMismatchError) as excinfo:
+            _compare(a, b)
+        assert excinfo.value.error_code == "BEHAVIOR_COVERAGE_MISMATCH"
 
 
 # ===========================================================================
@@ -357,6 +381,67 @@ class TestNoFakeDowngrade:
         # Outcome drift only counts the 3 graded-in-both items — all unchanged.
         assert result.outcome_changed_count == 0
         assert result.outcome_changed_ratio == 0.0
+
+    def test_provider_failure_cannot_drive_material_capability_drift(self) -> None:
+        """A dimension delta caused by provider failures must not read as MATERIAL.
+
+        This is the DimensionDrift path: fixed-denominator scoring lowers the
+        raw dimension score when items fail, but that is measurement loss, not
+        a capability drop.  The delta is recorded, marked unreliable, and the
+        run is classified by its status degradation instead.
+        """
+        task_ids = ("gsm8k_quick_v1",)
+        base_items = _4_ITEMS
+        current_items = [
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s0", "status": ItemStatus.GRADED, "score": 1.0},
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s1", "status": ItemStatus.GRADED, "score": 1.0},
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s2", "status": ItemStatus.FAILURE},
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s3", "status": ItemStatus.FAILURE},
+        ]
+        # Baseline: full measurement, math = 1.0.
+        baseline = make_snapshot(
+            items=base_items,
+            profile=make_profile({CapabilityDimension.MATH_SCIENCE: 1.0}, source_task_ids=task_ids),
+        )
+        # Current: fixed-denominator raw score dropped below the MATERIAL threshold.
+        current = make_snapshot(
+            items=current_items,
+            profile=make_profile({CapabilityDimension.MATH_SCIENCE: 0.5}, source_task_ids=task_ids),
+        )
+        result = _compare(baseline, current)
+
+        math_diff = next(d for d in result.dimension_diffs if d.dimension == CapabilityDimension.MATH_SCIENCE)
+        # Raw delta is still recorded — it is an auditable fact.
+        assert math_diff.delta == pytest.approx(-0.5)
+        # But it must not be treated as capability drift.
+        assert math_diff.reliable_for_capability_drift is False
+        assert result.drift_level != BehaviorDriftLevel.MATERIAL_DRIFT
+        # The degradation surfaces as status changes instead.
+        assert result.status_changed_count == 2
+
+    def test_correct_to_wrong_still_triggers_material(self) -> None:
+        """Both sides fully graded + real score drop → still MATERIAL."""
+        task_ids = ("gsm8k_quick_v1",)
+        base_items = _4_ITEMS
+        current_items = [
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s0", "status": ItemStatus.GRADED, "score": 0.0},
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s1", "status": ItemStatus.GRADED, "score": 0.0},
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s2", "status": ItemStatus.GRADED, "score": 1.0},
+            {"task_id": "gsm8k_quick_v1", "source_sample_id": "s3", "status": ItemStatus.GRADED, "score": 1.0},
+        ]
+        baseline = make_snapshot(
+            items=base_items,
+            profile=make_profile({CapabilityDimension.MATH_SCIENCE: 1.0}, source_task_ids=task_ids),
+        )
+        current = make_snapshot(
+            items=current_items,
+            profile=make_profile({CapabilityDimension.MATH_SCIENCE: 0.5}, source_task_ids=task_ids),
+        )
+        result = _compare(baseline, current)
+
+        math_diff = next(d for d in result.dimension_diffs if d.dimension == CapabilityDimension.MATH_SCIENCE)
+        assert math_diff.reliable_for_capability_drift is True
+        assert result.drift_level == BehaviorDriftLevel.MATERIAL_DRIFT
 
 
 # ===========================================================================
