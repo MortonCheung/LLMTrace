@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from jinja2 import Environment, PackageLoader
 
@@ -15,7 +16,7 @@ from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.scoring.comparison import ComparisonResult
 from llmtrace.scoring.models import CapabilityProfile
-from llmtrace.security.redaction import redact_url
+from llmtrace.security.redaction import SecretScrubber, redact_url
 
 
 def _evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -129,8 +130,14 @@ def generate_html_report(
     reference_comparison: ComparisonResult | None = None,
     behavior_drift: BehaviorDriftResult | None = None,
     capability_profile: CapabilityProfile | None = None,
+    secret_scrubber: SecretScrubber | None = None,
 ) -> Path:
-    """生成 HTML 报告."""
+    """生成 HTML 报告.
+
+    When ``secret_scrubber`` is provided, the full template context is
+    scrubbed *before* rendering — a known secret can never reach the
+    persisted HTML, neither raw nor as an autoescaped representation.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Enforce evidence reference integrity before generating report
@@ -235,13 +242,13 @@ def generate_html_report(
     if capability_profile is not None:
         capability_profile_data = _capability_profile_to_template_data(capability_profile)
 
-    html = template.render(
-        report_id=result.report_id,
-        utc_time=result.start_time.isoformat() if result.start_time else "",
-        llmtrace_version=result.llmtrace_version,
-        python_version=result.python_version,
-        platform=result.platform,
-        config={
+    context: dict[str, object] = {
+        "report_id": result.report_id,
+        "utc_time": result.start_time.isoformat() if result.start_time else "",
+        "llmtrace_version": result.llmtrace_version,
+        "python_version": result.python_version,
+        "platform": result.platform,
+        "config": {
             "base_url": redact_url(result.config.base_url),
             "protocol": result.config.protocol.value,
             "model": result.config.model,
@@ -249,9 +256,9 @@ def generate_html_report(
             "timeout": result.config.timeout,
             "max_output_tokens": result.config.max_output_tokens,
         },
-        risk_level=result.risk_level.value,
-        risk_explanation=risk_explanation(result.risk_level),
-        findings=[
+        "risk_level": result.risk_level.value,
+        "risk_explanation": risk_explanation(result.risk_level),
+        "findings": [
             {
                 "probe_name": f.probe_name,
                 "status": f.status.value,
@@ -262,16 +269,23 @@ def generate_html_report(
             }
             for f in result.findings
         ],
-        evidence=[_evidence_to_dict(e) for e in result.evidence],
-        response_models=sorted(models),
-        fingerprints=result.schema_fingerprints,
-        token_rate=f"{len(token_evidence)}/{len(evidence)}" if evidence else "N/A",
-        rid_rate=f"{len(rid_evidence)}/{len(evidence)}" if evidence else "N/A",
-        benchmarks=benchmark_data,
-        reference_comparison=reference_comparison_data,
-        behavior_drift=behavior_drift_data,
-        capability_profile=capability_profile_data,
-    )
+        "evidence": [_evidence_to_dict(e) for e in result.evidence],
+        "response_models": sorted(models),
+        "fingerprints": result.schema_fingerprints,
+        "token_rate": f"{len(token_evidence)}/{len(evidence)}" if evidence else "N/A",
+        "rid_rate": f"{len(rid_evidence)}/{len(evidence)}" if evidence else "N/A",
+        "benchmarks": benchmark_data,
+        "reference_comparison": reference_comparison_data,
+        "behavior_drift": behavior_drift_data,
+        "capability_profile": capability_profile_data,
+    }
+
+    # Scrub the full context BEFORE template rendering: a known secret must
+    # never reach the persisted HTML in any representation (raw or escaped).
+    if secret_scrubber is not None:
+        context = cast("dict[str, object]", secret_scrubber.scrub(context))
+
+    html = template.render(context)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)

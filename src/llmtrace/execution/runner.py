@@ -44,7 +44,7 @@ from llmtrace.scoring.errors import ScoringError
 from llmtrace.scoring.models import CapabilityProfile
 from llmtrace.scoring.policy import CapabilityScoringPolicy
 from llmtrace.scoring.reference import ReferenceSnapshot
-from llmtrace.security.redaction import SecretScrubber
+from llmtrace.security.redaction import SecretScrubber, extract_url_secret_values
 
 if TYPE_CHECKING:
     from llmtrace.config import AuditConfig
@@ -60,6 +60,17 @@ class PreflightError(Exception):
     """
 
     error_code = "PREFLIGHT_FAILURE"
+
+
+class SerializationBoundaryError(Exception):
+    """Raised when a known secret survives canonical report serialization.
+
+    The report serializers scrub before hashing / template rendering; if a
+    known secret still reaches the serialized bytes, the boundary leaked and
+    we fail closed instead of persisting stale-hash or leaky artifacts.
+    """
+
+    error_code = "SERIALIZATION_BOUNDARY_FAILURE"
 
 
 class UnifiedRunRequest(BaseModel):
@@ -117,10 +128,11 @@ class UnifiedAuditRunner:
         self._max_wall_seconds = max_wall_seconds
         self._recorder = InMemoryEvidenceRecorder()
         self._policy = CapabilityScoringPolicy.create_v1()
-        # Output-boundary scrubber: the known API key must never reach a
-        # persisted artifact, whichever side (request or response) it leaks
-        # from.
-        self._scrubber = SecretScrubber([api_key])
+        # Output-boundary scrubber: known secrets are the API key plus every
+        # secret value embedded in the endpoint URL (userinfo credentials and
+        # sensitive query parameters).  They must never reach a persisted
+        # artifact, whichever side (request or response) they leak from.
+        self._scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         self._budget: RequestBudget | None = None
 
     @property
@@ -535,6 +547,9 @@ class UnifiedAuditRunner:
                 behavior_drift=result.behavior_drift,
                 capability_profile=result.capability_profile,
                 execution_metadata=self._execution_metadata(result, actual_requests),
+                # Scrub belongs to canonical serialization: report content_hash
+                # is computed from the already-scrubbed structure.
+                secret_scrubber=self._scrubber,
             )
             html_path = generate_html_report(
                 result.protocol_audit,
@@ -543,9 +558,20 @@ class UnifiedAuditRunner:
                 reference_comparison=result.reference_comparison,
                 behavior_drift=result.behavior_drift,
                 capability_profile=result.capability_profile,
+                secret_scrubber=self._scrubber,
             )
-            artifacts["report.json"] = scrub(json_path.read_text(encoding="utf-8"))
-            artifacts["report.html"] = scrub(html_path.read_text(encoding="utf-8"))
+            json_content = json_path.read_text(encoding="utf-8")
+            html_content = html_path.read_text(encoding="utf-8")
+            # Defensive boundary check: canonical serialization must already
+            # have scrubbed every known secret.  If one survives into the
+            # final serialized bytes, the boundary leaked — fail closed rather
+            # than persist stale-hash / leaky content.
+            if scrub(json_content) != json_content:
+                raise SerializationBoundaryError("known secret survived JSON canonical serialization")
+            if scrub(html_content) != html_content:
+                raise SerializationBoundaryError("known secret survived HTML template rendering")
+            artifacts["report.json"] = json_content
+            artifacts["report.html"] = html_content
 
         if result.capability_profile is not None:
             artifacts["capability_profile.json"] = scrub(result.capability_profile.model_dump_json(indent=2))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
@@ -18,6 +19,7 @@ from llmtrace.execution.models import UnifiedRunStatus
 from llmtrace.execution.runner import PreflightError, UnifiedAuditRunner
 from llmtrace.providers.factory import create_provider
 from llmtrace.providers.openai_compatible import OpenAICompatibleProvider
+from llmtrace.utilities.hashing import sha256_hash
 
 from .conftest import TrustedFakeBackend
 
@@ -700,3 +702,177 @@ class TestMergeBlockerRegressions:
         assert _plan_id("http://host.example.com/v1?api_key=aaa") == _plan_id("http://host.example.com/v1?api_key=bbb")
         # A genuinely different endpoint must still be a different identity.
         assert _plan_id("http://host.example.com/v1") != _plan_id("http://host.example.com/v2")
+
+
+# ---------------------------------------------------------------------------
+# PR #16 provenance blocker: scrub MUST precede content_hash, and known
+# secrets include base_url credentials — not only the API key.
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceBoundaryScrubbing:
+    def _runner(self, config: AuditConfig, repo: RunArtifactRepository, **kwargs: object) -> UnifiedAuditRunner:
+        return UnifiedAuditRunner(
+            config,
+            api_key=API_KEY,
+            target_id=TARGET_ID,
+            repository=repo,
+            code_backend=TrustedFakeBackend(),
+            **kwargs,
+        )
+
+    @staticmethod
+    def _assert_no_secret_in_directory(run_dir: Path, secrets: Sequence[str]) -> None:
+        for artifact in run_dir.iterdir():
+            text = artifact.read_text(encoding="utf-8")
+            for secret in secrets:
+                assert secret not in text, f"leak of {secret!r} in {artifact.name}"
+
+    @pytest.mark.asyncio
+    async def test_scrubbed_report_content_hash_is_valid(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        """The persisted report's content_hash must describe the persisted bytes.
+
+        A malicious server echoes the API key into a response header, a JSON
+        field and the response text.  The report's own content_hash must be
+        recomputable from the *scrubbed* persisted JSON — proving scrubbing
+        happened before hashing, not after serialization.
+        """
+        repo = RunArtifactRepository(tmp_path)
+        body = _completion_json(f"The answer is (A) {API_KEY}. The answer is 42.")
+        body["echoed_secret"] = API_KEY
+        with respx.mock as mock:
+            mock.get("http://test.example.com/v1/models").respond(
+                status_code=200, json=_models_json(), headers={"x-debug": API_KEY}
+            )
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json=body,
+                headers={"x-debug": API_KEY, "content-type": "application/json"},
+            )
+            result = await self._runner(config, repo).run()
+
+        run_dir = tmp_path / "runs" / result.execution_id
+        # 1. The raw secret never reaches any persisted artifact.
+        self._assert_no_secret_in_directory(run_dir, [API_KEY])
+        assert all(API_KEY not in w for w in result.warnings)
+
+        # 2. Recompute the report's canonical content_hash from the persisted
+        #    bytes: restore the pre-hash state (meta.content_hash == "" and no
+        #    top-level content_hash key), canonical dumps, SHA-256.
+        report_path = run_dir / "report.json"
+        persisted = json.loads(report_path.read_text(encoding="utf-8"))
+        expected = persisted["content_hash"]
+        assert persisted["meta"]["content_hash"] == expected
+        persisted["meta"]["content_hash"] = ""
+        del persisted["content_hash"]
+        canonical = json.dumps(persisted, sort_keys=True, ensure_ascii=False)
+        assert sha256_hash(canonical) == expected
+
+    @pytest.mark.asyncio
+    async def test_base_url_secret_echo_never_persisted(self, api_key_env: None, tmp_path: Path) -> None:
+        """Base-url credentials (userinfo password + token) are known secrets.
+
+        The server echoes the URL credentials and the API key back; none of
+        them may reach any persisted artifact, while the redacted endpoint
+        keeps its canonical shape.
+        """
+        from llmtrace.security.redaction import extract_url_secret_values, redact_url
+
+        url_password = "base-url-secret-password"
+        url_token = "base-url-secret-token"
+        base_url = f"http://{url_password}:{url_token}@test.example.com/v1"
+        config = AuditConfig(
+            protocol=Protocol.OPENAI,
+            base_url=base_url,
+            model="my-real-model",
+            api_key_env="TEST_KEY",
+            repeat_count=1,
+            max_output_tokens=64,
+            check_streaming=False,
+            output_dir="reports",
+        )
+        repo = RunArtifactRepository(tmp_path)
+        body = _completion_json("The answer is (A). The answer is 42.")
+        body["echoed_password"] = url_password
+        body["echoed_token"] = url_token
+        echo_headers = {"x-echo-p": url_password, "x-echo-t": url_token}
+        with respx.mock as mock:
+            mock.get("http://test.example.com/v1/models").respond(
+                status_code=200, json=_models_json(), headers=echo_headers
+            )
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json=body,
+                headers={**echo_headers, "content-type": "application/json"},
+            )
+            result = await self._runner(config, repo).run()
+
+        run_dir = tmp_path / "runs" / result.execution_id
+        self._assert_no_secret_in_directory(run_dir, [API_KEY, url_password, url_token])
+
+        # The redacted endpoint keeps its host/path but never the credentials.
+        manifest = repo.load_manifest(result.execution_id)
+        assert manifest.base_url_redacted == "http://[REDACTED]@test.example.com/v1"
+        assert url_password not in manifest.base_url_redacted
+        assert url_token not in manifest.base_url_redacted
+
+        # Unit-level: sensitive query values are collected (raw + decoded),
+        # non-sensitive values are not; redaction preserves non-sensitive keys.
+        url = "http://user:password123@host.example.com/v1?token=abc123&region=us&apikey=xyz%20z"
+        secrets = extract_url_secret_values(url)
+        assert "password123" in secrets
+        assert "abc123" in secrets
+        assert "xyz z" in secrets  # URL-decoded value
+        assert "us" not in secrets
+        assert "region" not in secrets
+        redacted = redact_url(url)
+        assert "region=us" in redacted
+        for secret in ("password123", "abc123", "xyz z"):
+            assert secret not in redacted
+
+    @pytest.mark.asyncio
+    async def test_html_escaped_secret_never_persisted(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        """HTML-special-character secrets never appear even in escaped form.
+
+        If a secret reached the template it would survive a plain raw-string
+        grep as its autoescaped representation (&lt; etc.).  Scrub-before-
+        render must keep both forms out of the persisted HTML.
+        """
+        special_key = "sk-html<b>\"&x'"
+        repo = RunArtifactRepository(tmp_path)
+        body = _completion_json(f"The answer is (A) {special_key}. The answer is 42.")
+        body["echoed_secret"] = special_key
+        with respx.mock as mock:
+            mock.get("http://test.example.com/v1/models").respond(
+                status_code=200, json=_models_json(), headers={"x-debug": special_key}
+            )
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json=body,
+                headers={"x-debug": special_key, "content-type": "application/json"},
+            )
+            result = await UnifiedAuditRunner(
+                config,
+                api_key=special_key,
+                target_id=TARGET_ID,
+                repository=repo,
+                code_backend=TrustedFakeBackend(),
+            ).run()
+
+        run_dir = tmp_path / "runs" / result.execution_id
+        self._assert_no_secret_in_directory(run_dir, [special_key])
+
+        html = (run_dir / "report.html").read_text(encoding="utf-8")
+        escaped = (
+            special_key.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#x27;")
+        )
+        assert escaped not in html, "escaped secret representation leaked into HTML"
+        assert "[REDACTED_SECRET]" in html  # scrubbed content is rendered instead

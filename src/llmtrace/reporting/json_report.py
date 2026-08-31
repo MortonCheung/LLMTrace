@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from llmtrace.analysis.behavior_drift import BehaviorDriftResult
 from llmtrace.models.audit import AuditResult
@@ -14,7 +15,7 @@ from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.scoring.comparison import ComparisonResult
 from llmtrace.scoring.models import CapabilityProfile
-from llmtrace.security.redaction import redact_url
+from llmtrace.security.redaction import SecretScrubber, redact_url
 from llmtrace.utilities.hashing import sha256_hash
 
 # Single source of truth for schema version
@@ -181,6 +182,7 @@ def generate_json_report(
     behavior_drift: BehaviorDriftResult | None = None,
     capability_profile: CapabilityProfile | None = None,
     execution_metadata: dict[str, object] | None = None,
+    secret_scrubber: SecretScrubber | None = None,
 ) -> Path:
     """生成 JSON 报告（v1.3 — 支持 benchmark / behavior_drift / capability_profile 段).
 
@@ -190,6 +192,9 @@ def generate_json_report(
         benchmark_sections: 可选 benchmark 报告段列表.
         reference_comparison: 可选 reference comparison 段（Reference Snapshot vs Candidate）.
         behavior_drift: 可选 behavior drift 段（BehaviorRunSnapshot vs BehaviorRunSnapshot）.
+        secret_scrubber: 可选持久化边界 scrubber；若提供，则在 content_hash
+            计算**之前**对完整 report 结构做精确值脱敏，保证 hash 描述的就是
+            实际落盘的字节.
 
     Returns:
         写入后的输出文件路径.
@@ -259,6 +264,12 @@ def generate_json_report(
 
     if execution_metadata is not None:
         report["execution"] = execution_metadata
+
+    # Canonical secret redaction happens BEFORE content_hash is computed:
+    # the hash must describe exactly the bytes that will be persisted, so a
+    # response-side secret echo can never create a hash/bytes mismatch.
+    if secret_scrubber is not None:
+        report = cast("dict[str, object]", secret_scrubber.scrub(report))
 
     # 计算内容哈希（包含 benchmarks）
     content_json = json.dumps(report, sort_keys=True, ensure_ascii=False)

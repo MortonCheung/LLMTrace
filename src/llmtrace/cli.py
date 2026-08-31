@@ -34,7 +34,7 @@ from llmtrace.reporting.console import (
 )
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
-from llmtrace.security.redaction import SecretScrubber, check_api_key
+from llmtrace.security.redaction import SecretScrubber, check_api_key, extract_url_secret_values
 
 app = typer.Typer(
     name="llmtrace",
@@ -141,9 +141,10 @@ def audit(
             import traceback
 
             traceback.print_exc()
-        # Non-debug error output crosses a display boundary — scrub the
-        # in-memory API key in case the exception echoes it.
-        print_error(SecretScrubber([api_key]).scrub_text(str(e)), "审计执行", partial=True)
+        # Non-debug error output crosses a display boundary — scrub every known
+        # secret (API key + base_url credentials) in case the exception echoes it.
+        scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
+        print_error(scrubber.scrub_text(str(e)), "审计执行", partial=True)
         raise typer.Exit(code=1)
 
     result = outcome.result
@@ -151,8 +152,12 @@ def audit(
     json_path = config.output_dir / f"{result.report_id}.json"
     html_path = config.output_dir / f"{result.report_id}.html"
 
+    # Same serialization-boundary discipline as the unified runner: scrub
+    # belongs to canonical serialization (before content_hash), so legacy
+    # reports never persist stale-hash content either.
+    scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
     try:
-        generate_json_report(result, json_path)
+        generate_json_report(result, json_path, secret_scrubber=scrubber)
     except Exception:
         if debug:
             import traceback
@@ -160,7 +165,7 @@ def audit(
             traceback.print_exc()
 
     try:
-        generate_html_report(result, html_path)
+        generate_html_report(result, html_path, secret_scrubber=scrubber)
     except Exception:
         if debug:
             import traceback
@@ -286,9 +291,10 @@ def run(
             import traceback
 
             traceback.print_exc()
-        # Non-debug error output crosses a display boundary — scrub the
-        # in-memory API key in case the exception echoes it.
-        print_error(SecretScrubber([api_key]).scrub_text(str(exc)), "统一执行", partial=True)
+        # Non-debug error output crosses a display boundary — scrub every known
+        # secret (API key + base_url credentials) in case the exception echoes it.
+        scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
+        print_error(scrubber.scrub_text(str(exc)), "统一执行", partial=True)
         raise typer.Exit(code=1)
 
     artifact_paths = {

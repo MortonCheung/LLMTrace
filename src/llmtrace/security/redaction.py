@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 # 需要脱敏的请求头
 SENSITIVE_HEADERS = {"authorization", "x-api-key", "api-key", "cookie", "set-cookie"}
@@ -70,6 +70,43 @@ def redact_url(url: str) -> str:
     new_query = "&".join(new_query_parts)
     new_parsed = parsed._replace(query=new_query, netloc=netloc)
     return urlunparse(new_parsed)
+
+
+def extract_url_secret_values(url: str) -> tuple[str, ...]:
+    """Extract known secret *values* embedded in a URL.
+
+    Covers both userinfo credentials (``https://user:password@host/`` — both
+    segments are treated as credentials) and the values of sensitive query
+    parameters (``?token=abc``).  ``SENSITIVE_QUERY_KEYS`` is the single
+    source of truth for which query parameters are secret — never duplicated.
+
+    Both the URL-decoded and the raw (encoded) form of each value are
+    collected, because a server may echo either back.  Non-sensitive query
+    values (e.g. ``region=us``) are deliberately excluded.
+    """
+    parsed = urlparse(url)
+    secrets: list[str] = []
+
+    if "@" in parsed.netloc:
+        # userinfo sits before the last '@'; split user / password on the
+        # first ':' of that segment (usernames and passwords both live in
+        # the credential zone and may be echoed back by an untrusted host).
+        userinfo = parsed.netloc.rsplit("@", 1)[0]
+        for credential in userinfo.split(":", 1):
+            if credential:
+                secrets.append(unquote(credential))
+
+    if parsed.query:
+        for raw_part in parsed.query.split("&"):
+            raw_key, sep, raw_value = raw_part.partition("=")
+            if not sep:
+                continue
+            if raw_key.lower() in SENSITIVE_QUERY_KEYS:
+                secrets.append(unquote(raw_value))
+                if raw_value:
+                    secrets.append(raw_value)
+
+    return tuple(dict.fromkeys(s for s in secrets if s))
 
 
 def redact_json_body(body: dict[str, Any] | None) -> dict[str, Any] | None:
