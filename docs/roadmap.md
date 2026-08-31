@@ -62,9 +62,22 @@
 
 完成标准：四维全部 8/8 满分闭环 `provisional_raw_index = 0.75`。√ 已达成。
 
-## v0.3-C Reference Calibration（规划中）
+## v0.3-C Reference Model Snapshot（已完成）
 
-> 注：Reference Calibration 是正式 0–100 能力分的必要条件。当前 `calibrated_score = None`。
+- `ReferenceSnapshot`：不可变、追加式参考模型能力画像（`snapshot_id` / `model_id` / `provider_id` / `suite_id` / `suite_version` / `capability_profile` / `provenance`）
+- `ReferenceProvenance`：可审计溯源（`source_type` / `created_by` / `created_at` / `suite_sha256` / `benchmark_revision` / `runner_version`）
+- `ReferenceRepository`：JSON fixture 存储（`save` / `get` / `list` / `find_by_model`），重复 `snapshot_id` 拒绝
+- `CapabilityComparator` + `ComparisonResult` + `DimensionDiff`：参考画像 vs 候选画像逐维度比较（`delta = candidate − reference`）
+- 强制一致：suite_id / suite_version / 维度覆盖不一致分别抛 `SuiteMismatchError` / `SuiteVersionMismatchError` / `IncompatibleCoverageError`
+- 不输出身份结论（只说 lower/higher），无 0–100 评分，无 Calibration
+- JSON `reference_comparison` 段 + HTML Reference Comparison 区域，保持 UNCALIBRATED 警告
+- 质量：Ruff + Format + Mypy + Pytest + Coverage 门禁通过
+
+完成标准：第一套 Reference Model Snapshot 与能力比较基础设施落地。√ 已达成。
+
+## v0.3-D Behavior Drift Detection（规划中）
+
+> 注：v0.3-C 明确不包含 Calibration 与模型身份识别。正式 0–100 能力分与 Calibration 不在本阶段。
 
 ## v0.4 参考模型对照
 

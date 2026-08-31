@@ -19,9 +19,21 @@ from llmtrace.scoring.aggregator import (
     aggregate_capability_profile,
     aggregate_dimension_score,
 )
+from llmtrace.scoring.comparison import (
+    CapabilityComparator,
+    ComparisonResult,
+    DimensionDiff,
+)
 from llmtrace.scoring.errors import (
     AggregationError,
+    ComparisonError,
+    DuplicateSnapshotError,
+    IncompatibleCoverageError,
     InvalidPolicyError,
+    ReferenceError,
+    ReferenceNotFoundError,
+    SuiteMismatchError,
+    SuiteVersionMismatchError,
     TaskRegistrationError,
 )
 from llmtrace.scoring.models import (
@@ -32,6 +44,11 @@ from llmtrace.scoring.models import (
     TaskScoringSpec,
 )
 from llmtrace.scoring.policy import CapabilityScoringPolicy
+from llmtrace.scoring.reference import (
+    ReferenceProvenance,
+    ReferenceRepository,
+    ReferenceSnapshot,
+)
 
 __all__ = [
     "CapabilityDimension",
@@ -43,7 +60,20 @@ __all__ = [
     "TaskScoringSpec",
     "aggregate_capability_profile",
     "aggregate_dimension_score",
+    "CapabilityComparator",
+    "ComparisonResult",
+    "DimensionDiff",
+    "ReferenceProvenance",
+    "ReferenceRepository",
+    "ReferenceSnapshot",
     "AggregationError",
+    "ComparisonError",
+    "DuplicateSnapshotError",
+    "IncompatibleCoverageError",
     "InvalidPolicyError",
+    "ReferenceError",
+    "ReferenceNotFoundError",
+    "SuiteMismatchError",
+    "SuiteVersionMismatchError",
     "TaskRegistrationError",
 ]
