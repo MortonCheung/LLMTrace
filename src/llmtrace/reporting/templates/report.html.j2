@@ -197,11 +197,32 @@
     {% endfor %}
   </div>
 {% endfor %}
-
-<h2>8. 限制和免责声明</h2>
-{% else %}
-<h2>7. 限制和免责声明</h2>
 {% endif %}
+
+{% if reference_comparison %}
+<h2>{{ (7 if benchmarks else 6) + 1 }}. Reference Comparison</h2>
+<div class="meta">
+  <p>Reference Snapshot: {{ reference_comparison.reference_snapshot }}</p>
+  <p>Suite: {{ reference_comparison.suite_id }} {{ reference_comparison.suite_version }}</p>
+  <p>Reference (label): {{ reference_comparison.model_a }} | Candidate (label): {{ reference_comparison.model_b }}</p>
+</div>
+<table>
+  <tr><th>Dimension</th><th>Reference</th><th>Candidate</th><th>Delta</th></tr>
+  {% for d in reference_comparison.dimension_diffs %}
+  <tr>
+    <td>{{ d.dimension }}</td>
+    <td>{{ "%.4f"|format(d.reference) }}</td>
+    <td>{{ "%.4f"|format(d.candidate) }}</td>
+    <td>{{ "%+.4f"|format(d.delta) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="disclaimer">
+  <strong>UNCALIBRATED：</strong>Reference Comparison 不是 Calibration。差异仅表示候选在各维度相对参考画像的高低，不构成模型身份结论，也不是 0–100 正式评分。
+</div>
+{% endif %}
+
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + 1 }}. 限制和免责声明</h2>
 <div class="disclaimer">
   <h3>重要限制</h3>
   <ul>

@@ -62,9 +62,44 @@
 
 完成标准：四维全部 8/8 满分闭环 `provisional_raw_index = 0.75`。√ 已达成。
 
-## v0.3-C Reference Calibration（规划中）
+## v0.3-C Reference Model Snapshot（已完成）
 
-> 注：Reference Calibration 是正式 0–100 能力分的必要条件。当前 `calibrated_score = None`。
+- `ReferenceSnapshot`：不可变、追加式参考模型能力画像（`snapshot_id` / `model_id` / `provider_id` / `suite_id` / `suite_version` / `capability_profile` / `provenance`）
+- `ReferenceProvenance`：可审计溯源（`source_type` / `created_by` / `created_at` / `suite_sha256` / `benchmark_revision` / `runner_version`）
+- `ReferenceRepository`：JSON fixture 存储（`save` / `get` / `list` / `find_by_model`），重复 `snapshot_id` 拒绝
+- `CapabilityComparator` + `ComparisonResult` + `DimensionDiff`：参考画像 vs 候选画像逐维度比较（`delta = candidate − reference`）
+- 不输出身份结论（只说 lower/higher），无 0–100 评分，无 Calibration
+- JSON `reference_comparison` 段 + HTML Reference Comparison 区域，保持 UNCALIBRATED 警告
+
+### 收口后的基础 invariant
+
+- **Append-only 在磁盘上生效，不只是内存**：`save()` 使用 exclusive-create（`open("x")`）写盘，`FileExistsError` 转为 `DuplicateSnapshotError`；先写盘成功、再登记内存索引，写盘失败不污染内存
+- **`snapshot_id` 即安全文件名 stem**：`^[A-Za-z0-9][A-Za-z0-9._-]*$`，拒绝路径分隔与 `..`；`_file_path()` 另有 containment 二次校验（解析后必须是仓库目录的直接子文件）
+- **`suite_sha256` 是真 SHA-256**：64 位 hex 校验，进入模型后统一 lowercase
+- **`created_at` 必须 timezone-aware**：`ReferenceSnapshot` 与 `ReferenceProvenance` 均拒绝 naive datetime，并 normalize 到 UTC
+- **Coverage 按 `DimensionScoreStatus` 判定**：`SCORED` / `UNCALIBRATED` 可比，`UNAVAILABLE` / `INSUFFICIENT_DATA` 视为未测量，绝不折算成 0 分参与 delta
+- **Compatibility Gate 先于 delta**：`suite_id` → `suite_version` → `scoring_policy_id` → `scoring_policy_version` → 可比维度集合 → `coverage_weight` → 逐维 delta，任何一步失败 fail closed，不产生 `ComparisonResult`
+- **Scoring policy 是独立概念**：新增 `ScoringPolicyMismatchError`（`SCORING_POLICY_MISMATCH`），不复用 `SuiteMismatchError`
+
+### 语义边界
+
+```text
+Reference Snapshot      = 不可变的历史能力事实
+Repository              = append-only 持久化
+Comparator              = compatibility gate + 相对能力 delta
+Reference Comparison   != Calibration
+Reference Comparison   != 模型身份识别
+部分覆盖                != 能力下降
+不同 scoring policy     != 可直接比较的画像
+```
+
+- 质量：Ruff + Format + Mypy + Pytest 836 题 + Coverage 83%
+
+完成标准：第一套 Reference Model Snapshot 与能力比较基础设施落地，且历史事实不可覆盖、部分覆盖不伪装成能力下降。√ 已达成。
+
+## v0.3-D Behavior Drift Detection（规划中）
+
+> 注：v0.3-C 明确不包含 Calibration 与模型身份识别。正式 0–100 能力分与 Calibration 不在本阶段。
 
 ## v0.4 参考模型对照
 

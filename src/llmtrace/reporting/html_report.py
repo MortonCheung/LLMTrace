@@ -12,6 +12,7 @@ from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
+from llmtrace.scoring.comparison import ComparisonResult
 
 
 def _evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -44,6 +45,7 @@ def generate_html_report(
     result: AuditResult,
     output_path: Path,
     benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
+    reference_comparison: ComparisonResult | None = None,
 ) -> Path:
     """生成 HTML 报告."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +124,26 @@ def generate_html_report(
             section_dict["tasks"] = tasks_display
             benchmark_data.append(section_dict)
 
+    # 构建 Reference Comparison 数据
+    reference_comparison_data: dict[str, object] | None = None
+    if reference_comparison is not None:
+        reference_comparison_data = {
+            "reference_snapshot": reference_comparison.reference_snapshot_id,
+            "suite_id": reference_comparison.suite_id,
+            "suite_version": reference_comparison.suite_version,
+            "model_a": reference_comparison.model_a,
+            "model_b": reference_comparison.model_b,
+            "dimension_diffs": [
+                {
+                    "dimension": d.dimension.value,
+                    "reference": d.reference_score,
+                    "candidate": d.candidate_score,
+                    "delta": d.delta,
+                }
+                for d in reference_comparison.dimension_diffs
+            ],
+        }
+
     html = template.render(
         report_id=result.report_id,
         utc_time=result.start_time.isoformat() if result.start_time else "",
@@ -155,6 +177,7 @@ def generate_html_report(
         token_rate=f"{len(token_evidence)}/{len(evidence)}" if evidence else "N/A",
         rid_rate=f"{len(rid_evidence)}/{len(evidence)}" if evidence else "N/A",
         benchmarks=benchmark_data,
+        reference_comparison=reference_comparison_data,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:

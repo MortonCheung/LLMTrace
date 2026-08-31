@@ -11,6 +11,7 @@ from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
+from llmtrace.scoring.comparison import ComparisonResult
 from llmtrace.utilities.hashing import sha256_hash
 
 # Single source of truth for schema version
@@ -65,10 +66,24 @@ def finding_to_dict(f: FindingResult) -> dict[str, object]:
     }
 
 
+def _comparison_to_dict(comparison: ComparisonResult) -> dict[str, object]:
+    """将 ComparisonResult 序列化为 reference_comparison 段."""
+    return {
+        "reference_snapshot": comparison.reference_snapshot_id,
+        "suite_id": comparison.suite_id,
+        "suite_version": comparison.suite_version,
+        "model_a": comparison.model_a,
+        "model_b": comparison.model_b,
+        "coverage_diff": comparison.coverage_diff,
+        "dimension_delta": comparison.dimension_delta_dict(),
+    }
+
+
 def generate_json_report(
     result: AuditResult,
     output_path: Path,
     benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
+    reference_comparison: ComparisonResult | None = None,
 ) -> Path:
     """生成 JSON 报告（v1.1 — 支持 benchmark 段).
 
@@ -76,6 +91,7 @@ def generate_json_report(
         result: 审计结果.
         output_path: 输出文件路径.
         benchmark_sections: 可选 benchmark 报告段列表.
+        reference_comparison: 可选 reference comparison 段（Reference Snapshot vs Candidate）.
 
     Returns:
         写入后的输出文件路径.
@@ -133,6 +149,9 @@ def generate_json_report(
         "model_in_list": result.model_in_list,
         "benchmarks": benchmarks,
     }
+
+    if reference_comparison is not None:
+        report["reference_comparison"] = _comparison_to_dict(reference_comparison)
 
     # 计算内容哈希（包含 benchmarks）
     content_json = json.dumps(report, sort_keys=True, ensure_ascii=False)
