@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -25,6 +26,11 @@ from llmtrace.execution.runner import UnifiedAuditRunner
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
 from llmtrace.providers.base import BaseProvider
+from llmtrace.reference import ReferenceCaptureService, ReferenceSetBuilder, ReferenceSetRepository
+from llmtrace.reference.capture import ReferenceCaptureStatus
+from llmtrace.reference.reference_set import (
+    ReferenceSetError,
+)
 from llmtrace.reporting.console import (
     print_audit_summary,
     print_compare_result,
@@ -34,6 +40,8 @@ from llmtrace.reporting.console import (
 )
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
+from llmtrace.scoring.errors import ReferenceError, ReferenceNotFoundError
+from llmtrace.scoring.reference import ReferenceRepository
 from llmtrace.security.redaction import SecretScrubber, check_api_key, extract_url_secret_values
 
 app = typer.Typer(
@@ -489,6 +497,182 @@ def inspect(
             f"{behavior.get('graded_overlap_count', '?')} / {behavior.get('total_items', '?')}",
         )
         console.print(bh_table)
+
+
+reference_app = typer.Typer(
+    name="reference",
+    help="Reference：捕获受信任参考快照并构建 ReferenceSet（v0.4-A）",
+    no_args_is_help=True,
+)
+app.add_typer(reference_app, name="reference")
+
+
+@reference_app.command("capture")
+def reference_capture(
+    protocol: str = typer.Option(..., "--protocol", "-p", help="协议类型: openai 或 anthropic"),
+    base_url: str = typer.Option(..., "--base-url", "-u", help="API Base URL"),
+    model: str = typer.Option(..., "--model", "-m", help="声明模型名称"),
+    api_key_env: str = typer.Option(..., "--api-key-env", "-k", help="API Key 环境变量名"),
+    auth_style: str = typer.Option("auto", "--auth-style", help="鉴权方式: auto, bearer, x-api-key, both"),
+    provider_id: str = typer.Option(..., "--provider-id", help="参考源操作标识（元数据，非身份声明）"),
+    snapshot_id: str = typer.Option(..., "--snapshot-id", help="唯一 filename-safe ReferenceSnapshot 标识"),
+    created_by: str = typer.Option(..., "--created-by", help="创建者标签（operator 或 tool）"),
+    reference_dir: Path = typer.Option(
+        Path("references"), "--reference-dir", help="reference 根目录（snapshots/ sets/）"
+    ),
+    output_dir: Path = typer.Option(
+        Path("reference-runs"), "--output-dir", "-o", help="run artifact 根目录（runs/ 位于其下）"
+    ),
+    timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t", help="请求超时(秒)"),
+    max_wall_seconds: float = typer.Option(None, "--max-wall-seconds", help="整体墙钟超时(秒)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="只显示执行计划：0 HTTP / 0 API Key / 0 artifact / 0 snapshot"
+    ),
+    non_interactive: bool = typer.Option(False, "--yes", "-y", help="跳过确认"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """捕获一次受信任参考运行（复用 UnifiedAuditRunner，资格通过后保存 ReferenceSnapshot）.
+
+    Operator 必须确认 endpoint 是可信参考源。LLMTrace 记录声明与测量 provenance，
+    但不独立证明 endpoint 归属（§28）。
+    """
+    import sys
+
+    config = AuditConfig(
+        protocol=Protocol(protocol),
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        auth_style=AuthStyle(auth_style),
+        repeat_count=DEFAULT_REPEAT_COUNT,
+        timeout=timeout,
+        check_streaming=True,
+        output_dir=output_dir,
+    )
+    target = derive_target_id(config.protocol.value, config.base_url)
+    service = ReferenceCaptureService(reference_dir=reference_dir, artifact_root=output_dir)
+    plan = service.build_plan(config, target_id=target)
+
+    if dry_run:
+        print_dry_run(
+            {
+                "模型": config.model,
+                "Provider": provider_id,
+                "Suite": f"{plan.suite_id} {plan.suite_version}",
+                "Suite Content SHA": plan.suite_content_sha256,
+                "Generation Config SHA": plan.generation_config_sha256,
+                "总请求上限": str(plan.maximum_requests),
+                "输出 Token 上限": str(plan.maximum_output_token_ceiling),
+                "需要安全 Sandbox": "是",
+                "Snapshot ID": snapshot_id,
+                "Reference 目录": str(reference_dir),
+                "Artifact 目录": str(output_dir),
+            }
+        )
+        return
+
+    api_key = check_api_key(config.api_key_env)
+    if api_key is None:
+        print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
+        raise typer.Exit(code=1)
+
+    if not non_interactive:
+        if not sys.stdin.isatty():
+            print_error("非交互式执行需要 --yes", "确认", partial=False)
+            raise typer.Exit(code=1)
+        print_dry_run(
+            {
+                "模型": config.model,
+                "总请求上限": str(plan.maximum_requests),
+                "Snapshot ID": snapshot_id,
+            }
+        )
+        if not typer.confirm(
+            f"本次 reference capture 将向 {config.base_url} 发送最多 {plan.maximum_requests} 个请求。是否继续？"
+        ):
+            raise typer.Exit(code=0)
+
+    try:
+        result = asyncio.run(
+            service.capture(
+                config=config,
+                api_key=api_key,
+                target_id=target,
+                provider_id=provider_id,
+                snapshot_id=snapshot_id,
+                created_by=created_by,
+                max_wall_seconds=max_wall_seconds,
+            )
+        )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
+    except Exception as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
+        print_error(scrubber.scrub_text(str(exc)), "reference capture", partial=True)
+        raise typer.Exit(code=1)
+
+    if result.status == ReferenceCaptureStatus.CAPTURED:
+        snapshot_path = reference_dir / "snapshots" / f"{result.snapshot_id}.json"
+        typer.echo(f"[OK] ReferenceSnapshot 已保存: {snapshot_path}")
+        typer.echo(f"     execution_id: {result.execution_id}")
+    elif result.status == ReferenceCaptureStatus.QUALIFICATION_REJECTED:
+        print_error(
+            f"运行完成但未通过资格门禁，ReferenceSnapshot 未生成（run artifact 保留）: {list(result.reason_codes)}",
+            "reference capture",
+            partial=True,
+        )
+        typer.echo(f"     执行记录保留在: {output_dir / 'runs' / result.execution_id}")
+        raise typer.Exit(code=1)
+    else:
+        print_error(f"参考运行失败: {result.warnings}", "reference capture", partial=True)
+        typer.echo(f"     执行记录保留在: {output_dir / 'runs' / result.execution_id}")
+        raise typer.Exit(code=1)
+
+
+@reference_app.command("set-create")
+def reference_set_create(
+    reference_dir: Path = typer.Option(Path("references"), "--reference-dir", help="reference 根目录"),
+    set_id: str = typer.Option(..., "--set-id", help="唯一 filename-safe ReferenceSet 标识"),
+    set_version: str = typer.Option(..., "--set-version", help="set 修订版本（filename-safe）"),
+    snapshots: list[str] = typer.Option(..., "--snapshot", help="成员 snapshot id（可重复传入）"),
+    description: str = typer.Option("", "--description", help="可选描述"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """从已验证的 ReferenceSnapshot 构建并保存 ReferenceSet（0 API 请求）.
+
+    流程：load snapshot → verify snapshot SHA → compatibility gate →
+    ReferenceSetBuilder → ReferenceSetRepository.save（§31）。
+    """
+    try:
+        snapshot_repo = ReferenceRepository.load(reference_dir / "snapshots")
+        set_repo = ReferenceSetRepository(directory=reference_dir / "sets")
+
+        loaded = [snapshot_repo.get(sid) for sid in snapshots]
+        sha_map = {sid: snapshot_repo.verify_snapshot(sid) for sid in snapshots}
+        reference_set = ReferenceSetBuilder().build(
+            reference_set_id=set_id,
+            reference_set_version=set_version,
+            created_at=datetime.now(UTC),
+            snapshots=loaded,
+            snapshot_sha256s=sha_map,
+            description=description,
+        )
+        set_repo.save(reference_set)
+    except (ReferenceNotFoundError, ReferenceError, ReferenceSetError) as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        print_error(str(exc), "reference set-create", partial=False)
+        raise typer.Exit(code=1)
+
+    set_path = reference_dir / "sets" / f"{set_id}_{set_version}.json"
+    typer.echo(f"[OK] ReferenceSet 已保存: {set_path}")
+    typer.echo(f"     成员数: {len(reference_set.members)}，Content SHA: {reference_set.content_sha256}")
 
 
 if __name__ == "__main__":
