@@ -34,7 +34,7 @@ from llmtrace.reporting.console import (
 )
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
-from llmtrace.security.redaction import check_api_key
+from llmtrace.security.redaction import SecretScrubber, check_api_key
 
 app = typer.Typer(
     name="llmtrace",
@@ -141,7 +141,9 @@ def audit(
             import traceback
 
             traceback.print_exc()
-        print_error(str(e), "审计执行", partial=True)
+        # Non-debug error output crosses a display boundary — scrub the
+        # in-memory API key in case the exception echoes it.
+        print_error(SecretScrubber([api_key]).scrub_text(str(e)), "审计执行", partial=True)
         raise typer.Exit(code=1)
 
     result = outcome.result
@@ -284,7 +286,9 @@ def run(
             import traceback
 
             traceback.print_exc()
-        print_error(str(exc), "统一执行", partial=True)
+        # Non-debug error output crosses a display boundary — scrub the
+        # in-memory API key in case the exception echoes it.
+        print_error(SecretScrubber([api_key]).scrub_text(str(exc)), "统一执行", partial=True)
         raise typer.Exit(code=1)
 
     artifact_paths = {

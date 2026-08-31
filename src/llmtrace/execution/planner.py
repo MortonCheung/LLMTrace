@@ -69,7 +69,12 @@ def build_unified_execution_plan(
             json.dumps(
                 {
                     "protocol": str(config.protocol.value),
-                    "base_url": config.base_url,
+                    # Canonical redacted endpoint — a secret-bearing URL must
+                    # never become the input of a long-lived artifact identity.
+                    # Same semantics as derive_target_id(): credentials and
+                    # secret query values are stripped, non-sensitive query
+                    # parameters keep defining the endpoint.
+                    "base_url": redact_url(config.base_url),
                     "model": config.model,
                     "repeat_count": config.repeat_count,
                     "check_streaming": config.check_streaming,

@@ -145,6 +145,14 @@ class ProtocolAuditExecutor:
     A config-precheck failure or connectivity/auth failure is a *blocking*
     failure: the unified runner must skip the benchmark instead of wasting 32
     real requests against an unreachable endpoint.
+
+    Provider lifecycle ownership:
+
+    - ``run()`` owns the provider context — legacy standalone callers
+      (``llmtrace audit``) get a self-contained entry point.
+    - ``run_open_provider()`` assumes the caller already entered the provider
+      context and keeps it open — the unified runner uses this so protocol
+      and benchmark share one open provider (single lifecycle owner).
     """
 
     def __init__(self, config: AuditConfig, provider: BaseProvider) -> None:
@@ -152,6 +160,16 @@ class ProtocolAuditExecutor:
         self._provider = provider
 
     async def run(self) -> ProtocolAuditOutcome:
+        """Own the provider lifecycle: open it, run the probes, close it."""
+        async with self._provider:
+            return await self.run_open_provider()
+
+    async def run_open_provider(self) -> ProtocolAuditOutcome:
+        """Run the probes against an *already open* provider.
+
+        The caller must have entered the provider context (``async with
+        provider:``) and is responsible for closing it.
+        """
         config = self._config
         evidence_list: list[HTTPEvidence] = []
         findings: list[FindingResult] = []
@@ -164,85 +182,83 @@ class ProtocolAuditExecutor:
             report_id=f"llmtrace_{format_file_time(utc_now())}_{short_id(6)}",
             start_time=utc_now(),
         )
+        # 1. 配置预检
+        precheck = ConfigPrecheckProbe(config, self._provider)
+        outcome = await precheck.run()
+        findings.extend(outcome.findings)
+        if outcome.findings and outcome.findings[0].status.value == "fail":
+            result.findings = findings
+            result.risk_level = RiskLevel.INCONCLUSIVE
+            result.end_time = utc_now()
+            return ProtocolAuditOutcome(result=result, blocking_failure=True, blocking_stage="配置预检")
 
-        async with self._provider:
-            # 1. 配置预检
-            precheck = ConfigPrecheckProbe(config, self._provider)
-            outcome = await precheck.run()
-            findings.extend(outcome.findings)
-            if outcome.findings and outcome.findings[0].status.value == "fail":
-                result.findings = findings
-                result.risk_level = RiskLevel.INCONCLUSIVE
-                result.end_time = utc_now()
-                return ProtocolAuditOutcome(result=result, blocking_failure=True, blocking_stage="配置预检")
+        # 2. 连接与鉴权
+        conn = ConnectivityProbe(config, self._provider)
+        outcome = await conn.run()
+        findings.extend(outcome.findings)
+        evidence_list.extend(outcome.evidence)
+        if outcome.findings and outcome.findings[0].status.value == "fail":
+            result.findings = findings
+            result.evidence = evidence_list
+            result.risk_level = RiskLevel.INCONCLUSIVE
+            result.end_time = utc_now()
+            return ProtocolAuditOutcome(result=result, blocking_failure=True, blocking_stage="连接与鉴权")
 
-            # 2. 连接与鉴权
-            conn = ConnectivityProbe(config, self._provider)
-            outcome = await conn.run()
+        # 3. 模型列表
+        catalog = ModelCatalogProbe(config, self._provider)
+        outcome = await catalog.run()
+        findings.extend(outcome.findings)
+        evidence_list.extend(outcome.evidence)
+        if outcome.evidence:
+            list_ev = outcome.evidence[0]
+            result.model_list_available = list_ev.success
+            if list_ev.success and list_ev.response_body_summary:
+                try:
+                    data = json.loads(list_ev.response_body_summary)
+                    models = data.get("data", [])
+                    if isinstance(models, list):
+                        result.model_list = [m.get("id", "") for m in models if isinstance(m, dict)]
+                        result.model_in_list = config.model in result.model_list
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+        # 4. 正常基线
+        baseline = BaselineProbe(config, self._provider)
+        outcome = await baseline.run()
+        findings.extend(outcome.findings)
+        evidence_list.extend(outcome.evidence)
+
+        # 5. 无效模型
+        invalid = InvalidModelProbe(config, self._provider)
+        outcome = await invalid.run()
+        findings.extend(outcome.findings)
+        evidence_list.extend(outcome.evidence)
+
+        # 6. 流式一致性
+        if config.check_streaming:
+            streaming = StreamingProbe(config, self._provider)
+            outcome = await streaming.run()
             findings.extend(outcome.findings)
             evidence_list.extend(outcome.evidence)
-            if outcome.findings and outcome.findings[0].status.value == "fail":
-                result.findings = findings
-                result.evidence = evidence_list
-                result.risk_level = RiskLevel.INCONCLUSIVE
-                result.end_time = utc_now()
-                return ProtocolAuditOutcome(result=result, blocking_failure=True, blocking_stage="连接与鉴权")
 
-            # 3. 模型列表
-            catalog = ModelCatalogProbe(config, self._provider)
-            outcome = await catalog.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
-            if outcome.evidence:
-                list_ev = outcome.evidence[0]
-                result.model_list_available = list_ev.success
-                if list_ev.success and list_ev.response_body_summary:
-                    try:
-                        data = json.loads(list_ev.response_body_summary)
-                        models = data.get("data", [])
-                        if isinstance(models, list):
-                            result.model_list = [m.get("id", "") for m in models if isinstance(m, dict)]
-                            result.model_in_list = config.model in result.model_list
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
+        # 7. 元数据完整性
+        metadata = MetadataProbe(config, self._provider)
+        findings.append(metadata.analyze(evidence_list))
 
-            # 4. 正常基线
-            baseline = BaselineProbe(config, self._provider)
-            outcome = await baseline.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
+        # 8. 会话稳定性
+        stability = StabilityProbe(config, self._provider)
+        findings.append(stability.analyze(evidence_list))
 
-            # 5. 无效模型
-            invalid = InvalidModelProbe(config, self._provider)
-            outcome = await invalid.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
+        # 生成结构指纹
+        for ev in evidence_list:
+            if ev.response_body_summary:
+                fp = generate_schema_fingerprint(ev.response_body_summary)
+                if fp:
+                    result.schema_fingerprints.append(fp)
 
-            # 6. 流式一致性
-            if config.check_streaming:
-                streaming = StreamingProbe(config, self._provider)
-                outcome = await streaming.run()
-                findings.extend(outcome.findings)
-                evidence_list.extend(outcome.evidence)
-
-            # 7. 元数据完整性
-            metadata = MetadataProbe(config, self._provider)
-            findings.append(metadata.analyze(evidence_list))
-
-            # 8. 会话稳定性
-            stability = StabilityProbe(config, self._provider)
-            findings.append(stability.analyze(evidence_list))
-
-            # 生成结构指纹
-            for ev in evidence_list:
-                if ev.response_body_summary:
-                    fp = generate_schema_fingerprint(ev.response_body_summary)
-                    if fp:
-                        result.schema_fingerprints.append(fp)
-
-            # 完整性校验
-            self._validate_evidence_refs(findings, evidence_list)
-            self._check_duplicate_evidence_ids(evidence_list)
+        # 完整性校验
+        self._validate_evidence_refs(findings, evidence_list)
+        self._check_duplicate_evidence_ids(evidence_list)
 
         result.evidence = evidence_list
         result.findings = findings

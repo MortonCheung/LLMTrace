@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 
 from llmtrace.analysis.behavior_models import BehaviorRunSnapshot
@@ -177,12 +179,59 @@ class RunArtifactRepository:
         return runs
 
     def load_behavior_snapshot(self, execution_id: str) -> BehaviorRunSnapshot | None:
-        """Load a run's behavior snapshot, or None when the run has none."""
+        """Load a run's behavior snapshot with artifact-integrity verification.
+
+        The manifest's recorded hash is the single source of truth for the
+        historical artifact's real SHA — it is never recomputed from a
+        re-serialized snapshot.  Raises ``ArtifactIntegrityError`` when the
+        artifact is missing, hash-mismatched, or unparseable; returns None
+        only when the run legitimately has no snapshot.
+        """
+        manifest = self.load_manifest(execution_id)
+        expected_sha = manifest.artifacts.get("behavior_snapshot.json")
+        if expected_sha is None:
+            return None
         try:
             raw = self.read_artifact(execution_id, "behavior_snapshot.json")
-        except ArtifactNotFoundError:
-            return None
-        return BehaviorRunSnapshot.model_validate(json.loads(raw))
+        except ArtifactNotFoundError as exc:
+            raise ArtifactIntegrityError(
+                f"behavior snapshot of execution '{execution_id}' is listed in the manifest but missing on disk"
+            ) from exc
+        actual_sha = sha256_of(raw)
+        if actual_sha != expected_sha:
+            raise ArtifactIntegrityError(
+                f"behavior snapshot of execution '{execution_id}' was modified: "
+                f"manifest {expected_sha} != actual {actual_sha}"
+            )
+        try:
+            return BehaviorRunSnapshot.model_validate(json.loads(raw))
+        except ValueError as exc:
+            raise ArtifactIntegrityError(
+                f"behavior snapshot of execution '{execution_id}' is corrupted and cannot be parsed: {exc}"
+            ) from exc
+
+    def find_behavior_snapshot_candidates(
+        self,
+        *,
+        target_id: str,
+        candidate_model_id: str,
+        exclude_execution_id: str,
+    ) -> list[RunArtifactManifest]:
+        """Historical manifests for the same target/model that declare a snapshot.
+
+        Integrity is NOT judged here — the caller loads each candidate via
+        :meth:`load_behavior_snapshot` (which verifies the manifest SHA) so
+        it can record integrity warnings and keep searching older candidates.
+        """
+        candidates: list[RunArtifactManifest] = []
+        for manifest in self.list_runs():
+            if manifest.execution_id == exclude_execution_id:
+                continue
+            if manifest.target_id != target_id or manifest.candidate_model_id != candidate_model_id:
+                continue
+            if "behavior_snapshot.json" in manifest.artifacts:
+                candidates.append(manifest)
+        return candidates
 
     def find_behavior_snapshots(
         self,
@@ -191,20 +240,41 @@ class RunArtifactRepository:
         candidate_model_id: str,
         exclude_execution_id: str,
     ) -> list[tuple[RunArtifactManifest, BehaviorRunSnapshot]]:
-        """Historical (manifest, snapshot) pairs for the same target/model, newest first.
+        """Verified historical (manifest, snapshot) pairs, newest first.
 
         The current execution is always excluded — a run must never be compared
-        against itself.  Compatibility is NOT judged here; the repository only
-        narrows candidates, and :class:`BehaviorDriftEngine` stays the sole
-        compatibility authority.
+        against itself.  Integrity is verified against the manifest SHA;
+        corrupted candidates are skipped.  Compatibility is NOT judged here;
+        :class:`BehaviorDriftEngine` stays the sole compatibility authority.
         """
         results: list[tuple[RunArtifactManifest, BehaviorRunSnapshot]] = []
-        for manifest in self.list_runs():
-            if manifest.execution_id == exclude_execution_id:
+        for manifest in self.find_behavior_snapshot_candidates(
+            target_id=target_id,
+            candidate_model_id=candidate_model_id,
+            exclude_execution_id=exclude_execution_id,
+        ):
+            try:
+                snapshot = self.load_behavior_snapshot(manifest.execution_id)
+            except ArtifactIntegrityError:
                 continue
-            if manifest.target_id != target_id or manifest.candidate_model_id != candidate_model_id:
-                continue
-            snapshot = self.load_behavior_snapshot(manifest.execution_id)
             if snapshot is not None:
                 results.append((manifest, snapshot))
         return results
+
+    # -- Preflight -----------------------------------------------------------
+
+    def ensure_writable(self) -> None:
+        """Probe that the artifact root can be created and written to.
+
+        Creates a temporary probe file under the runs root, flushes it to
+        disk, and removes it — no formal run artifact is ever produced.
+        """
+        self._root.mkdir(parents=True, exist_ok=True)
+        probe = self._root / f".write-probe-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        try:
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write("probe")
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            probe.unlink(missing_ok=True)

@@ -188,6 +188,20 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
         drift_text = result.behavior_drift.drift_level.value  # type: ignore[attr-defined]
     table.add_row("Behavior Drift", drift_text)
 
+    measurement = getattr(result, "measurement_summary", None)
+    if measurement is not None:
+        table.add_row(
+            "Benchmark 测量",
+            f"{measurement.graded_item_count}/{measurement.total_item_count} graded, "
+            f"{measurement.failure_item_count} failure, {measurement.ungradable_item_count} ungradable",
+        )
+        table.add_row(
+            "测量覆盖率",
+            f"grading {measurement.grading_coverage:.0%} / execution {measurement.execution_coverage:.0%}",
+        )
+    elif result.protocol_audit is not None and getattr(result, "benchmark_runs", None):  # type: ignore[attr-defined]
+        table.add_row("Benchmark 测量", "unavailable")
+
     ref_text = "compared" if result.reference_comparison is not None else "unavailable"  # type: ignore[attr-defined]
     table.add_row("Reference", ref_text)
     table.add_row("请求数", f"planned {plan.planned_requests}")

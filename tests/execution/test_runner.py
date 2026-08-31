@@ -10,10 +10,12 @@ import httpx
 import pytest
 import respx
 
+from llmtrace.adapters.code_execution import CodeExecutionBackend, CodeExecutionResult
 from llmtrace.config import AuditConfig, Protocol
-from llmtrace.execution.artifacts import RunArtifactRepository
+from llmtrace.execution import runner as runner_module
+from llmtrace.execution.artifacts import RunArtifactRepository, sha256_of
 from llmtrace.execution.models import UnifiedRunStatus
-from llmtrace.execution.runner import UnifiedAuditRunner
+from llmtrace.execution.runner import PreflightError, UnifiedAuditRunner
 from llmtrace.providers.factory import create_provider
 from llmtrace.providers.openai_compatible import OpenAICompatibleProvider
 
@@ -64,10 +66,13 @@ def config() -> AuditConfig:
 
 
 def _mock_openai(respx_mock: respx.MockRouter) -> None:
+    # The answer must be gradable by *all four* Quick Suite graders:
+    # "(A)" → ARC letter extraction, "42" → GSM8K numeric extraction,
+    # HumanEval/IFEval are graded by the fake backend / constraint checker.
     respx_mock.get("http://test.example.com/v1/models").respond(status_code=200, json=_models_json())
     respx_mock.post("http://test.example.com/v1/chat/completions").respond(
         status_code=200,
-        json=_completion_json("The answer is 42."),
+        json=_completion_json("The answer is (A). The answer is 42."),
         headers={"content-type": "application/json"},
     )
 
@@ -154,6 +159,13 @@ class TestUnifiedAuditRunner:
         assert result.protocol_audit is not None
         assert result.capability_profile is not None
         assert result.behavior_snapshot is not None
+        # A fully gradable mock answer must yield a healthy measurement:
+        # 32/32 graded, no failure, no ungradable.
+        assert result.measurement_summary is not None
+        assert result.measurement_summary.total_item_count == 32
+        assert result.measurement_summary.graded_item_count == 32
+        assert result.measurement_summary.failure_item_count == 0
+        assert result.measurement_summary.ungradable_item_count == 0
         # First run → no baseline.
         assert result.behavior_drift is None
         assert result.reference_comparison is None
@@ -292,13 +304,19 @@ class TestUnifiedAuditRunner:
 
         # Tamper the prior run's generation config hash so the compatibility
         # gate must reject it — the engine, not the repository, is the final
-        # authority. The current run must skip it and warn, never produce a
-        # bogus drift result.
+        # authority. The manifest hash is updated to match so the tampering
+        # passes *integrity* verification and reaches the engine's
+        # compatibility gate (SHA mismatch is covered by its own test below).
         run_dir = tmp_path / "runs" / first.execution_id
         snap_path = run_dir / "behavior_snapshot.json"
         snap = json.loads(snap_path.read_text(encoding="utf-8"))
         snap["generation_config_sha256"] = "b" * 64
-        snap_path.write_text(json.dumps(snap), encoding="utf-8")
+        tampered = json.dumps(snap)
+        snap_path.write_text(tampered, encoding="utf-8")
+        manifest_path = run_dir / "manifest.json"
+        manifest_json = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_json["artifacts"]["behavior_snapshot.json"] = sha256_of(tampered)
+        manifest_path.write_text(json.dumps(manifest_json), encoding="utf-8")
 
         with respx.mock as mock:
             _mock_openai(mock)
@@ -429,3 +447,256 @@ class TestQuickSuiteDeclaredModel:
             return
         assert isinstance(backend, DockerCodeExecutionBackend)
         assert not isinstance(backend, _InProcessExecutionBackend)
+
+
+# ---------------------------------------------------------------------------
+# PR #16 merge-blocker regressions
+# ---------------------------------------------------------------------------
+
+
+class _LifecycleSpy:
+    """Wraps a provider and counts context-manager entries/exits."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.entered = 0
+        self.exited = 0
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def __aenter__(self) -> _LifecycleSpy:
+        self.entered += 1
+        await self._inner.__aenter__()  # type: ignore[attr-defined]
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self.exited += 1
+        await self._inner.__aexit__(*exc_info)  # type: ignore[attr-defined]
+
+
+class _UnavailableBackend(CodeExecutionBackend):
+    """A sandbox that reports itself unavailable (preflight must fail)."""
+
+    def is_available(self) -> bool:
+        return False
+
+    def execute(self, code: str, *, timeout_seconds: float = 10.0) -> CodeExecutionResult:
+        raise RuntimeError("sandbox unavailable")
+
+
+class TestMergeBlockerRegressions:
+    """Targeted regressions for the five merge blockers of PR #16."""
+
+    def _runner(self, config: AuditConfig, repo: RunArtifactRepository, **kwargs: object) -> UnifiedAuditRunner:
+        return UnifiedAuditRunner(
+            config,
+            api_key=API_KEY,
+            target_id=TARGET_ID,
+            repository=repo,
+            code_backend=TrustedFakeBackend(),
+            **kwargs,
+        )
+
+    # -- Blocker 1: Provider lifecycle ---------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_provider_lifecycle_single_owner(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        real_create = runner_module.create_provider
+        spies: list[_LifecycleSpy] = []
+
+        def spy_factory(*args: object, **kwargs: object) -> _LifecycleSpy:
+            spy = _LifecycleSpy(real_create(*args, **kwargs))  # type: ignore[arg-type]
+            spies.append(spy)
+            return spy
+
+        monkeypatch.setattr(runner_module, "create_provider", spy_factory)
+        with respx.mock as mock:
+            _mock_openai(mock)
+            result = await self._runner(config, repo).run()
+
+        # One provider instance for the whole run — never one per stage.
+        assert len(spies) == 1
+        # ...opened exactly once and closed exactly once: the runner is the
+        # single lifecycle owner for protocol + benchmark.
+        assert spies[0].entered == 1
+        assert spies[0].exited == 1
+        # The benchmark really executed through that same open provider.
+        assert result.measurement_summary is not None
+        assert result.measurement_summary.total_item_count == 32
+
+    # -- Blocker 2: response-side secret echo ---------------------------------
+
+    @pytest.mark.asyncio
+    async def test_response_echo_never_persisted(self, config: AuditConfig, api_key_env: None, tmp_path: Path) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        body = _completion_json("The answer is (A). The answer is 42.")
+        body["echoed_secret"] = API_KEY  # adversarial echo in the response body
+        with respx.mock as mock:
+            mock.get("http://test.example.com/v1/models").respond(
+                status_code=200, json=_models_json(), headers={"x-debug": API_KEY}
+            )
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200,
+                json=body,
+                headers={"x-debug": API_KEY, "content-type": "application/json"},
+            )
+            result = await self._runner(config, repo).run()
+
+        assert result.status == UnifiedRunStatus.COMPLETED
+        run_dir = tmp_path / "runs" / result.execution_id
+        for artifact in run_dir.iterdir():
+            assert API_KEY not in artifact.read_text(encoding="utf-8"), f"leak in {artifact.name}"
+        assert all(API_KEY not in w for w in result.warnings)
+
+    @pytest.mark.asyncio
+    async def test_error_message_echo_never_persisted(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        with respx.mock as mock:
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=401, json={"error": f"Unauthorized key {API_KEY}"}
+            )
+            result = await self._runner(config, repo).run()
+
+        assert result.status == UnifiedRunStatus.PARTIAL
+        run_dir = tmp_path / "runs" / result.execution_id
+        for artifact in run_dir.iterdir():
+            assert API_KEY not in artifact.read_text(encoding="utf-8"), f"leak in {artifact.name}"
+        assert all(API_KEY not in w for w in result.warnings)
+
+    # -- Blocker 3: history artifact integrity --------------------------------
+
+    @pytest.mark.asyncio
+    async def test_tampered_history_sha_skips_with_warning(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        with respx.mock as mock:
+            _mock_openai(mock)
+            first = await self._runner(config, repo).run()
+
+        # Tamper the prior snapshot WITHOUT updating the manifest: the
+        # recorded SHA no longer matches the artifact on disk.
+        snap_path = tmp_path / "runs" / first.execution_id / "behavior_snapshot.json"
+        snap = json.loads(snap_path.read_text(encoding="utf-8"))
+        snap["generation_config_sha256"] = "b" * 64
+        snap_path.write_text(json.dumps(snap), encoding="utf-8")
+
+        with respx.mock as mock:
+            _mock_openai(mock)
+            second = await self._runner(config, repo).run()
+
+        # The tampered baseline is skipped with an integrity warning — never
+        # silently compared, never crashing the current run.
+        assert second.behavior_drift is None
+        assert any("skipped corrupted historical baseline" in w for w in second.warnings)
+        assert second.status == UnifiedRunStatus.COMPLETED_WITH_WARNINGS
+
+    # -- Blocker 4: preflight before any HTTP request -------------------------
+
+    @pytest.mark.asyncio
+    async def test_preflight_sandbox_unavailable_before_http(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        # No routes registered: any HTTP request would raise inside respx.
+        with respx.mock, pytest.raises(PreflightError) as excinfo:
+            await UnifiedAuditRunner(
+                config,
+                api_key=API_KEY,
+                target_id=TARGET_ID,
+                repository=repo,
+                code_backend=_UnavailableBackend(),
+            ).run()
+        assert "sandbox" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_preflight_unwritable_artifact_root(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        tmp_path.chmod(0o500)
+        try:
+            with respx.mock, pytest.raises(PreflightError):
+                await self._runner(config, repo).run()
+        finally:
+            tmp_path.chmod(0o700)
+
+    @pytest.mark.asyncio
+    async def test_preflight_missing_baseline_snapshot(
+        self, config: AuditConfig, api_key_env: None, tmp_path: Path
+    ) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        with respx.mock, pytest.raises(PreflightError):
+            await self._runner(config, repo, baseline_snapshot_path=tmp_path / "missing.json").run()
+
+    # -- Blocker 5: status reflects measurement health ------------------------
+
+    @pytest.mark.asyncio
+    async def test_zero_graded_items_is_partial(self, config: AuditConfig, api_key_env: None, tmp_path: Path) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        post_calls = {"n": 0}
+
+        async def _responder(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                return httpx.Response(200, json=_models_json())
+            post_calls["n"] += 1
+            if post_calls["n"] <= 3:
+                # The 3 protocol POST probes (connectivity, baseline,
+                # invalid-model) succeed...
+                return httpx.Response(200, json=_completion_json("The answer is (A). The answer is 42."))
+            # ...then every benchmark request fails: 0 of 32 items measured.
+            return httpx.Response(500, json={"error": "boom"})
+
+        with respx.mock as mock:
+            mock.get("http://test.example.com/v1/models").mock(side_effect=_responder)
+            mock.post("http://test.example.com/v1/chat/completions").mock(side_effect=_responder)
+            result = await self._runner(config, repo).run()
+
+        assert result.status == UnifiedRunStatus.PARTIAL
+        assert result.measurement_summary is not None
+        assert result.measurement_summary.graded_item_count == 0
+        assert result.measurement_summary.failure_item_count == 32
+        assert any("measurement unavailable" in w for w in result.warnings)
+
+    @pytest.mark.asyncio
+    async def test_degraded_measurement_warns(self, config: AuditConfig, api_key_env: None, tmp_path: Path) -> None:
+        repo = RunArtifactRepository(tmp_path)
+        with respx.mock as mock:
+            mock.get("http://test.example.com/v1/models").respond(status_code=200, json=_models_json())
+            # An ungradable answer (no letter, no number) degrades the
+            # measurement without losing it entirely.
+            mock.post("http://test.example.com/v1/chat/completions").respond(
+                status_code=200, json=_completion_json("I do not know.")
+            )
+            result = await self._runner(config, repo).run()
+
+        assert result.status == UnifiedRunStatus.COMPLETED_WITH_WARNINGS
+        assert result.measurement_summary is not None
+        m = result.measurement_summary
+        assert m.graded_item_count + m.ungradable_item_count == m.total_item_count
+        assert m.graded_item_count > 0
+        assert m.ungradable_item_count > 0
+        assert any("measurement degraded" in w for w in result.warnings)
+
+    # -- Blocker 6: plan identity must not depend on secrets ------------------
+
+    def test_plan_id_secret_invariant(self, config: AuditConfig) -> None:
+        from llmtrace.execution.planner import build_unified_execution_plan
+
+        def _plan_id(base_url: str) -> str:
+            cfg = config.model_copy(update={"base_url": base_url})
+            return build_unified_execution_plan(cfg, target_id=TARGET_ID).plan_id
+
+        # Different credentials / secret query values → same plan identity.
+        assert _plan_id("http://user:secret-a@host.example.com/v1") == _plan_id(
+            "http://user:secret-b@host.example.com/v1"
+        )
+        assert _plan_id("http://host.example.com/v1?api_key=aaa") == _plan_id("http://host.example.com/v1?api_key=bbb")
+        # A genuinely different endpoint must still be a different identity.
+        assert _plan_id("http://host.example.com/v1") != _plan_id("http://host.example.com/v2")

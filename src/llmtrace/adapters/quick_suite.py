@@ -194,6 +194,68 @@ def _load_task_resources(task_id: str) -> dict[str, Any]:
         return cast(dict[str, Any], json.load(f))
 
 
+def _subset_sha256(items: list[Any]) -> str:
+    """Canonical subset hash — the exact form recorded in manifest.json."""
+    return hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def verify_quick_suite_resources() -> None:
+    """Preflight integrity check of the Quick Suite manifest + resources.
+
+    Verifies, before any HTTP request is sent:
+
+    - ``manifest.json`` exists, parses, and covers all four tasks;
+    - every resource file exists and parses;
+    - every task's item count equals the manifest's ``sample_count`` and the
+      task spec's ``num_samples``;
+    - every task's ``subset_sha256`` matches the canonical hash of its items;
+    - the manifest's ``total_items`` equals the sum of the task counts.
+    """
+    manifest_path = _RESOURCE_DIR / "manifest.json"
+    if not manifest_path.exists():
+        raise BenchmarkAdapterError(f"Quick Suite manifest not found: {manifest_path}")
+    try:
+        with open(manifest_path) as f:
+            manifest = cast(dict[str, Any], json.load(f))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BenchmarkAdapterError(f"Quick Suite manifest unreadable: {exc}") from exc
+
+    tasks = manifest.get("tasks")
+    if not isinstance(tasks, dict) or not tasks:
+        raise BenchmarkAdapterError("Quick Suite manifest declares no tasks")
+
+    total = 0
+    for spec in _QUICK_TASK_SPECS.values():
+        meta = tasks.get(spec.task_id)
+        if not isinstance(meta, dict):
+            raise BenchmarkAdapterError(f"Quick Suite manifest is missing task '{spec.task_id}'")
+
+        resources = _load_task_resources(spec.task_id)
+        items = resources.get("items", [])
+
+        declared_count = meta.get("sample_count")
+        if len(items) != spec.num_samples or declared_count != spec.num_samples:
+            raise BenchmarkAdapterError(
+                f"Quick Suite task '{spec.task_id}' item count mismatch: "
+                f"resource has {len(items)}, manifest declares {declared_count}, spec requires {spec.num_samples}"
+            )
+
+        expected_sha = meta.get("subset_sha256")
+        actual_sha = _subset_sha256(items)
+        if not isinstance(expected_sha, str) or actual_sha != expected_sha:
+            raise BenchmarkAdapterError(
+                f"Quick Suite resource integrity failure for '{spec.task_id}': "
+                f"manifest {expected_sha} != actual {actual_sha}"
+            )
+        total += spec.num_samples
+
+    declared_total = manifest.get("total_items")
+    if declared_total != total:
+        raise BenchmarkAdapterError(
+            f"Quick Suite manifest total_items mismatch: declares {declared_total}, tasks sum to {total}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Grading helpers
 # ---------------------------------------------------------------------------

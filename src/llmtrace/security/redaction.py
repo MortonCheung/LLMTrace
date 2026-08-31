@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -120,3 +122,62 @@ def sanitize_for_html(text: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&#x27;")
     )
+
+
+# ---------------------------------------------------------------------------
+# Output-boundary secret scrubber
+# ---------------------------------------------------------------------------
+
+REDACTED_SECRET_PLACEHOLDER = "[REDACTED_SECRET]"
+
+
+class SecretScrubber:
+    """Exact-value scrubber applied at the persistence boundary.
+
+    Invariant: a known secret's *complete value* must never reach any
+    persisted artifact, regardless of which side (request or response) it
+    re-appears from.  An untrusted server can echo the API key back in a
+    response header, body, plain text, or an error message — this scrubber
+    removes exactly those known values.
+
+    Scope discipline (fail-safe, not over-eager):
+
+    - Only *exact known secret values* are replaced — no fuzzy substring
+      guessing over ordinary text, so non-sensitive evidence is preserved.
+    - Both the raw form and the JSON-escaped form of each secret are
+      replaced, so scrubbing serialized JSON is reliable.
+    """
+
+    def __init__(self, secrets: Sequence[str]) -> None:
+        # Deduplicate, drop empties (an empty "secret" would match everything).
+        self._secrets: tuple[str, ...] = tuple(dict.fromkeys(s for s in secrets if s))
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        return self._secrets
+
+    def scrub_text(self, text: str) -> str:
+        """Replace every exact occurrence of a known secret in *text*."""
+        for secret in self._secrets:
+            # Longest variant first so overlapping escaped forms are stable.
+            variants = {secret, json.dumps(secret)[1:-1]}
+            for variant in sorted(variants, key=len, reverse=True):
+                if variant:
+                    text = text.replace(variant, REDACTED_SECRET_PLACEHOLDER)
+        return text
+
+    def scrub(self, data: Any) -> Any:
+        """Recursively scrub a structure about to be persisted.
+
+        Strings are exact-value scrubbed; mappings are scrubbed in both key
+        and value; sequences are scrubbed element-wise.  Other scalar types
+        pass through unchanged.
+        """
+        if isinstance(data, str):
+            return self.scrub_text(data)
+        if isinstance(data, Mapping):
+            return {self.scrub(k): self.scrub(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            scrubbed = [self.scrub(item) for item in data]
+            return type(data)(scrubbed) if isinstance(data, tuple) else scrubbed
+        return data

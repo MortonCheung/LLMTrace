@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel, Field
 
+from llmtrace.adapters.base import BenchmarkAdapterError
 from llmtrace.adapters.code_execution import CodeExecutionBackend, create_code_execution_backend
 from llmtrace.analysis.behavior_drift import BehaviorDriftEngine, BehaviorDriftResult
 from llmtrace.analysis.behavior_models import (
@@ -19,11 +21,12 @@ from llmtrace.analysis.behavior_models import (
     BehaviorRunSnapshot,
 )
 from llmtrace.analysis.behavior_snapshot import BehaviorSnapshotBuilder
-from llmtrace.benchmarks.models import BenchmarkRunResult
-from llmtrace.execution.artifacts import RunArtifactRepository, sha256_of
+from llmtrace.benchmarks.models import BenchmarkRunResult, ItemStatus
+from llmtrace.execution.artifacts import ArtifactIntegrityError, RunArtifactRepository, sha256_of
 from llmtrace.execution.budget import RequestBudget
 from llmtrace.execution.evidence import InMemoryEvidenceRecorder
 from llmtrace.execution.models import (
+    BenchmarkMeasurementSummary,
     RunArtifactManifest,
     UnifiedExecutionPlan,
     UnifiedRunResult,
@@ -41,6 +44,7 @@ from llmtrace.scoring.errors import ScoringError
 from llmtrace.scoring.models import CapabilityProfile
 from llmtrace.scoring.policy import CapabilityScoringPolicy
 from llmtrace.scoring.reference import ReferenceSnapshot
+from llmtrace.security.redaction import SecretScrubber
 
 if TYPE_CHECKING:
     from llmtrace.config import AuditConfig
@@ -48,7 +52,12 @@ if TYPE_CHECKING:
 
 
 class PreflightError(Exception):
-    """Raised when preflight fails before any API request is sent."""
+    """Raised when preflight fails before any API request is sent.
+
+    Raised *before* a provider is created, so a preflight failure by
+    construction implies zero target HTTP requests, zero consumed budget,
+    and zero recorded evidence.
+    """
 
     error_code = "PREFLIGHT_FAILURE"
 
@@ -71,10 +80,15 @@ class UnifiedRunRequest(BaseModel):
 class UnifiedAuditRunner:
     """Execute the full pipeline: protocol → benchmark → scoring → report.
 
+    Provider lifecycle ownership: this runner is the *single* owner.  One
+    provider context wraps both the protocol probes and the Quick Suite, so
+    ``provider.client`` is valid for the whole execution and the recorder /
+    request budget accumulate across protocol → benchmark as one state.
+
     Stages::
 
-        PRECHECK → PLAN → PROTOCOL → BENCHMARK → SCORING → SNAPSHOT
-        → HISTORY COMPARISON → REFERENCE COMPARISON → REPORT/ARTIFACTS
+        PREFLIGHT → PROVIDER OPEN → PROTOCOL → BENCHMARK → SCORING → SNAPSHOT
+        → HISTORY COMPARISON → REFERENCE COMPARISON → PROVIDER CLOSE → ARTIFACTS
     """
 
     def __init__(
@@ -103,6 +117,16 @@ class UnifiedAuditRunner:
         self._max_wall_seconds = max_wall_seconds
         self._recorder = InMemoryEvidenceRecorder()
         self._policy = CapabilityScoringPolicy.create_v1()
+        # Output-boundary scrubber: the known API key must never reach a
+        # persisted artifact, whichever side (request or response) it leaks
+        # from.
+        self._scrubber = SecretScrubber([api_key])
+        self._budget: RequestBudget | None = None
+
+    @property
+    def request_budget(self) -> RequestBudget | None:
+        """The run's request budget, if execution has started."""
+        return self._budget
 
     async def run(self) -> UnifiedRunResult:
         """Run the whole pipeline; on wall-clock timeout salvage a PARTIAL result."""
@@ -123,6 +147,13 @@ class UnifiedAuditRunner:
         warnings: list[str] = []
         plan = build_unified_execution_plan(self._config, target_id=self._target_id, policy=self._policy)
         budget = RequestBudget(plan.maximum_requests)
+        self._budget = budget
+
+        # ---- PREFLIGHT -----------------------------------------------------
+        # Every predictable failure must happen before a provider exists and
+        # before the first real HTTP request is sent.
+        self._preflight()
+
         provider = create_provider(
             self._config,
             self._api_key,
@@ -130,38 +161,54 @@ class UnifiedAuditRunner:
             request_budget=budget,
         )
 
-        # ---- PROTOCOL ----------------------------------------------------
-        protocol_outcome = await ProtocolAuditExecutor(self._config, provider).run()
-        audit_result = protocol_outcome.result
-        if protocol_outcome.blocking_failure:
-            warnings.append(f"protocol blocking failure at stage: {protocol_outcome.blocking_stage}")
+        # ---- PROTOCOL + BENCHMARK under one provider context ---------------
+        # Single lifecycle owner: the runner opens the provider, hands the
+        # *open* provider to both executors, and closes it on any exit path
+        # (success, exception, timeout, cancellation).
+        async with provider:
+            protocol_outcome = await ProtocolAuditExecutor(self._config, provider).run_open_provider()
+            audit_result = protocol_outcome.result
+            if protocol_outcome.blocking_failure:
+                warnings.append(f"protocol blocking failure at stage: {protocol_outcome.blocking_stage}")
 
-        # ---- BENCHMARK / SCORING / SNAPSHOT -------------------------------
-        capability_profile = None
-        behavior_snapshot = None
-        benchmark_plans = []
-        benchmark_runs: list[BenchmarkRunResult] = []
-        benchmark_sections: list[BenchmarkReportSection] = []
+            # ---- BENCHMARK / SCORING / SNAPSHOT ---------------------------
+            capability_profile = None
+            behavior_snapshot = None
+            benchmark_plans = []
+            benchmark_runs: list[BenchmarkRunResult] = []
+            benchmark_sections: list[BenchmarkReportSection] = []
 
-        if not protocol_outcome.blocking_failure:
-            suite_runner = QuickSuiteRunner(provider, code_backend=self._code_backend)
-            suite_result = await suite_runner.run()
-            benchmark_plans = list(suite_result.plans)
-            benchmark_runs = list(suite_result.run_results)
-            benchmark_sections = list(suite_result.report_sections)
+            if not protocol_outcome.blocking_failure:
+                suite_runner = QuickSuiteRunner(provider, code_backend=self._code_backend)
+                suite_result = await suite_runner.run()
+                benchmark_plans = list(suite_result.plans)
+                benchmark_runs = list(suite_result.run_results)
+                benchmark_sections = list(suite_result.report_sections)
 
-            registry = self._quick_registry()
-            capability_profile = aggregate_capability_profile(benchmark_runs, registry, self._policy, strict=True)
+                registry = self._quick_registry()
+                capability_profile = aggregate_capability_profile(benchmark_runs, registry, self._policy, strict=True)
 
-            builder = BehaviorSnapshotBuilder()
-            behavior_snapshot = builder.build(
-                run_results=benchmark_runs,
-                profile=capability_profile,
-                evidence=list(self._recorder.list()),
-                target_id=self._target_id,
-                candidate_model_id=self._config.model,
-                generation_config=self._generation_config(),
-            )
+                builder = BehaviorSnapshotBuilder()
+                behavior_snapshot = builder.build(
+                    run_results=benchmark_runs,
+                    profile=capability_profile,
+                    evidence=list(self._recorder.list()),
+                    target_id=self._target_id,
+                    candidate_model_id=self._config.model,
+                    generation_config=self._generation_config(),
+                )
+
+        # ---- MEASUREMENT HEALTH ---------------------------------------------
+        measurement = self._measurement_summary(benchmark_runs)
+        if measurement is not None:
+            if measurement.graded_item_count == 0:
+                warnings.append(f"benchmark measurement unavailable: 0 of {measurement.total_item_count} items graded")
+            elif measurement.failure_item_count or measurement.ungradable_item_count:
+                warnings.append(
+                    f"benchmark measurement degraded: {measurement.failure_item_count} failure, "
+                    f"{measurement.ungradable_item_count} ungradable, "
+                    f"{measurement.graded_item_count} graded of {measurement.total_item_count} items"
+                )
 
         # ---- HISTORY COMPARISON -------------------------------------------
         behavior_drift = None
@@ -187,7 +234,7 @@ class UnifiedAuditRunner:
 
         # ---- STATUS --------------------------------------------------------
         actual_requests = budget.consumed_requests
-        status = self._status(warnings, protocol_outcome.blocking_failure, capability_profile is not None)
+        status = self._status(warnings, protocol_outcome.blocking_failure, capability_profile is not None, measurement)
         unified_evidence = tuple(self._recorder.list())
 
         result = UnifiedRunResult(
@@ -198,12 +245,13 @@ class UnifiedAuditRunner:
             benchmark_plans=tuple(benchmark_plans),
             benchmark_runs=tuple(benchmark_runs),
             benchmark_sections=tuple(benchmark_sections),
+            measurement_summary=measurement,
             capability_profile=capability_profile,
             behavior_snapshot=behavior_snapshot,
             behavior_drift=behavior_drift,
             reference_comparison=reference_comparison,
             evidence=unified_evidence,
-            warnings=tuple(warnings),
+            warnings=tuple(self._scrubber.scrub_text(w) for w in warnings),
             started_at=started_at,
             finished_at=datetime.now(UTC),
         )
@@ -220,6 +268,89 @@ class UnifiedAuditRunner:
             reference_snapshot_id=reference_snapshot_id,
         )
         return result
+
+    # -- Preflight -------------------------------------------------------------
+
+    def _preflight(self) -> None:
+        """Fail closed on every predictable problem, before any HTTP request.
+
+        Checks (I/O + schema validity only — compatibility stays with
+        ``BehaviorDriftEngine`` / ``CapabilityComparator`` after the current
+        profile exists):
+
+        - Quick Suite manifest + resource integrity (files, counts, hashes);
+        - secure code-execution sandbox availability;
+        - explicit baseline snapshot exists and parses as a BehaviorRunSnapshot;
+        - explicit reference snapshot exists and parses as a ReferenceSnapshot;
+        - artifact root can be created and written (probe file, cleaned up).
+        """
+        from llmtrace.adapters.quick_suite import verify_quick_suite_resources
+
+        try:
+            verify_quick_suite_resources()
+        except BenchmarkAdapterError as exc:
+            raise PreflightError(f"quick suite resources invalid: {exc}") from exc
+
+        if not self._code_backend.is_available():
+            raise PreflightError("secure code execution sandbox unavailable; benchmark requires it")
+
+        if self._baseline_snapshot_path is not None:
+            path = self._baseline_snapshot_path
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PreflightError(f"baseline snapshot unreadable: {path}") from exc
+            try:
+                BehaviorRunSnapshot.model_validate_json(raw)
+            except ValueError as exc:
+                raise PreflightError(f"baseline snapshot is not a valid BehaviorRunSnapshot: {path}") from exc
+
+        if self._reference_snapshot_path is not None:
+            path = self._reference_snapshot_path
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PreflightError(f"reference snapshot unreadable: {path}") from exc
+            try:
+                ReferenceSnapshot.model_validate_json(raw)
+            except ValueError as exc:
+                raise PreflightError(f"reference snapshot is not a valid ReferenceSnapshot: {path}") from exc
+
+        try:
+            self._repository.ensure_writable()
+        except OSError as exc:
+            raise PreflightError("artifact root is not writable") from exc
+
+    # -- Measurement health ------------------------------------------------------
+
+    @staticmethod
+    def _measurement_summary(runs: Sequence[BenchmarkRunResult]) -> BenchmarkMeasurementSummary | None:
+        """Deterministic measurement health from the canonical item chain.
+
+        GRADED items with score 0.0 count as *valid* measurements — a wrong
+        answer is a measured answer, never a failure.
+        """
+        graded = failure = ungradable = 0
+        for run in runs:
+            for attempt in run.task_attempts:
+                for item in attempt.item_results:
+                    if item.status == ItemStatus.GRADED:
+                        graded += 1
+                    elif item.status == ItemStatus.FAILURE:
+                        failure += 1
+                    else:
+                        ungradable += 1
+        total = graded + failure + ungradable
+        if total == 0:
+            return None
+        return BenchmarkMeasurementSummary(
+            total_item_count=total,
+            graded_item_count=graded,
+            failure_item_count=failure,
+            ungradable_item_count=ungradable,
+            execution_coverage=(total - failure) / total,
+            grading_coverage=graded / total,
+        )
 
     # -- Plan ----------------------------------------------------------------
 
@@ -246,8 +377,16 @@ class UnifiedAuditRunner:
         execution_id: str,
         warnings: list[str],
     ) -> tuple[BehaviorDriftResult | None, str | None, str | None]:
-        """Find the newest compatible prior snapshot; never self-compare."""
-        candidates = self._repository.find_behavior_snapshots(
+        """Find the newest compatible, *integrity-verified* prior snapshot.
+
+        For each candidate (newest first): verify the artifact SHA against
+        the baseline manifest's recorded hash, parse it, then let the drift
+        engine's compatibility gate decide.  A missing / corrupted /
+        hash-mismatched / unparseable candidate is skipped with an integrity
+        warning and the search continues with older candidates — the current
+        run is never crashed by a tampered historical artifact.
+        """
+        candidates = self._repository.find_behavior_snapshot_candidates(
             target_id=self._target_id,
             candidate_model_id=self._config.model,
             exclude_execution_id=execution_id,
@@ -259,15 +398,23 @@ class UnifiedAuditRunner:
 
         engine = BehaviorDriftEngine()
         policy = BehaviorDriftPolicy.create_v1()
-        for manifest, prior_snapshot in candidates:
+        for manifest in candidates:
+            try:
+                prior_snapshot = self._repository.load_behavior_snapshot(manifest.execution_id)
+            except ArtifactIntegrityError as exc:
+                warnings.append(f"skipped corrupted historical baseline {manifest.execution_id}: {exc}")
+                continue
+            if prior_snapshot is None:
+                continue
             try:
                 drift = engine.compare(prior_snapshot, snapshot, policy)
             except BehaviorDriftCompatibilityError as exc:
                 warnings.append(f"skipped incompatible baseline {manifest.execution_id}: {exc.error_code}")
                 continue
-            sha = sha256_of(prior_snapshot.model_dump_json())
-            return drift, manifest.execution_id, sha
-        # History exists but no candidate was compatible — a real diagnostic.
+            # The baseline manifest's recorded hash IS the historical
+            # artifact's real SHA — never recompute from a re-serialization.
+            return drift, manifest.execution_id, manifest.artifacts["behavior_snapshot.json"]
+        # History exists but no candidate was usable — a real diagnostic.
         warnings.append("no compatible historical baseline found; behavior drift skipped")
         return None, None, None
 
@@ -300,7 +447,9 @@ class UnifiedAuditRunner:
             warnings.append(f"explicit baseline incompatible: {exc.error_code}")
             return None, None, None
 
-        return drift, None, sha256_of(baseline.model_dump_json())
+        # Content hash of the file as written — the honest SHA of this
+        # baseline artifact (there is no manifest for a file-supplied baseline).
+        return drift, None, sha256_of(raw)
 
     # -- Reference -------------------------------------------------------------
 
@@ -334,8 +483,18 @@ class UnifiedAuditRunner:
     # -- Status / artifacts ------------------------------------------------------
 
     @staticmethod
-    def _status(warnings: list[str], blocking_failure: bool, has_profile: bool) -> UnifiedRunStatus:
+    def _status(
+        warnings: list[str],
+        blocking_failure: bool,
+        has_profile: bool,
+        measurement: BenchmarkMeasurementSummary | None,
+    ) -> UnifiedRunStatus:
         if blocking_failure:
+            return UnifiedRunStatus.PARTIAL
+        # Zero graded items = the benchmark stage produced no usable
+        # measurement (e.g. every request failed) — a COMPLETED label would
+        # hide total measurement loss behind per-item structures.
+        if measurement is not None and measurement.graded_item_count == 0:
             return UnifiedRunStatus.PARTIAL
         if warnings:
             return UnifiedRunStatus.COMPLETED_WITH_WARNINGS
@@ -349,7 +508,7 @@ class UnifiedAuditRunner:
             status=UnifiedRunStatus.FAILED,
             plan=self._plan(),
             evidence=tuple(self._recorder.list()),
-            warnings=("execution exceeded the wall-clock limit and was cancelled",),
+            warnings=(self._scrubber.scrub_text("execution exceeded the wall-clock limit and was cancelled"),),
             started_at=started_at,
             finished_at=datetime.now(UTC),
         )
@@ -364,6 +523,7 @@ class UnifiedAuditRunner:
         reference_snapshot_id: str | None,
     ) -> None:
         assert result.protocol_audit is not None
+        scrub = self._scrubber.scrub_text
         artifacts: dict[str, str] = {}
 
         with tempfile.TemporaryDirectory(prefix="llmtrace-report-") as tmpdir:
@@ -384,15 +544,15 @@ class UnifiedAuditRunner:
                 behavior_drift=result.behavior_drift,
                 capability_profile=result.capability_profile,
             )
-            artifacts["report.json"] = json_path.read_text(encoding="utf-8")
-            artifacts["report.html"] = html_path.read_text(encoding="utf-8")
+            artifacts["report.json"] = scrub(json_path.read_text(encoding="utf-8"))
+            artifacts["report.html"] = scrub(html_path.read_text(encoding="utf-8"))
 
         if result.capability_profile is not None:
-            artifacts["capability_profile.json"] = result.capability_profile.model_dump_json(indent=2)
+            artifacts["capability_profile.json"] = scrub(result.capability_profile.model_dump_json(indent=2))
         if result.behavior_snapshot is not None:
-            artifacts["behavior_snapshot.json"] = result.behavior_snapshot.model_dump_json(indent=2)
+            artifacts["behavior_snapshot.json"] = scrub(result.behavior_snapshot.model_dump_json(indent=2))
         if result.benchmark_runs:
-            artifacts["benchmark_runs.json"] = _benchmark_runs_json(result.benchmark_runs)
+            artifacts["benchmark_runs.json"] = scrub(_benchmark_runs_json(result.benchmark_runs))
 
         manifest = RunArtifactManifest(
             execution_id=result.execution_id,
@@ -421,7 +581,7 @@ class UnifiedAuditRunner:
         self._repository.commit(manifest, artifacts)
 
     def _execution_metadata(self, result: UnifiedRunResult, actual_requests: int) -> dict[str, object]:
-        return {
+        metadata: dict[str, object] = {
             "execution_id": result.execution_id,
             "target_id": self._target_id,
             "status": result.status.value,
@@ -433,6 +593,10 @@ class UnifiedAuditRunner:
             "requires_secure_code_sandbox": result.plan.requires_secure_code_sandbox,
             "plan_id": result.plan.plan_id,
         }
+        if result.measurement_summary is not None:
+            metadata["benchmark_measurement"] = result.measurement_summary.model_dump(mode="json")
+        # Defense in depth: the metadata crosses the persistence boundary.
+        return cast("dict[str, object]", self._scrubber.scrub(metadata))
 
     def _redacted_base_url(self) -> str:
         from llmtrace.security.redaction import redact_url

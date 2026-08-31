@@ -183,7 +183,11 @@ class BaseProvider(ABC):
             evidence.response_time = datetime.now(tz=UTC)
 
             evidence.http_status = response.status_code
-            evidence.response_headers = dict(response.headers)
+            # Response-side header-key redaction: an untrusted server can echo
+            # Authorization/Cookie values back — sensitive header keys must
+            # never be persisted raw (exact-value secret scrubbing happens at
+            # the persistence boundary on top of this).
+            evidence.response_headers = redact_headers(dict(response.headers))
             evidence.request_id = _extract_request_id(evidence.response_headers)
             full_bytes = response.content
             evidence.response_body_size = len(full_bytes)
@@ -234,7 +238,11 @@ class BaseProvider(ABC):
             evidence.response_time = datetime.now(tz=UTC)
 
             evidence.http_status = response.status_code
-            evidence.response_headers = dict(response.headers)
+            # Response-side header-key redaction: an untrusted server can echo
+            # Authorization/Cookie values back — sensitive header keys must
+            # never be persisted raw (exact-value secret scrubbing happens at
+            # the persistence boundary on top of this).
+            evidence.response_headers = redact_headers(dict(response.headers))
             evidence.request_id = _extract_request_id(evidence.response_headers)
 
             # 响应体按原始字节处理：哈希基于完整字节，摘要再按字节截断
@@ -280,7 +288,8 @@ class BaseProvider(ABC):
         try:
             async with self.client.stream("POST", url, headers=headers, json=body) as response:
                 evidence.http_status = response.status_code
-                evidence.response_headers = dict(response.headers)
+                # Response-side header-key redaction (same as complete()).
+                evidence.response_headers = redact_headers(dict(response.headers))
                 evidence.request_id = _extract_request_id(evidence.response_headers)
 
                 # 按原始字节累积，同时通过增量行缓冲解析 SSE 事件

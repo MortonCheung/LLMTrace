@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import ClassVar
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
@@ -140,6 +141,50 @@ class RunArtifactManifest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Benchmark measurement summary
+# ---------------------------------------------------------------------------
+
+
+class BenchmarkMeasurementSummary(BaseModel):
+    """Deterministic measurement health of the benchmark stage.
+
+    Computed from the canonical ``BenchmarkRunResult → TaskAttempt.item_results``
+    chain — it never changes scoring, it only surfaces how much of the Quick
+    Suite was actually measured.  A GRADED item with score 0.0 is a *valid*
+    measurement (a wrong answer is still a measured answer); only FAILURE /
+    UNGRADABLE items represent lost or degraded measurement.
+
+    Status rules (versioned, deterministic — no magic thresholds):
+
+    - protocol blocking failure                → PARTIAL
+    - graded_item_count == 0                   → PARTIAL (measurement unavailable)
+    - FAILURE/UNGRADABLE present, graded > 0   → COMPLETED_WITH_WARNINGS (degraded)
+    - 32/32 GRADED and no other warning        → COMPLETED
+    """
+
+    MEASUREMENT_STATUS_RULES: ClassVar[str] = "v1: graded==0→PARTIAL; any failure/ungradable→warnings; else COMPLETED"
+
+    total_item_count: int = Field(..., ge=0, description="Planned items actually attempted")
+    graded_item_count: int = Field(..., ge=0, description="Items with a valid graded measurement (incl. score=0)")
+    failure_item_count: int = Field(..., ge=0, description="Items lost to provider/HTTP/execution failures")
+    ungradable_item_count: int = Field(..., ge=0, description="Items whose answer could not be graded")
+    execution_coverage: float = Field(..., ge=0.0, le=1.0, description="(total - failure) / total")
+    grading_coverage: float = Field(..., ge=0.0, le=1.0, description="graded / total")
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> BenchmarkMeasurementSummary:
+        total = self.total_item_count
+        if self.graded_item_count + self.failure_item_count + self.ungradable_item_count != total:
+            raise ValueError(
+                f"graded ({self.graded_item_count}) + failure ({self.failure_item_count}) "
+                f"+ ungradable ({self.ungradable_item_count}) must equal total ({total})"
+            )
+        return self
+
+
+# ---------------------------------------------------------------------------
 # Unified run result
 # ---------------------------------------------------------------------------
 
@@ -155,6 +200,10 @@ class UnifiedRunResult(BaseModel):
     benchmark_plans: tuple[RunPlan, ...] = Field(default_factory=tuple)
     benchmark_runs: tuple[BenchmarkRunResult, ...] = Field(default_factory=tuple)
     benchmark_sections: tuple[BenchmarkReportSection, ...] = Field(default_factory=tuple)
+    measurement_summary: BenchmarkMeasurementSummary | None = Field(
+        default=None,
+        description="Benchmark measurement health; None when the benchmark stage did not run",
+    )
 
     capability_profile: CapabilityProfile | None = Field(default=None)
     behavior_snapshot: BehaviorRunSnapshot | None = Field(default=None)
