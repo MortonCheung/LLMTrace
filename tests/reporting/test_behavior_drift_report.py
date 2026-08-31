@@ -92,14 +92,14 @@ class TestJsonBehaviorDrift:
 
         assert distinctive not in raw
 
-    def test_schema_version_is_1_2_with_behavior_drift(self) -> None:
+    def test_schema_version_is_1_3_with_behavior_drift(self) -> None:
         result = _make_minimal_audit_result()
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
             generate_json_report(result, output_path, behavior_drift=_drift_result())
             data = json.loads(output_path.read_text())
 
-        assert data["schema_version"] == "1.2"
+        assert data["schema_version"] == "1.3"
 
 
 class TestHtmlBehaviorDrift:

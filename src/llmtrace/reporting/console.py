@@ -7,6 +7,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from llmtrace.models.audit import AuditResult, RiskLevel
+from llmtrace.security.redaction import redact_url
 
 _console = Console()
 
@@ -21,7 +22,7 @@ def print_audit_summary(result: AuditResult) -> None:
     table.add_column("项目", style="cyan")
     table.add_column("值", style="white")
 
-    table.add_row("Endpoint", config.base_url)
+    table.add_row("Endpoint", redact_url(config.base_url))
     table.add_row("协议", config.protocol.value)
     table.add_row("声称模型", config.model)
     table.add_row("报告 ID", result.report_id)
@@ -149,3 +150,70 @@ def print_compare_result(result: dict[str, object]) -> None:
         _console.print("[yellow]警告:[/]")
         for w in warnings:
             _console.print(f"  [yellow]- {w}[/]")
+
+
+def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
+    """Print the unified ``llmtrace run`` summary.
+
+    ``artifacts`` maps logical artifact names to their on-disk paths.
+    """
+    _console.print()
+    _console.print(Panel.fit("LLMTrace Unified Audit", style="bold blue"))
+
+    plan = result.plan  # type: ignore[attr-defined]
+    table = Table(title="执行摘要")
+    table.add_column("项目", style="cyan")
+    table.add_column("值", style="white")
+
+    table.add_row("Target", str(result.target_id))  # type: ignore[attr-defined]
+    protocol = "N/A"
+    if result.protocol_audit is not None:  # type: ignore[attr-defined]
+        protocol = str(result.protocol_audit.config.protocol.value)  # type: ignore[attr-defined]
+    table.add_row("协议", protocol)
+    table.add_row("声明模型", plan.candidate_model_id)
+    table.add_row("Execution ID", str(result.execution_id))  # type: ignore[attr-defined]
+    table.add_row("状态", str(result.status.value))  # type: ignore[attr-defined]
+
+    if result.protocol_audit is not None:  # type: ignore[attr-defined]
+        table.add_row("协议风险", str(result.protocol_audit.risk_level.value))  # type: ignore[attr-defined]
+
+    if result.capability_profile is not None:  # type: ignore[attr-defined]
+        profile = result.capability_profile  # type: ignore[attr-defined]
+        table.add_row("Coverage", f"{profile.coverage_weight:.2f}")
+        for d in profile.dimensions:
+            table.add_row(f"  {d.dimension.value}", f"{d.raw_normalized_score:.4f} (raw)")
+
+    drift_text = "no baseline"
+    if result.behavior_drift is not None:  # type: ignore[attr-defined]
+        drift_text = result.behavior_drift.drift_level.value  # type: ignore[attr-defined]
+    table.add_row("Behavior Drift", drift_text)
+
+    measurement = getattr(result, "measurement_summary", None)
+    if measurement is not None:
+        table.add_row(
+            "Benchmark 测量",
+            f"{measurement.graded_item_count}/{measurement.total_item_count} graded, "
+            f"{measurement.failure_item_count} failure, {measurement.ungradable_item_count} ungradable",
+        )
+        table.add_row(
+            "测量覆盖率",
+            f"grading {measurement.grading_coverage:.0%} / execution {measurement.execution_coverage:.0%}",
+        )
+    elif result.protocol_audit is not None and getattr(result, "benchmark_runs", None):  # type: ignore[attr-defined]
+        table.add_row("Benchmark 测量", "unavailable")
+
+    ref_text = "compared" if result.reference_comparison is not None else "unavailable"  # type: ignore[attr-defined]
+    table.add_row("Reference", ref_text)
+    table.add_row("请求数", f"planned {plan.planned_requests}")
+
+    _console.print(table)
+    _console.print()
+    _console.print(
+        "[bold yellow]UNCALIBRATED：[/][yellow]capability 分数为 raw / provisional，不是 0–100 正式评分。[/]"
+    )
+
+    if artifacts:
+        _console.print()
+        _console.print("[bold]Artifacts:[/]")
+        for name, path in artifacts.items():
+            _console.print(f"  [cyan]{name}[/] → {path}")

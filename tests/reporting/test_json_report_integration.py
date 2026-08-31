@@ -157,10 +157,10 @@ class TestJsonReportNoBenchmarks:
             generate_json_report(result, output_path)
             data = json.loads(output_path.read_text())
 
-        assert data["schema_version"] == "1.2"
+        assert data["schema_version"] == "1.3"
         assert data["benchmarks"] == []
         assert "content_hash" in data
-        assert data["meta"]["schema_version"] == "1.2"
+        assert data["meta"]["schema_version"] == "1.3"
 
     def test_none_benchmark_sections_produces_empty_list(self) -> None:
         """Passing None for benchmark_sections produces empty list."""
@@ -230,16 +230,16 @@ class TestJsonReportWithBenchmarks:
 
         assert h1 != h2, "Content hash should change when benchmarks are included"
 
-    def test_schema_version_is_1_2(self) -> None:
-        """Both top-level and meta.schema_version equal 1.2."""
+    def test_schema_version_is_1_3(self) -> None:
+        """Both top-level and meta.schema_version equal 1.3."""
         result = _make_minimal_audit_result()
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
             generate_json_report(result, output_path)
             data = json.loads(output_path.read_text())
 
-        assert data["schema_version"] == "1.2"
-        assert data["meta"]["schema_version"] == "1.2"
+        assert data["schema_version"] == "1.3"
+        assert data["meta"]["schema_version"] == "1.3"
 
     def test_benchmark_failure_json(self) -> None:
         """Report correctly serializes a benchmark section with failures."""

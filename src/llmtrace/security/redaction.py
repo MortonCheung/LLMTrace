@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import parse_qs, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 
 # 需要脱敏的请求头
 SENSITIVE_HEADERS = {"authorization", "x-api-key", "api-key", "cookie", "set-cookie"}
@@ -34,9 +36,21 @@ def redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def redact_url(url: str) -> str:
-    """脱敏 URL 中的敏感查询参数."""
+    """脱敏 URL 中的凭据与敏感查询参数.
+
+    Covers both credential leakage (``https://user:password@host/``) and
+    secret query values (``https://host/?api_key=secret``).
+    """
     parsed = urlparse(url)
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        # 保留 host[:port]，去掉 userinfo 凭据
+        netloc = "[REDACTED]@" + netloc.rsplit("@", 1)[1]
+
     if not parsed.query:
+        if netloc != parsed.netloc:
+            return urlunparse(parsed._replace(netloc=netloc))
         return url
 
     params = parse_qs(parsed.query, keep_blank_values=True)
@@ -54,8 +68,45 @@ def redact_url(url: str) -> str:
             new_query_parts.append(f"{key}={v}")
 
     new_query = "&".join(new_query_parts)
-    new_parsed = parsed._replace(query=new_query)
+    new_parsed = parsed._replace(query=new_query, netloc=netloc)
     return urlunparse(new_parsed)
+
+
+def extract_url_secret_values(url: str) -> tuple[str, ...]:
+    """Extract known secret *values* embedded in a URL.
+
+    Covers both userinfo credentials (``https://user:password@host/`` — both
+    segments are treated as credentials) and the values of sensitive query
+    parameters (``?token=abc``).  ``SENSITIVE_QUERY_KEYS`` is the single
+    source of truth for which query parameters are secret — never duplicated.
+
+    Both the URL-decoded and the raw (encoded) form of each value are
+    collected, because a server may echo either back.  Non-sensitive query
+    values (e.g. ``region=us``) are deliberately excluded.
+    """
+    parsed = urlparse(url)
+    secrets: list[str] = []
+
+    if "@" in parsed.netloc:
+        # userinfo sits before the last '@'; split user / password on the
+        # first ':' of that segment (usernames and passwords both live in
+        # the credential zone and may be echoed back by an untrusted host).
+        userinfo = parsed.netloc.rsplit("@", 1)[0]
+        for credential in userinfo.split(":", 1):
+            if credential:
+                secrets.append(unquote(credential))
+
+    if parsed.query:
+        for raw_part in parsed.query.split("&"):
+            raw_key, sep, raw_value = raw_part.partition("=")
+            if not sep:
+                continue
+            if raw_key.lower() in SENSITIVE_QUERY_KEYS:
+                secrets.append(unquote(raw_value))
+                if raw_value:
+                    secrets.append(raw_value)
+
+    return tuple(dict.fromkeys(s for s in secrets if s))
 
 
 def redact_json_body(body: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -108,3 +159,62 @@ def sanitize_for_html(text: str) -> str:
         .replace('"', "&quot;")
         .replace("'", "&#x27;")
     )
+
+
+# ---------------------------------------------------------------------------
+# Output-boundary secret scrubber
+# ---------------------------------------------------------------------------
+
+REDACTED_SECRET_PLACEHOLDER = "[REDACTED_SECRET]"
+
+
+class SecretScrubber:
+    """Exact-value scrubber applied at the persistence boundary.
+
+    Invariant: a known secret's *complete value* must never reach any
+    persisted artifact, regardless of which side (request or response) it
+    re-appears from.  An untrusted server can echo the API key back in a
+    response header, body, plain text, or an error message — this scrubber
+    removes exactly those known values.
+
+    Scope discipline (fail-safe, not over-eager):
+
+    - Only *exact known secret values* are replaced — no fuzzy substring
+      guessing over ordinary text, so non-sensitive evidence is preserved.
+    - Both the raw form and the JSON-escaped form of each secret are
+      replaced, so scrubbing serialized JSON is reliable.
+    """
+
+    def __init__(self, secrets: Sequence[str]) -> None:
+        # Deduplicate, drop empties (an empty "secret" would match everything).
+        self._secrets: tuple[str, ...] = tuple(dict.fromkeys(s for s in secrets if s))
+
+    @property
+    def secrets(self) -> tuple[str, ...]:
+        return self._secrets
+
+    def scrub_text(self, text: str) -> str:
+        """Replace every exact occurrence of a known secret in *text*."""
+        for secret in self._secrets:
+            # Longest variant first so overlapping escaped forms are stable.
+            variants = {secret, json.dumps(secret)[1:-1]}
+            for variant in sorted(variants, key=len, reverse=True):
+                if variant:
+                    text = text.replace(variant, REDACTED_SECRET_PLACEHOLDER)
+        return text
+
+    def scrub(self, data: Any) -> Any:
+        """Recursively scrub a structure about to be persisted.
+
+        Strings are exact-value scrubbed; mappings are scrubbed in both key
+        and value; sequences are scrubbed element-wise.  Other scalar types
+        pass through unchanged.
+        """
+        if isinstance(data, str):
+            return self.scrub_text(data)
+        if isinstance(data, Mapping):
+            return {self.scrub(k): self.scrub(v) for k, v in data.items()}
+        if isinstance(data, (list, tuple)):
+            scrubbed = [self.scrub(item) for item in data]
+            return type(data)(scrubbed) if isinstance(data, tuple) else scrubbed
+        return data

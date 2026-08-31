@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from llmtrace.benchmarks.models import CompletionOptions
-from llmtrace.config import AuditConfig, AuthStyle
+from llmtrace.config import AuthStyle
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.providers.base import (
     BaseProvider,
@@ -21,9 +21,6 @@ ANTHROPIC_VERSION = "2023-06-01"
 
 class AnthropicCompatibleProvider(BaseProvider):
     """Anthropic-compatible 协议 Provider."""
-
-    def __init__(self, config: AuditConfig, api_key: str) -> None:
-        super().__init__(config, api_key)
 
     def _resolve_auth_style(self) -> AuthStyle:
         """解析鉴权方式."""

@@ -10,6 +10,8 @@ import httpx
 
 from llmtrace.benchmarks.models import CompletionOptions
 from llmtrace.config import AuditConfig
+from llmtrace.execution.budget import RequestBudget
+from llmtrace.execution.evidence import EvidenceRecorder
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.security.redaction import redact_headers, redact_json_body, redact_url
 from llmtrace.utilities.hashing import sha256_hash
@@ -77,12 +79,40 @@ def _validate_do_sample(do_sample: bool | None) -> None:
 
 
 class BaseProvider(ABC):
-    """Provider 抽象基类."""
+    """Provider 抽象基类.
 
-    def __init__(self, config: AuditConfig, api_key: str) -> None:
+    Optional hooks:
+
+    - ``evidence_recorder``: every real HTTP request (success, HTTP error, or
+      exception) is recorded exactly once, in arrival order.
+    - ``request_budget``: consumed once per real HTTP request *before* it is
+      sent; exceeding the ceiling raises and the request never leaves the
+      process.
+    """
+
+    def __init__(
+        self,
+        config: AuditConfig,
+        api_key: str,
+        *,
+        evidence_recorder: EvidenceRecorder | None = None,
+        request_budget: RequestBudget | None = None,
+    ) -> None:
         self.config = config
         self.api_key = api_key
         self._client: httpx.AsyncClient | None = None
+        self._evidence_recorder = evidence_recorder
+        self._request_budget = request_budget
+
+    def _record_evidence(self, evidence: HTTPEvidence) -> None:
+        """Record a completed request exactly once (no-op without a recorder)."""
+        if self._evidence_recorder is not None:
+            self._evidence_recorder.record(evidence)
+
+    def _consume_budget(self) -> None:
+        """Reserve one request; raise before sending when the ceiling is hit."""
+        if self._request_budget is not None:
+            self._request_budget.consume(1)
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -137,10 +167,12 @@ class BaseProvider(ABC):
 
     async def list_models(self) -> tuple[HTTPEvidence, list[str]]:
         """获取模型列表."""
+        self._consume_budget()
         evidence = self._build_evidence("GET", self._build_models_url())
         evidence.evidence_type = "model_catalog"
         url = self._build_models_url()
         headers = self._build_headers()
+        models: list[str] = []
 
         try:
             evidence.request_time = datetime.now(tz=UTC)
@@ -151,25 +183,28 @@ class BaseProvider(ABC):
             evidence.response_time = datetime.now(tz=UTC)
 
             evidence.http_status = response.status_code
-            evidence.response_headers = dict(response.headers)
+            # Response-side header-key redaction: an untrusted server can echo
+            # Authorization/Cookie values back — sensitive header keys must
+            # never be persisted raw (exact-value secret scrubbing happens at
+            # the persistence boundary on top of this).
+            evidence.response_headers = redact_headers(dict(response.headers))
             evidence.request_id = _extract_request_id(evidence.response_headers)
             full_bytes = response.content
             evidence.response_body_size = len(full_bytes)
             evidence.response_body_sha256 = sha256_hash(full_bytes)
+            evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
 
             if response.status_code == 200:
                 data = response.json()
                 models = self._extract_models(data)
-                evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
-                return evidence, models
-            else:
-                evidence.response_body_summary = full_bytes.decode("utf-8", errors="replace")[:2000]
-                return evidence, []
 
         except Exception as e:
             evidence.exception_type = type(e).__name__
             evidence.exception_message = str(e)
-            return evidence, []
+
+        # 每个真实 HTTP 请求 exactly-once 记录（成功 / HTTP 错误 / 异常）
+        self._record_evidence(evidence)
+        return evidence, models
 
     async def complete(
         self,
@@ -186,6 +221,7 @@ class BaseProvider(ABC):
             options: Optional CompletionOptions for generation kwargs.
                      Providers apply these via _apply_options_to_body().
         """
+        self._consume_budget()
         url = self._build_completion_url()
         headers = self._build_headers()
         body = self._build_completion_body(model, messages)
@@ -202,7 +238,11 @@ class BaseProvider(ABC):
             evidence.response_time = datetime.now(tz=UTC)
 
             evidence.http_status = response.status_code
-            evidence.response_headers = dict(response.headers)
+            # Response-side header-key redaction: an untrusted server can echo
+            # Authorization/Cookie values back — sensitive header keys must
+            # never be persisted raw (exact-value secret scrubbing happens at
+            # the persistence boundary on top of this).
+            evidence.response_headers = redact_headers(dict(response.headers))
             evidence.request_id = _extract_request_id(evidence.response_headers)
 
             # 响应体按原始字节处理：哈希基于完整字节，摘要再按字节截断
@@ -226,10 +266,13 @@ class BaseProvider(ABC):
             evidence.exception_type = type(e).__name__
             evidence.exception_message = str(e)
 
+        # 每个真实 HTTP 请求 exactly-once 记录（成功 / HTTP 错误 / 异常）
+        self._record_evidence(evidence)
         return evidence
 
     async def stream_complete(self, model: str, messages: list[dict[str, str]]) -> HTTPEvidence:
         """流式补全请求."""
+        self._consume_budget()
         url = self._build_completion_url()
         headers = self._build_headers()
         body = self._build_stream_body(model, messages)
@@ -245,7 +288,8 @@ class BaseProvider(ABC):
         try:
             async with self.client.stream("POST", url, headers=headers, json=body) as response:
                 evidence.http_status = response.status_code
-                evidence.response_headers = dict(response.headers)
+                # Response-side header-key redaction (same as complete()).
+                evidence.response_headers = redact_headers(dict(response.headers))
                 evidence.request_id = _extract_request_id(evidence.response_headers)
 
                 # 按原始字节累积，同时通过增量行缓冲解析 SSE 事件
@@ -296,6 +340,8 @@ class BaseProvider(ABC):
             if evidence.total_latency_ms is None:
                 evidence.total_latency_ms = (time.monotonic() - start) * 1000
 
+        # 每个真实 HTTP 请求 exactly-once 记录（成功 / HTTP 错误 / 异常）
+        self._record_evidence(evidence)
         return evidence
 
     def _build_evidence(

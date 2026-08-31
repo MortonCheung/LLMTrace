@@ -18,7 +18,7 @@ from llmtrace.adapters.base import BenchmarkAdapter, BenchmarkAdapterError
 from llmtrace.adapters.code_execution import (
     CodeExecutionBackend,
     SandboxUnavailableError,
-    _InProcessExecutionBackend,
+    create_code_execution_backend,
 )
 from llmtrace.benchmarks.models import (
     AdapterFailure,
@@ -141,6 +141,34 @@ _QUICK_TASK_SPECS: dict[str, TaskSpec] = {
 }
 
 # ---------------------------------------------------------------------------
+# Canonical generation policy — single source of truth
+# ---------------------------------------------------------------------------
+
+# The Quick Suite is a fixed measuring stick: temperature=0, max_tokens=512.
+# The generation config that is actually sent, the one hashed into a
+# BehaviorRunSnapshot, and the one declared by the execution plan MUST all
+# come from here — never from three separate literals.
+QUICK_SUITE_GENERATION_CONFIG: dict[str, float | int] = {
+    "temperature": 0.0,
+    "max_tokens": 512,
+}
+
+QUICK_SUITE_BENCHMARK_REQUESTS = 32
+QUICK_SUITE_SUITE_ID = "llmtrace_quick_v1"
+QUICK_SUITE_SUITE_VERSION = "0.1.0"
+
+
+def get_quick_suite_completion_options() -> CompletionOptions:
+    """Return the canonical Quick Suite CompletionOptions."""
+    return CompletionOptions(**QUICK_SUITE_GENERATION_CONFIG)  # type: ignore[arg-type]
+
+
+def get_quick_suite_generation_config() -> dict[str, float | int]:
+    """Return a copy of the canonical Quick Suite generation config dict."""
+    return dict(QUICK_SUITE_GENERATION_CONFIG)
+
+
+# ---------------------------------------------------------------------------
 # Resource loading
 # ---------------------------------------------------------------------------
 
@@ -164,6 +192,68 @@ def _load_task_resources(task_id: str) -> dict[str, Any]:
         raise BenchmarkAdapterError(f"Resource file not found: {path}")
     with open(path) as f:
         return cast(dict[str, Any], json.load(f))
+
+
+def _subset_sha256(items: list[Any]) -> str:
+    """Canonical subset hash — the exact form recorded in manifest.json."""
+    return hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def verify_quick_suite_resources() -> None:
+    """Preflight integrity check of the Quick Suite manifest + resources.
+
+    Verifies, before any HTTP request is sent:
+
+    - ``manifest.json`` exists, parses, and covers all four tasks;
+    - every resource file exists and parses;
+    - every task's item count equals the manifest's ``sample_count`` and the
+      task spec's ``num_samples``;
+    - every task's ``subset_sha256`` matches the canonical hash of its items;
+    - the manifest's ``total_items`` equals the sum of the task counts.
+    """
+    manifest_path = _RESOURCE_DIR / "manifest.json"
+    if not manifest_path.exists():
+        raise BenchmarkAdapterError(f"Quick Suite manifest not found: {manifest_path}")
+    try:
+        with open(manifest_path) as f:
+            manifest = cast(dict[str, Any], json.load(f))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BenchmarkAdapterError(f"Quick Suite manifest unreadable: {exc}") from exc
+
+    tasks = manifest.get("tasks")
+    if not isinstance(tasks, dict) or not tasks:
+        raise BenchmarkAdapterError("Quick Suite manifest declares no tasks")
+
+    total = 0
+    for spec in _QUICK_TASK_SPECS.values():
+        meta = tasks.get(spec.task_id)
+        if not isinstance(meta, dict):
+            raise BenchmarkAdapterError(f"Quick Suite manifest is missing task '{spec.task_id}'")
+
+        resources = _load_task_resources(spec.task_id)
+        items = resources.get("items", [])
+
+        declared_count = meta.get("sample_count")
+        if len(items) != spec.num_samples or declared_count != spec.num_samples:
+            raise BenchmarkAdapterError(
+                f"Quick Suite task '{spec.task_id}' item count mismatch: "
+                f"resource has {len(items)}, manifest declares {declared_count}, spec requires {spec.num_samples}"
+            )
+
+        expected_sha = meta.get("subset_sha256")
+        actual_sha = _subset_sha256(items)
+        if not isinstance(expected_sha, str) or actual_sha != expected_sha:
+            raise BenchmarkAdapterError(
+                f"Quick Suite resource integrity failure for '{spec.task_id}': "
+                f"manifest {expected_sha} != actual {actual_sha}"
+            )
+        total += spec.num_samples
+
+    declared_total = manifest.get("total_items")
+    if declared_total != total:
+        raise BenchmarkAdapterError(
+            f"Quick Suite manifest total_items mismatch: declares {declared_total}, tasks sum to {total}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +414,9 @@ class QuickSuiteAdapter(BenchmarkAdapter):
         *,
         code_backend: CodeExecutionBackend | None = None,
     ) -> None:
-        self._code_backend = code_backend or _InProcessExecutionBackend()
+        # Fail closed: without an explicitly injected backend, only a secure
+        # sandbox (Docker) is acceptable — never an in-process executor.
+        self._code_backend = code_backend if code_backend is not None else create_code_execution_backend()
 
     # -- Properties ---------------------------------------------------------
 
@@ -335,6 +427,23 @@ class QuickSuiteAdapter(BenchmarkAdapter):
     @property
     def adapter_version(self) -> str:
         return self._ADAPTER_VERSION
+
+    def get_task_definition(self, task_id: str) -> BenchmarkTaskDefinition:
+        """Return the canonical task definition (per-task provenance source)."""
+        task_def = _QUICK_TASK_DEFS.get(task_id)
+        if task_def is None:
+            raise BenchmarkAdapterError(f"Unknown Quick Suite task: {task_id}")
+        return task_def
+
+    def validate_resources(self) -> None:
+        """Preflight: every task resource must exist with the exact item count."""
+        for spec in self.list_tasks():
+            resources = _load_task_resources(spec.task_id)
+            items = resources.get("items", [])
+            if len(items) != spec.num_samples:
+                raise BenchmarkAdapterError(
+                    f"Task {spec.task_id} has {len(items)} items but num_samples={spec.num_samples}"
+                )
 
     # -- Task listing -------------------------------------------------------
 
@@ -431,10 +540,10 @@ class QuickSuiteAdapter(BenchmarkAdapter):
             item_id = f"{task_id}:item-{idx:03d}"
 
             try:
-                options = CompletionOptions(temperature=0.0, max_tokens=512)
+                options = get_quick_suite_completion_options()
 
                 evidence = await provider.complete(
-                    model="test-model",
+                    model=provider.config.model,
                     messages=[{"role": "user", "content": prompt}],
                     options=options,
                 )

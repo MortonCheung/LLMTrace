@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from llmtrace.analysis.behavior_drift import BehaviorDriftResult
 from llmtrace.models.audit import AuditResult
@@ -13,11 +14,14 @@ from llmtrace.models.findings import FindingResult
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.scoring.comparison import ComparisonResult
+from llmtrace.scoring.models import CapabilityProfile
+from llmtrace.security.redaction import SecretScrubber, redact_url
 from llmtrace.utilities.hashing import sha256_hash
 
 # Single source of truth for schema version
 # 1.1 → 1.2: added the optional `behavior_drift` section (v0.3-D).
-SCHEMA_VERSION = "1.2"
+# 1.2 → 1.3: added `capability_profile` and execution metadata (v0.3-E).
+SCHEMA_VERSION = "1.3"
 
 
 def evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -139,14 +143,48 @@ def _behavior_drift_to_dict(drift: BehaviorDriftResult) -> dict[str, object]:
     }
 
 
+def _capability_profile_to_dict(profile: CapabilityProfile) -> dict[str, object]:
+    """将 CapabilityProfile 序列化为 capability_profile 段（明确 uncalibrated）."""
+    return {
+        "profile_version": profile.profile_version,
+        "scoring_policy_id": profile.scoring_policy_id,
+        "scoring_policy_version": profile.scoring_policy_version,
+        "coverage_weight": profile.coverage_weight,
+        "provisional_raw_index": profile.provisional_raw_index,
+        "calibrated_total_score": profile.calibrated_total_score,
+        "calibration_status": "UNCALIBRATED",
+        "dimensions": [
+            {
+                "dimension": d.dimension.value,
+                "status": d.status.value,
+                "raw_normalized_score": d.raw_normalized_score,
+                "calibrated_score": d.calibrated_score,
+                "global_weight": d.global_weight,
+                "weighted_contribution": d.weighted_contribution,
+                "task_count": d.task_count,
+                "graded_task_count": d.graded_task_count,
+                "task_coverage": d.task_coverage,
+                "source_task_ids": list(d.source_task_ids),
+                "evidence_refs": list(d.evidence_refs),
+                "warnings": list(d.warnings),
+            }
+            for d in profile.dimensions
+        ],
+        "warnings": list(profile.warnings),
+    }
+
+
 def generate_json_report(
     result: AuditResult,
     output_path: Path,
     benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
     reference_comparison: ComparisonResult | None = None,
     behavior_drift: BehaviorDriftResult | None = None,
+    capability_profile: CapabilityProfile | None = None,
+    execution_metadata: dict[str, object] | None = None,
+    secret_scrubber: SecretScrubber | None = None,
 ) -> Path:
-    """生成 JSON 报告（v1.2 — 支持 benchmark 与 behavior_drift 段).
+    """生成 JSON 报告（v1.3 — 支持 benchmark / behavior_drift / capability_profile 段).
 
     Args:
         result: 审计结果.
@@ -154,6 +192,9 @@ def generate_json_report(
         benchmark_sections: 可选 benchmark 报告段列表.
         reference_comparison: 可选 reference comparison 段（Reference Snapshot vs Candidate）.
         behavior_drift: 可选 behavior drift 段（BehaviorRunSnapshot vs BehaviorRunSnapshot）.
+        secret_scrubber: 可选持久化边界 scrubber；若提供，则在 content_hash
+            计算**之前**对完整 report 结构做精确值脱敏，保证 hash 描述的就是
+            实际落盘的字节.
 
     Returns:
         写入后的输出文件路径.
@@ -183,7 +224,7 @@ def generate_json_report(
             "report_id": result.report_id,
             "config_summary": {
                 "protocol": result.config.protocol.value,
-                "base_url": result.config.base_url,
+                "base_url": redact_url(result.config.base_url),
                 "model": result.config.model,
             },
             "probe_list": [f.probe_name for f in result.findings],
@@ -193,7 +234,7 @@ def generate_json_report(
         },
         "config": {
             "protocol": result.config.protocol.value,
-            "base_url": result.config.base_url,
+            "base_url": redact_url(result.config.base_url),
             "model": result.config.model,
             "api_key_env": result.config.api_key_env,
             "auth_style": result.config.auth_style.value,
@@ -217,6 +258,18 @@ def generate_json_report(
 
     if behavior_drift is not None:
         report["behavior_drift"] = _behavior_drift_to_dict(behavior_drift)
+
+    if capability_profile is not None:
+        report["capability_profile"] = _capability_profile_to_dict(capability_profile)
+
+    if execution_metadata is not None:
+        report["execution"] = execution_metadata
+
+    # Canonical secret redaction happens BEFORE content_hash is computed:
+    # the hash must describe exactly the bytes that will be persisted, so a
+    # response-side secret echo can never create a hash/bytes mismatch.
+    if secret_scrubber is not None:
+        report = cast("dict[str, object]", secret_scrubber.scrub(report))
 
     # 计算内容哈希（包含 benchmarks）
     content_json = json.dumps(report, sort_keys=True, ensure_ascii=False)
