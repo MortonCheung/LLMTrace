@@ -22,11 +22,12 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from llmtrace.scoring.models import CapabilityProfile
+from llmtrace.utilities.hashing import sha256_hash as sha256_of
 
-from .errors import DuplicateSnapshotError, ReferenceNotFoundError
+from .errors import DuplicateSnapshotError, ReferenceIntegrityError, ReferenceNotFoundError
 
 # ---------------------------------------------------------------------------
 # Field validators
@@ -51,6 +52,19 @@ def _require_utc(value: datetime, field_name: str) -> datetime:
     return value.astimezone(UTC)
 
 
+def _normalize_sha256(value: str, field_name: str) -> str:
+    """Require a real 64-character hex SHA-256 digest, normalised to lowercase.
+
+    Shared by every SHA field in ``ReferenceProvenance`` so that validation
+    rules stay in one place.
+    """
+    if not _SHA256_RE.match(value):
+        raise ValueError(
+            f"{field_name} must be exactly 64 hexadecimal characters (SHA-256), got {len(value)} chars: {value!r}"
+        )
+    return value.lower()
+
+
 # ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
@@ -73,6 +87,31 @@ class ReferenceProvenance(BaseModel):
     benchmark_revision: str = Field(..., min_length=1, description="Benchmark data revision used")
     runner_version: str = Field(..., min_length=1, description="LLMTrace runner version")
 
+    # -- v0.4-A provenance enhancements (all optional, v0.3-C backward compatible)
+    execution_id: str | None = Field(default=None, description="RunArtifact execution id this reference came from")
+    endpoint_redacted: str | None = Field(
+        default=None,
+        description="Redacted endpoint URL (credentials scrubbed); never the raw base URL with secrets",
+    )
+    adapter_id: str | None = Field(default=None, description="Adapter used for this reference run")
+    adapter_version: str | None = Field(default=None, description="Adapter version used for this reference run")
+    generation_config_sha256: str | None = Field(
+        default=None, description="SHA-256 of the canonical generation config, if recorded"
+    )
+    run_manifest_sha256: str | None = Field(
+        default=None, description="SHA-256 of the actual persisted manifest.json bytes, if available"
+    )
+    capability_profile_sha256: str | None = Field(
+        default=None, description="SHA-256 of the persisted capability_profile.json artifact, if available"
+    )
+    qualification_policy_id: str | None = Field(default=None, description="Qualification policy id used, if qualified")
+    qualification_policy_version: str | None = Field(
+        default=None, description="Qualification policy version used, if qualified"
+    )
+    benchmark_revisions: dict[str, str] = Field(
+        default_factory=dict, description="Per-source benchmark data revisions from the suite manifest"
+    )
+
     model_config = {"frozen": True, "extra": "forbid"}
 
     @field_validator("created_at")
@@ -85,11 +124,17 @@ class ReferenceProvenance(BaseModel):
     @classmethod
     def _validate_suite_sha256(cls, v: str) -> str:
         """Require a real 64-character hex SHA-256 digest, normalised to lowercase."""
-        if not _SHA256_RE.match(v):
-            raise ValueError(
-                f"suite_sha256 must be exactly 64 hexadecimal characters (SHA-256), got {len(v)} chars: {v!r}"
-            )
-        return v.lower()
+        return _normalize_sha256(v, "suite_sha256")
+
+    @field_validator("generation_config_sha256", "run_manifest_sha256", "capability_profile_sha256")
+    @classmethod
+    def _validate_optional_sha256(cls, v: str | None, info: ValidationInfo) -> str | None:
+        """Validate optional SHA fields; None is allowed, non-None must be a 64-char hex digest."""
+        if v is None:
+            return v
+        field_name = info.field_name
+        assert field_name is not None
+        return _normalize_sha256(v, field_name)
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +245,58 @@ class ReferenceRepository:
             return self._snapshots[snapshot_id]
         except KeyError as exc:
             raise ReferenceNotFoundError(f"ReferenceSnapshot '{snapshot_id}' not found") from exc
+
+    def read_raw(self, snapshot_id: str) -> str:
+        """Return the raw JSON bytes of *snapshot_id*'s persisted file as text.
+
+        Read-only integrity API (§18): never writes to disk.  Raises
+        ``ReferenceNotFoundError`` if the snapshot is not persisted or does not
+        exist on disk.
+        """
+        if self._directory is None:
+            raise ReferenceNotFoundError(
+                f"ReferenceSnapshot '{snapshot_id}' has no persisted file (in-memory repository)"
+            )
+        path = self._file_path(snapshot_id)
+        if not path.exists():
+            raise ReferenceNotFoundError(f"ReferenceSnapshot '{snapshot_id}' not found on disk at '{path}'")
+        return path.read_text(encoding="utf-8")
+
+    def snapshot_sha256(self, snapshot_id: str) -> str:
+        """Return SHA-256 of the *persisted* JSON file bytes for *snapshot_id*.
+
+        The hash is computed over the actual on-disk bytes, so any manual
+        tampering of the file changes the digest and is detectable by
+        :meth:`verify_snapshot`.
+        """
+        return sha256_of(self.read_raw(snapshot_id))
+
+    def verify_snapshot(self, snapshot_id: str, expected_sha256: str | None = None) -> str:
+        """Verify the persisted snapshot file bytes against *expected_sha256*.
+
+        When *expected_sha256* is omitted, the digest is compared against the
+        current in-memory record's serialised form.  Callers that hold a
+        recorded hash (e.g. from a ReferenceSet member) should pass it
+        explicitly so the comparison is against the recorded fact.
+
+        Returns the actual SHA-256 of the persisted file when verification
+        passes.
+
+        Raises:
+            ReferenceIntegrityError: If the on-disk bytes do not match the
+                expected digest.
+        """
+        actual = self.snapshot_sha256(snapshot_id)
+        expected = expected_sha256
+        if expected is None:
+            snapshot = self.get(snapshot_id)
+            expected = sha256_of(snapshot.model_dump_json(indent=2))
+        if actual != expected:
+            raise ReferenceIntegrityError(
+                f"ReferenceSnapshot '{snapshot_id}' integrity check failed: "
+                f"on-disk SHA-256 {actual!r} != expected {expected!r}"
+            )
+        return actual
 
     def list(self) -> Sequence[ReferenceSnapshot]:
         """Return all snapshots sorted by ``snapshot_id``."""

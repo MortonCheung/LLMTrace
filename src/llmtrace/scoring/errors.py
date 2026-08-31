@@ -35,6 +35,10 @@ class DuplicateSnapshotError(ReferenceError):
     """
 
 
+class ReferenceIntegrityError(ReferenceError):
+    """Raised when a reference snapshot's on-disk bytes no longer match its recorded hash."""
+
+
 class ComparisonError(ScoringError):
     """Base exception for capability comparison errors."""
 

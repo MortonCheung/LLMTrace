@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import ClassVar
@@ -22,6 +23,18 @@ def _require_utc(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
         raise ValueError(f"{field_name} must be timezone-aware, got naive datetime {value.isoformat()}")
     return value.astimezone(UTC)
+
+
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _normalize_sha256(value: str, field_name: str) -> str:
+    """Require a real 64-char hex SHA-256 digest, normalised to lowercase."""
+    if not _SHA256_RE.match(value):
+        raise ValueError(
+            f"{field_name} must be exactly 64 hexadecimal characters (SHA-256), got {len(value)} chars: {value!r}"
+        )
+    return value.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -60,12 +73,21 @@ class UnifiedExecutionPlan(BaseModel):
 
     suite_id: str = Field(..., min_length=1)
     suite_version: str = Field(..., min_length=1)
+    suite_content_sha256: str = Field(
+        ...,
+        description="SHA-256 (64 lowercase hex) of the canonical suite content identity",
+    )
     scoring_policy_id: str = Field(..., min_length=1)
     scoring_policy_version: str = Field(..., min_length=1)
     generation_config_sha256: str = Field(..., min_length=1, description="SHA-256 of the canonical generation config")
     requires_secure_code_sandbox: bool = Field(..., description="HumanEval requires a secure sandbox")
 
     model_config = {"frozen": True, "extra": "forbid"}
+
+    @field_validator("suite_content_sha256")
+    @classmethod
+    def _validate_suite_content_sha256(cls, v: str) -> str:
+        return _normalize_sha256(v, "suite_content_sha256")
 
     @model_validator(mode="after")
     def _check_consistency(self) -> UnifiedExecutionPlan:
@@ -85,7 +107,7 @@ class UnifiedExecutionPlan(BaseModel):
 # Artifact manifest
 # ---------------------------------------------------------------------------
 
-MANIFEST_VERSION = "0.1.0"
+MANIFEST_VERSION = "0.2.0"
 
 
 class RunArtifactManifest(BaseModel):
@@ -110,6 +132,10 @@ class RunArtifactManifest(BaseModel):
 
     suite_id: str = Field(..., min_length=1)
     suite_version: str = Field(..., min_length=1)
+    suite_content_sha256: str | None = Field(
+        default=None,
+        description="Canonical suite content identity; None for pre-v0.4-A runs (never accepted as reference input)",
+    )
     adapter_id: str = Field(..., min_length=1)
     adapter_version: str = Field(..., min_length=1)
     scoring_policy_id: str = Field(..., min_length=1)
@@ -138,6 +164,13 @@ class RunArtifactManifest(BaseModel):
         if v is None:
             return None
         return _require_utc(v, str(info.field_name))
+
+    @field_validator("suite_content_sha256")
+    @classmethod
+    def _validate_manifest_suite_content_sha256(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalize_sha256(v, "suite_content_sha256")
 
 
 # ---------------------------------------------------------------------------

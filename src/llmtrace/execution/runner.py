@@ -592,6 +592,7 @@ class UnifiedAuditRunner:
             status=result.status,
             suite_id=result.plan.suite_id,
             suite_version=result.plan.suite_version,
+            suite_content_sha256=result.plan.suite_content_sha256,
             adapter_id="llmtrace-quick-v1",
             adapter_version="0.1.0",
             scoring_policy_id=result.plan.scoring_policy_id,

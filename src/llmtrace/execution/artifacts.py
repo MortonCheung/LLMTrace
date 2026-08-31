@@ -139,6 +139,22 @@ class RunArtifactRepository:
             raise ArtifactNotFoundError(f"no manifest for execution '{execution_id}'")
         return RunArtifactManifest.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
+    def read_manifest_raw(self, execution_id: str) -> str:
+        """Return the raw ``manifest.json`` bytes as text.
+
+        Read-only provenance API: the reference layer needs the SHA-256 of the
+        *actual* manifest file bytes (not a re-serialization) to record honest
+        ``run_manifest_sha256`` provenance.
+        """
+        path = self._run_dir(execution_id) / _MANIFEST_FILENAME
+        if not path.exists():
+            raise ArtifactNotFoundError(f"no manifest for execution '{execution_id}'")
+        return path.read_text(encoding="utf-8")
+
+    def manifest_sha256(self, execution_id: str) -> str:
+        """SHA-256 of the actual ``manifest.json`` bytes on disk."""
+        return sha256_of(self.read_manifest_raw(execution_id))
+
     def read_artifact(self, execution_id: str, filename: str) -> str:
         if not _ARTIFACT_NAME_RE.match(filename) or filename == _MANIFEST_FILENAME:
             raise ArtifactRepositoryError(f"invalid artifact filename: {filename!r}")
