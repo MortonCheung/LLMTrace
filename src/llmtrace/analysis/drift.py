@@ -143,11 +143,13 @@ def _compute_drift(result: CompareResult) -> tuple[DriftLevel, list[str]]:
         drift_signals += 1
         notes.append("风险等级发生变化")
 
+    # NOTE: 5 signals is the maximum this function can produce (success rate,
+    # latency, model set, fingerprint, risk level).  A high signal count must
+    # escalate to LIKELY_DRIFT, never regress to INCONCLUSIVE — INCONCLUSIVE is
+    # reserved for data that cannot be compared, not for "too many changes".
     if drift_signals == 0:
         return DriftLevel.NO_SIGNIFICANT_DRIFT, notes
     elif drift_signals <= 2:
         return DriftLevel.POSSIBLE_DRIFT, notes
-    elif drift_signals <= 4:
-        return DriftLevel.LIKELY_DRIFT, notes
     else:
-        return DriftLevel.INCONCLUSIVE, notes
+        return DriftLevel.LIKELY_DRIFT, notes

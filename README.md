@@ -4,7 +4,8 @@
 
 ## 当前版本能做什么
 
-v0.2 已完成 v0.1 证据审计 MVP 与基准评测基础设施。
+当前已完成 v0.1 证据审计 MVP、v0.2 基准评测基础设施，以及 v0.3 能力评测收口
+（item-level 结果、Quick Suite 32 题、Reference Model Snapshot、Behavior Drift Foundation）。
 
 ### v0.1 证据审计（基础能力）
 
@@ -27,12 +28,30 @@ v0.2 已完成 v0.1 证据审计 MVP 与基准评测基础设施。
 - **能力评分基础**：TaskScoringRegistry → Dimension Aggregation → CapabilityProfile
 - **当前评分边界**：仅输出 raw_normalized_score / dimension_score / provisional_raw_index；calibrated_score 为 None（正式 0-100 需要 Reference Calibration）
 
+### v0.3 能力评测收口（新增）
+
+- **Item-level 结果**：`BenchmarkItemResult` 逐题评分、固定 denominator、Evidence 逐题追溯
+- **Quick Suite**：四维 32 题固定子集（ARC / HumanEval / GSM8K / IFEval 各 8 题，SHA-256 排名不可 cherry-pick）
+- **Reference Model Snapshot**：不可变、append-only 的参考模型能力画像；`CapabilityComparator` 带 fail-closed Compatibility Gate
+- **Behavior Drift Foundation**：对同一 Target API 两次可比运行做行为漂移分析，区分能力结果 / 回答表现 / 运行状态变化，不可比数据 fail closed
+
+## 语义边界：LLMTrace 能说什么、不能说什么
+
+- ✅ 能说：「在相同测试条件下，本次运行与历史运行观察到显著行为漂移。」
+- ❌ 不能说：「模型被确定偷换成了 XXX。」
+- ✅ 能说：「输出行为发生变化。」
+- ❌ 不能说：「输出文本不同，因此底层模型不同。」
+- ✅ 能说：「能力结果显著下降。」
+- ❌ 但如果主要原因是 Provider Failure，不能说：「模型能力显著下降。」
+
 ## 当前版本不能证明什么
 
 - 不能识别中转站真实上游模型（当前版本不具备模型指纹识别能力）
 - 不能证明服务商是否使用了声明模型
 - LOW 风险等级只表示"本次有限测试未发现明显异常，不代表已证明真实上游模型身份"
 - 单次延迟不能直接判断模型身份
+- 输出文本不同不代表底层模型不同；行为相似度不是身份结论
+- Provider 失败（超时/限流）不等价于模型能力下降
 
 ## 安装
 
@@ -121,9 +140,10 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 |------|------|
 | v0.1 | 证据审计 MVP（已完成） |
 | v0.2 | 轻量能力基准（已完成：lm-eval Adapter, GSM8K acceptance, Capability Scoring 基础） |
-| v0.3 | 官方参考模型对照 |
-| v0.4 | 跨时间路由漂移 |
-| v0.5 | LLMmap 指纹适配 |
-| v0.6 | Model Equality Testing 统计模式 |
-| v0.7 | Promptfoo 与 lm-eval 外部适配 |
-| v0.8 | Web 可视化界面 |
+| v0.3-A | Item-Level Benchmark Foundation（已完成） |
+| v0.3-B | Quick Suite 32 题 4 维度（已完成） |
+| v0.3-C | Reference Model Snapshot（已完成） |
+| v0.3-D | Behavior Drift Foundation（已完成） |
+| v0.4 | 官方参考模型对照 |
+| v0.5 | 行为相似度与混合路由 |
+| v0.6 | 简易 Web 前端 |

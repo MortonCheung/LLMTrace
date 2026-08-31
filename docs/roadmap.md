@@ -97,9 +97,57 @@ Reference Comparison   != 模型身份识别
 
 完成标准：第一套 Reference Model Snapshot 与能力比较基础设施落地，且历史事实不可覆盖、部分覆盖不伪装成能力下降。√ 已达成。
 
-## v0.3-D Behavior Drift Detection（规划中）
+## v0.3-D Behavior Drift Foundation（已完成）
 
-> 注：v0.3-C 明确不包含 Calibration 与模型身份识别。正式 0–100 能力分与 Calibration 不在本阶段。
+在**相同 Benchmark、相同题目、相同生成参数、相同评分规则**下，对同一目标 API 的两次运行
+做行为漂移分析，并区分「能力结果变化 / 回答表现变化 / 运行状态变化」，把不可比数据 fail closed。
+
+### 新增领域模型（`analysis/behavior_models.py`）
+
+- `BehaviorItemKey`：跨 Run 稳定身份 `(task_id, source_sample_id, input_sha256)`，frozen；
+  禁止用 `attempt_id`（每次运行不同）或 `item_id`（只表示运行内序号）
+- `BehaviorItemObservation`：只存 hash / 长度 / operational 元数据，**不保存完整回答**
+- `BehaviorRunSnapshot`：一次观测执行的不可变快照（≠ ReferenceSnapshot）
+- `BehaviorDriftPolicy`：版本化阈值（`llmtrace_behavior_drift_v1` / 0.1.0，provisional）
+- 输出规范化：CRLF/CR→LF + strip 首尾 whitespace + SHA-256（不 lowercase、不删内部空格）
+- `generation_config_sha256`：canonical JSON（sort_keys + 稳定 separators）→ SHA-256
+
+### Builder 与 Engine（`analysis/behavior_snapshot.py` / `behavior_drift.py`）
+
+- `BehaviorSnapshotBuilder`：每 item 要求 `source_sample_id` + `input_sha256`；
+  duplicate stable key 拒绝；evidence 引用必须**恰好一个**，缺失/歧义 fail closed；
+  item 顺序 deterministic（按 stable key 排序）
+- `BehaviorDriftEngine` Compatibility Gate（先于任何 delta，fail closed）：
+  `suite_id → suite_version → source → adapter → scoring_policy → generation_config →
+  stable item set → comparable coverage`
+- 四类 Detector 插件化：Outcome / Status / Output / Operational，只产局部 `BehaviorSignal`
+- 稳定对齐：以 `BehaviorItemKey` 建 map，两侧 item 顺序无关
+- `BehaviorDriftLevel`：`NO_SIGNIFICANT_DRIFT / OBSERVED_DRIFT / MATERIAL_DRIFT / INCONCLUSIVE`
+
+### 关键防伪 invariant
+
+- FAILURE 的强制 0 分不进入 outcome delta——只算 status change，绝不伪装成能力下降
+- Output hash 变化只算「行为变化观测」，不直接判 MATERIAL，更不是模型偷换证据
+- 不可比较（suite / generation config / policy / item set / coverage 不一致）→ raise，不产出 Result
+- 兼容性失败 ≠ INCONCLUSIVE（不可比较 ≠ 比较结果不确定）
+
+### 报告
+
+- JSON 新增 `behavior_drift` 段，`SCHEMA_VERSION` 1.1 → 1.2
+- HTML 新增 Behavior Drift 区域（Drift Level / Outcome / Status / Output / Graded Overlap /
+  Dimension / Changed Items），保持 Jinja autoescape，不展示完整 output hash
+- 顺手修复旧 `analysis/drift.py` 计数 bug：5 个 drift signal 不再错误退回 INCONCLUSIVE
+
+### 开源设计参考
+
+`docs/architecture/open_source_influences.md` 记录对 Nuclei / garak / Promptfoo / Evidently
+的架构思想借鉴（Detector 解耦、插件化、versioned policy），本轮未复制任何源码、未新增 runtime 依赖。
+
+- 质量：Ruff + Format + Mypy + Pytest 全量回归
+
+完成标准：同一 Target API 两次可比 Quick Suite 运行 → 两个不可变 BehaviorRunSnapshot →
+稳定身份逐项对齐 → 插件化 Detector 分离 Outcome/Status/Output/Operational →
+版本化 Policy 得出保守 Drift Result，不可比时 fail closed，结论可回溯 Evidence。√ 已达成。
 
 ## v0.4 参考模型对照
 

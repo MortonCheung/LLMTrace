@@ -222,7 +222,56 @@
 </div>
 {% endif %}
 
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + 1 }}. 限制和免责声明</h2>
+{% if behavior_drift %}
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + 1 }}. Behavior Drift</h2>
+<div class="meta">
+  <p>Overall Drift Level: <strong>{{ behavior_drift.drift_level }}</strong></p>
+  <p>Baseline Run: {{ behavior_drift.baseline_run_id }} | Current Run: {{ behavior_drift.current_run_id }}</p>
+  <p>Suite: {{ behavior_drift.suite_id }} {{ behavior_drift.suite_version }} | Policy: {{ behavior_drift.policy_id }} {{ behavior_drift.policy_version }}</p>
+  <p>Target: {{ behavior_drift.target_id }} | Candidate: {{ behavior_drift.candidate_model_id }}</p>
+</div>
+<div class="meta">
+  <p>
+    Total Items: {{ behavior_drift.total_items }} |
+    Graded Overlap: {{ behavior_drift.graded_overlap_count }} ({{ "%.1f"|format(behavior_drift.graded_overlap_ratio * 100) }}%) |
+    Outcome Changed: {{ behavior_drift.outcome_changed_count }} |
+    Status Changed: {{ behavior_drift.status_changed_count }} |
+    Output Changed: {{ behavior_drift.output_changed_count }} |
+    Response Model Changed: {{ behavior_drift.response_model_change_count }} |
+    Finish Reason Changed: {{ behavior_drift.finish_reason_change_count }}
+  </p>
+</div>
+<table>
+  <tr><th>Dimension</th><th>Baseline</th><th>Current</th><th>Delta</th></tr>
+  {% for d in behavior_drift.dimension_diffs %}
+  <tr>
+    <td>{{ d.dimension }}</td>
+    <td>{{ "%.4f"|format(d.baseline) }}</td>
+    <td>{{ "%.4f"|format(d.current) }}</td>
+    <td>{{ "%+.4f"|format(d.delta) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<table>
+  <tr><th>Task</th><th>Source Sample</th><th>Input SHA (short)</th><th>Before</th><th>After</th><th>Score Delta</th><th>Signals</th></tr>
+  {% for item in behavior_drift.item_diffs %}
+  <tr>
+    <td>{{ item.task_id }}</td>
+    <td>{{ item.source_sample_id }}</td>
+    <td>{{ item.input_sha256_short }}</td>
+    <td>{{ item.baseline_status }}</td>
+    <td>{{ item.current_status }}</td>
+    <td>{{ "%+.4f"|format(item.score_delta) }}</td>
+    <td>{{ item.signals | join(', ') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="disclaimer">
+  <strong>语义边界：</strong>Behavior Drift 只描述“在相同测试条件下本次运行与历史运行观察到的行为变化”。输出文本变化不等于底层模型不同；能力结果变化也可能是 Provider 失败或可用性变化导致。本结果不构成模型身份结论。
+</div>
+{% endif %}
+
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
 <div class="disclaimer">
   <h3>重要限制</h3>
   <ul>

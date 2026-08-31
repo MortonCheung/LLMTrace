@@ -35,3 +35,6 @@ reports/
 *~
 .DS_Store
 Thumbs.db
+
+# WorkBuddy — local agent workspace, not part of the distributed package
+.workbuddy/
