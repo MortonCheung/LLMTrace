@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,6 +70,7 @@ class MockQuickSuiteProvider:
         self.evidence: list[HTTPEvidence] = []
         self._responses = responses or {}
         self._fail_indices = fail_indices or set()
+        self.config = SimpleNamespace(model="mock-model")
 
     async def complete(self, model, messages, *, options=None):
         self.call_count += 1
@@ -476,6 +478,7 @@ class TestQuickSuiteFailureIsolation:
             def __init__(self):
                 self.call_count = 0
                 self.evidence = []
+                self.config = SimpleNamespace(model="mock-model")
 
             async def complete(self, model, messages, *, options=None):
                 self.call_count += 1
@@ -520,6 +523,7 @@ class TestQuickSuiteFailureIsolation:
         class _SimpleProvider:
             def __init__(self):
                 self.call_count = 0
+                self.config = SimpleNamespace(model="mock-model")
 
             async def complete(self, model, messages, *, options=None):
                 self.call_count += 1

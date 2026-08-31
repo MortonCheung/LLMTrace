@@ -222,8 +222,31 @@
 </div>
 {% endif %}
 
+{% if capability_profile %}
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + 1 }}. Capability Profile</h2>
+<div class="meta">
+  <p>Profile: {{ capability_profile.profile_version }} | Policy: {{ capability_profile.scoring_policy_id }} {{ capability_profile.scoring_policy_version }}</p>
+  <p>Coverage: {{ "%.2f"|format(capability_profile.coverage_weight) }} | Provisional Raw Index: {{ "%.4f"|format(capability_profile.provisional_raw_index) }}</p>
+</div>
+<table>
+  <tr><th>Dimension</th><th>Status</th><th>Raw Score</th><th>Coverage</th><th>Weight</th></tr>
+  {% for d in capability_profile.dimensions %}
+  <tr>
+    <td>{{ d.dimension }}</td>
+    <td>{{ d.status }}</td>
+    <td>{{ "%.4f"|format(d.raw_score) }}</td>
+    <td>{{ "%.2f"|format(d.task_coverage) }}</td>
+    <td>{{ "%.2f"|format(d.global_weight) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="disclaimer">
+  <strong>UNCALIBRATED：</strong>以上是 raw / provisional / uncalibrated 分数，不是 0–100 正式能力分。Provisional Raw Index 不是百分制评分，0.75 不代表 75/100。
+</div>
+{% endif %}
+
 {% if behavior_drift %}
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + 1 }}. Behavior Drift</h2>
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + 1 }}. Behavior Drift</h2>
 <div class="meta">
   <p>Overall Drift Level: <strong>{{ behavior_drift.drift_level }}</strong></p>
   <p>Baseline Run: {{ behavior_drift.baseline_run_id }} | Current Run: {{ behavior_drift.current_run_id }}</p>
@@ -271,7 +294,7 @@
 </div>
 {% endif %}
 
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
 <div class="disclaimer">
   <h3>重要限制</h3>
   <ul>

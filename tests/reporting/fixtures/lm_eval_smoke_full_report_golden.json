@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "report_id": "golden-report-id",
   "meta": {
     "llmtrace_version": "0.2.0",
@@ -16,7 +16,7 @@
     },
     "probe_list": [],
     "risk_level": "INCONCLUSIVE",
-    "schema_version": "1.2",
+    "schema_version": "1.3",
     "content_hash": "e2e283cfdcfcab145155f54b8ede251e16c493e4a498e3c125626b631da78be1"
   },
   "config": {

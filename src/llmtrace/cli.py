@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import cast
 
 import typer
 
+from llmtrace.adapters.code_execution import SandboxUnavailableError
 from llmtrace.analysis.drift import compare_reports
-from llmtrace.analysis.risk import analyze_risk
-from llmtrace.analysis.schema_fingerprint import generate_schema_fingerprint
 from llmtrace.config import AuditConfig, AuthStyle, Protocol
 from llmtrace.constants import (
     DEFAULT_REPEAT_COUNT,
@@ -18,31 +18,23 @@ from llmtrace.constants import (
     MAX_OUTPUT_TOKENS_DEFAULT,
     MAX_RESPONSE_BYTES_DEFAULT,
 )
-from llmtrace.models.audit import AuditResult, RiskLevel
+from llmtrace.execution.artifacts import RunArtifactRepository
+from llmtrace.execution.planner import build_unified_execution_plan, derive_target_id, sanitize_target_id
+from llmtrace.execution.protocol_audit import ProtocolAuditExecutor, build_audit_plan
+from llmtrace.execution.runner import UnifiedAuditRunner
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
-from llmtrace.probes.baseline import BaselineProbe
-from llmtrace.probes.connectivity import ConfigPrecheckProbe, ConnectivityProbe
-from llmtrace.probes.invalid_model import InvalidModelProbe
-from llmtrace.probes.metadata import MetadataProbe
-from llmtrace.probes.model_catalog import ModelCatalogProbe
-from llmtrace.probes.stability import StabilityProbe
-from llmtrace.probes.streaming import StreamingProbe
-from llmtrace.providers.anthropic_compatible import AnthropicCompatibleProvider
 from llmtrace.providers.base import BaseProvider
-from llmtrace.providers.openai_compatible import OpenAICompatibleProvider
 from llmtrace.reporting.console import (
     print_audit_summary,
     print_compare_result,
     print_dry_run,
     print_error,
+    print_unified_summary,
 )
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
 from llmtrace.security.redaction import check_api_key
-from llmtrace.utilities.hashing import short_id
-from llmtrace.utilities.time import format_file_time, utc_now
-from llmtrace.utilities.version import get_llmtrace_version, get_platform, get_python_version
 
 app = typer.Typer(
     name="llmtrace",
@@ -52,79 +44,16 @@ app = typer.Typer(
 
 
 def _create_provider(config: AuditConfig, api_key: str) -> BaseProvider:
-    """根据协议创建 Provider."""
-    if config.protocol == Protocol.OPENAI:
-        return OpenAICompatibleProvider(config, api_key)
-    elif config.protocol == Protocol.ANTHROPIC:
-        return AnthropicCompatibleProvider(config, api_key)
-    else:
-        raise ValueError(f"不支持的协议: {config.protocol}")
+    """根据协议创建 Provider（兼容旧调用，单一实现见 providers.factory）."""
+    from llmtrace.providers.factory import create_provider
+
+    return create_provider(config, api_key)
 
 
 def _build_audit_plan(config: AuditConfig) -> list[dict[str, object]]:
     """构建审计计划，用于 dry-run 和实际执行."""
-    plan: list[dict[str, object]] = []
 
-    # 1. 配置预检（0 次请求）
-    plan.append({"probe": "配置预检", "request_type": "none", "count": 0, "model_type": "N/A", "streaming": False})
-
-    # 2. 连接与鉴权（1 次请求，声明模型）
-    plan.append(
-        {
-            "probe": "连接与鉴权",
-            "request_type": "completion",
-            "count": 1,
-            "model_type": "声明模型",
-            "streaming": False,
-        }
-    )
-
-    # 3. 模型列表（1 次 GET 请求）
-    plan.append({"probe": "模型列表", "request_type": "GET", "count": 1, "model_type": "N/A", "streaming": False})
-
-    # 4. 正常基线（repeat_count 次请求，声明模型）
-    plan.append(
-        {
-            "probe": "正常基线",
-            "request_type": "completion",
-            "count": config.repeat_count,
-            "model_type": "声明模型",
-            "streaming": False,
-        }
-    )
-
-    # 5. 无效模型（1 次请求，随机无效模型）
-    plan.append(
-        {
-            "probe": "无效模型",
-            "request_type": "completion",
-            "count": 1,
-            "model_type": "随机无效模型",
-            "streaming": False,
-        }
-    )
-
-    # 6. 流式一致性（1 次非流式 + 1 次流式）
-    if config.check_streaming:
-        plan.append(
-            {
-                "probe": "流式一致性",
-                "request_type": "completion+stream",
-                "count": 2,
-                "model_type": "声明模型",
-                "streaming": True,
-            }
-        )
-
-    # 7-8. 元数据完整性和会话稳定性（0 次额外请求，分析已有证据）
-    plan.append(
-        {"probe": "元数据完整性", "request_type": "analysis", "count": 0, "model_type": "N/A", "streaming": False}
-    )
-    plan.append(
-        {"probe": "会话稳定性", "request_type": "analysis", "count": 0, "model_type": "N/A", "streaming": False}
-    )
-
-    return plan
+    return build_audit_plan(config)
 
 
 def _validate_evidence_refs(findings: list[FindingResult], evidence_list: list[HTTPEvidence]) -> None:
@@ -201,138 +130,22 @@ def audit(
 
     api_key = check_api_key(config.api_key_env)
     if api_key is None:
-        print_error(
-            f"环境变量 {config.api_key_env} 不存在或为空",
-            "配置检查",
-            partial=False,
-        )
-        if debug:
-            raise typer.Exit(code=1)
+        print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
         raise typer.Exit(code=1)
 
     provider = _create_provider(config, api_key)
-    evidence_list: list[HTTPEvidence] = []
-    findings: list[FindingResult] = []
-
-    result = AuditResult(
-        config=config,
-        llmtrace_version=get_llmtrace_version(),
-        python_version=get_python_version(),
-        platform=get_platform(),
-        report_id=f"llmtrace_{format_file_time(utc_now())}_{short_id(6)}",
-        start_time=utc_now(),
-    )
-
-    async def _run() -> None:
-        async with provider:
-            nonlocal findings, evidence_list
-
-            # 1. 配置预检
-            precheck = ConfigPrecheckProbe(config, provider)
-            outcome = await precheck.run()
-            findings.extend(outcome.findings)
-
-            if outcome.findings and outcome.findings[0].status.value == "fail":
-                result.findings = findings
-                result.risk_level = RiskLevel.INCONCLUSIVE
-                result.end_time = utc_now()
-                print_error("配置预检失败", "配置预检")
-                return
-
-            # 2. 连接与鉴权
-            conn = ConnectivityProbe(config, provider)
-            outcome = await conn.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
-
-            if outcome.findings and outcome.findings[0].status.value == "fail":
-                result.findings = findings
-                result.risk_level = RiskLevel.INCONCLUSIVE
-                result.end_time = utc_now()
-                print_error("连接或鉴权失败", "连接与鉴权")
-                return
-
-            # 3. 模型列表
-            catalog = ModelCatalogProbe(config, provider)
-            outcome = await catalog.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
-
-            # 获取模型列表数据
-            if outcome.evidence:
-                list_ev = outcome.evidence[0]
-                result.model_list_available = list_ev.success
-                # 尝试从 evidence 中提取模型列表
-                if list_ev.success and list_ev.response_body_summary:
-                    try:
-                        data = json.loads(list_ev.response_body_summary)
-                        models = data.get("data", [])
-                        if isinstance(models, list):
-                            result.model_list = [m.get("id", "") for m in models if isinstance(m, dict)]
-                            result.model_in_list = config.model in result.model_list
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
-
-            # 4. 正常基线
-            baseline = BaselineProbe(config, provider)
-            outcome = await baseline.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
-
-            # 5. 无效模型
-            invalid = InvalidModelProbe(config, provider)
-            outcome = await invalid.run()
-            findings.extend(outcome.findings)
-            evidence_list.extend(outcome.evidence)
-
-            # 6. 流式一致性
-            if config.check_streaming:
-                streaming = StreamingProbe(config, provider)
-                outcome = await streaming.run()
-                findings.extend(outcome.findings)
-                evidence_list.extend(outcome.evidence)
-
-            # 7. 元数据完整性
-            metadata = MetadataProbe(config, provider)
-            meta_result = metadata.analyze(evidence_list)
-            findings.append(meta_result)
-
-            # 8. 会话稳定性
-            stability = StabilityProbe(config, provider)
-            stab_result = stability.analyze(evidence_list)
-            findings.append(stab_result)
-
-            # 生成结构指纹
-            for ev in evidence_list:
-                if ev.response_body_summary:
-                    fp = generate_schema_fingerprint(ev.response_body_summary)
-                    if fp:
-                        result.schema_fingerprints.append(fp)
-
-            # 完整性校验
-            _validate_evidence_refs(findings, evidence_list)
-            _check_duplicate_evidence_ids(evidence_list)
-
     try:
-        import asyncio
-
-        asyncio.run(_run())
+        outcome = asyncio.run(ProtocolAuditExecutor(config, provider).run())
     except Exception as e:
         if debug:
             import traceback
 
             traceback.print_exc()
         print_error(str(e), "审计执行", partial=True)
-        if debug:
-            raise typer.Exit(code=1)
         raise typer.Exit(code=1)
 
-    result.evidence = evidence_list
-    result.findings = findings
-    result.risk_level = analyze_risk(findings)
-    result.end_time = utc_now()
+    result = outcome.result
 
-    # 生成报告
     json_path = config.output_dir / f"{result.report_id}.json"
     html_path = config.output_dir / f"{result.report_id}.html"
 
@@ -354,13 +167,132 @@ def audit(
 
     print_audit_summary(result)
 
-    # 输出报告路径
     from rich.console import Console
 
     console = Console()
     console.print()
     console.print(f"JSON 报告: [cyan]{json_path}[/]")
     console.print(f"HTML 报告: [cyan]{html_path}[/]")
+
+
+@app.command()
+def run(
+    protocol: str = typer.Option(..., "--protocol", "-p", help="协议类型: openai 或 anthropic"),
+    base_url: str = typer.Option(..., "--base-url", "-u", help="API Base URL"),
+    model: str = typer.Option(..., "--model", "-m", help="声明模型名称"),
+    api_key_env: str = typer.Option(..., "--api-key-env", "-k", help="API Key 环境变量名"),
+    auth_style: str = typer.Option("auto", "--auth-style", help="鉴权方式: auto, bearer, x-api-key, both"),
+    target_id: str = typer.Option(None, "--target-id", help="稳定 target 标识（缺省自动派生）"),
+    repeat: int = typer.Option(DEFAULT_REPEAT_COUNT, "--repeat", "-r", help="协议探针重复次数 (1-10)"),
+    timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t", help="请求超时(秒)"),
+    check_streaming: bool = typer.Option(True, "--streaming/--no-streaming", help="是否检查流式接口"),
+    output_dir: Path = typer.Option(Path("reports"), "--output-dir", "-o", help="artifact 根目录"),
+    reference_snapshot: Path = typer.Option(None, "--reference-snapshot", help="ReferenceSnapshot JSON 路径"),
+    baseline_snapshot: Path = typer.Option(None, "--baseline-snapshot", help="显式基线 BehaviorRunSnapshot JSON 路径"),
+    compare_latest: bool = typer.Option(
+        True, "--compare-latest/--no-compare-latest", help="自动与最新兼容历史运行比较"
+    ),
+    max_wall_seconds: float = typer.Option(None, "--max-wall-seconds", help="整体墙钟超时(秒)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只显示执行计划，不发送请求"),
+    non_interactive: bool = typer.Option(False, "--yes", "-y", help="跳过确认"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """执行统一审计：协议审计 + Quick Suite 32 题 + 能力/行为/工件."""
+    import sys
+
+    config = AuditConfig(
+        protocol=Protocol(protocol),
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        auth_style=AuthStyle(auth_style),
+        repeat_count=repeat,
+        timeout=timeout,
+        check_streaming=check_streaming,
+        output_dir=output_dir,
+    )
+
+    resolved_target = (
+        sanitize_target_id(target_id) if target_id else derive_target_id(config.protocol.value, config.base_url)
+    )
+    plan = build_unified_execution_plan(config, target_id=resolved_target)
+
+    if dry_run:
+        print_dry_run(
+            {
+                "Target": resolved_target,
+                "协议": config.protocol.value,
+                "声明模型": config.model,
+                "Suite": f"{plan.suite_id} {plan.suite_version}",
+                "协议探针请求": str(plan.protocol_probe_requests),
+                "Benchmark 请求": str(plan.benchmark_requests),
+                "总请求上限": str(plan.maximum_requests),
+                "输出 Token 上限": str(plan.maximum_output_token_ceiling),
+                "预计费用": "unknown",
+                "需要安全 Sandbox": "是",
+                "参考对比": "是" if reference_snapshot else "否",
+                "历史对比": "是" if compare_latest else "否",
+            }
+        )
+        return
+
+    api_key = check_api_key(config.api_key_env)
+    if api_key is None:
+        print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
+        raise typer.Exit(code=1)
+
+    # Confirmation
+    if not non_interactive:
+        if not sys.stdin.isatty():
+            print_error("非交互式执行需要 --yes", "确认", partial=False)
+            raise typer.Exit(code=1)
+        print_dry_run(
+            {
+                "Target": resolved_target,
+                "总请求上限": str(plan.maximum_requests),
+                "输出 Token 上限": str(plan.maximum_output_token_ceiling),
+                "预计费用": "unknown",
+            }
+        )
+        import typer as _typer
+
+        if not _typer.confirm(f"本运行可能发送最多 {plan.maximum_requests} 个请求。是否继续？"):
+            raise typer.Exit(code=0)
+
+    repository = RunArtifactRepository(output_dir)
+    try:
+        runner = UnifiedAuditRunner(
+            config,
+            api_key=api_key,
+            target_id=resolved_target,
+            repository=repository,
+            compare_latest=compare_latest,
+            baseline_snapshot_path=baseline_snapshot,
+            reference_snapshot_path=reference_snapshot,
+            max_wall_seconds=max_wall_seconds,
+        )
+    except SandboxUnavailableError as exc:
+        print_error(str(exc), "预检", partial=False)
+        raise typer.Exit(code=1)
+
+    try:
+        result = asyncio.run(runner.run())
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
+    except Exception as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        print_error(str(exc), "统一执行", partial=True)
+        raise typer.Exit(code=1)
+
+    artifact_paths = {
+        "manifest.json": str(output_dir / "runs" / result.execution_id / "manifest.json"),
+        "report.json": str(output_dir / "runs" / result.execution_id / "report.json"),
+        "report.html": str(output_dir / "runs" / result.execution_id / "report.html"),
+    }
+    print_unified_summary(result, artifact_paths)
 
 
 @app.command()
@@ -491,6 +423,62 @@ def inspect(
                 "是" if ev.get("success") else "否",
             )
         console.print(ev_table)
+
+    # 执行元数据（v0.3-E）
+    execution = data.get("execution")
+    if execution:
+        console.print()
+        exec_table = Table(title="执行元数据")
+        exec_table.add_column("项目", style="cyan")
+        exec_table.add_column("值", style="white")
+        for key, value in execution.items():
+            exec_table.add_row(str(key), str(value))
+        console.print(exec_table)
+
+    # Capability Profile（v0.3-E，明确 uncalibrated）
+    capability = data.get("capability_profile")
+    if capability:
+        console.print()
+        cap_table = Table(title="Capability Profile (raw / uncalibrated)")
+        cap_table.add_column("维度", style="cyan")
+        cap_table.add_column("状态", style="white")
+        cap_table.add_column("Raw Score", style="white")
+        cap_table.add_column("Coverage", style="white")
+        for d in capability.get("dimensions", []):
+            cap_table.add_row(
+                str(d.get("dimension", "N/A")),
+                str(d.get("status", "N/A")),
+                f"{d.get('raw_normalized_score', 0.0):.4f}",
+                f"{d.get('task_coverage', 0.0):.2f}",
+            )
+        console.print(cap_table)
+        console.print("[yellow]UNCALIBRATED：以上为 raw / provisional 分数，不是 0–100 正式能力分。[/]")
+
+    # Reference Comparison（v0.3-C）
+    reference = data.get("reference_comparison")
+    if reference:
+        console.print()
+        ref_table = Table(title="Reference Comparison")
+        ref_table.add_column("项目", style="cyan")
+        ref_table.add_column("值", style="white")
+        ref_table.add_row("Reference Snapshot", str(reference.get("reference_snapshot", "N/A")))
+        ref_table.add_row("Suite", f"{reference.get('suite_id', 'N/A')} {reference.get('suite_version', '')}")
+        console.print(ref_table)
+
+    # Behavior Drift（v0.3-D）
+    behavior = data.get("behavior_drift")
+    if behavior:
+        console.print()
+        bh_table = Table(title="Behavior Drift")
+        bh_table.add_column("项目", style="cyan")
+        bh_table.add_column("值", style="white")
+        bh_table.add_row("Drift Level", str(behavior.get("drift_level", "N/A")))
+        bh_table.add_row("Policy", f"{behavior.get('policy_id', 'N/A')} {behavior.get('policy_version', '')}")
+        bh_table.add_row(
+            "Graded Overlap",
+            f"{behavior.get('graded_overlap_count', '?')} / {behavior.get('total_items', '?')}",
+        )
+        console.print(bh_table)
 
 
 if __name__ == "__main__":

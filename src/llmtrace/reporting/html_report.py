@@ -14,6 +14,8 @@ from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.scoring.comparison import ComparisonResult
+from llmtrace.scoring.models import CapabilityProfile
+from llmtrace.security.redaction import redact_url
 
 
 def _evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -99,12 +101,34 @@ def _behavior_drift_to_template_data(drift: BehaviorDriftResult) -> dict[str, ob
     }
 
 
+def _capability_profile_to_template_data(profile: CapabilityProfile) -> dict[str, object]:
+    """Build Jinja-safe data for the Capability Profile HTML section."""
+    return {
+        "profile_version": profile.profile_version,
+        "scoring_policy_id": profile.scoring_policy_id,
+        "scoring_policy_version": profile.scoring_policy_version,
+        "coverage_weight": profile.coverage_weight,
+        "provisional_raw_index": profile.provisional_raw_index,
+        "dimensions": [
+            {
+                "dimension": d.dimension.value,
+                "status": d.status.value,
+                "raw_score": d.raw_normalized_score,
+                "task_coverage": d.task_coverage,
+                "global_weight": d.global_weight,
+            }
+            for d in profile.dimensions
+        ],
+    }
+
+
 def generate_html_report(
     result: AuditResult,
     output_path: Path,
     benchmark_sections: Sequence[BenchmarkReportSection] | None = None,
     reference_comparison: ComparisonResult | None = None,
     behavior_drift: BehaviorDriftResult | None = None,
+    capability_profile: CapabilityProfile | None = None,
 ) -> Path:
     """生成 HTML 报告."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +231,10 @@ def generate_html_report(
     if behavior_drift is not None:
         behavior_drift_data = _behavior_drift_to_template_data(behavior_drift)
 
+    capability_profile_data: dict[str, object] | None = None
+    if capability_profile is not None:
+        capability_profile_data = _capability_profile_to_template_data(capability_profile)
+
     html = template.render(
         report_id=result.report_id,
         utc_time=result.start_time.isoformat() if result.start_time else "",
@@ -214,7 +242,7 @@ def generate_html_report(
         python_version=result.python_version,
         platform=result.platform,
         config={
-            "base_url": result.config.base_url,
+            "base_url": redact_url(result.config.base_url),
             "protocol": result.config.protocol.value,
             "model": result.config.model,
             "repeat_count": result.config.repeat_count,
@@ -242,6 +270,7 @@ def generate_html_report(
         benchmarks=benchmark_data,
         reference_comparison=reference_comparison_data,
         behavior_drift=behavior_drift_data,
+        capability_profile=capability_profile_data,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:
