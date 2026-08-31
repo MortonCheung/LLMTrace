@@ -258,15 +258,23 @@ class DockerCodeExecutionBackend(CodeExecutionBackend):
 # ---------------------------------------------------------------------------
 
 
-def create_code_execution_backend(docker: bool = True) -> CodeExecutionBackend:
-    """Return the best available code execution backend.
+def create_code_execution_backend(*, allow_unsafe_in_process: bool = False) -> CodeExecutionBackend:
+    """Return a secure code execution backend, failing closed.
 
-    If *docker* is True and Docker is available, returns a
-    DockerCodeExecutionBackend.  Otherwise returns _InProcessExecutionBackend
-    (UNSAFE — for tests only).
+    - Docker available → :class:`DockerCodeExecutionBackend`.
+    - Docker unavailable → :class:`SandboxUnavailableError`.
+
+    The UNSAFE in-process backend is reachable only when a unit test
+    explicitly passes ``allow_unsafe_in_process=True``.  There is no silent
+    unsafe fallback anywhere in the production path.
     """
-    if docker:
-        docker_backend = DockerCodeExecutionBackend()
-        if docker_backend.is_available():
-            return docker_backend
-    return _InProcessExecutionBackend()
+    docker_backend = DockerCodeExecutionBackend()
+    if docker_backend.is_available():
+        return docker_backend
+    if allow_unsafe_in_process:
+        return _InProcessExecutionBackend()
+    raise SandboxUnavailableError(
+        "No secure code execution sandbox available: Docker is not reachable. "
+        "Refusing to execute model-generated code in-process — run in an "
+        "environment with Docker, or inject a trusted test backend explicitly."
+    )

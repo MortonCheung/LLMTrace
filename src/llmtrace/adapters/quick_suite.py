@@ -18,7 +18,7 @@ from llmtrace.adapters.base import BenchmarkAdapter, BenchmarkAdapterError
 from llmtrace.adapters.code_execution import (
     CodeExecutionBackend,
     SandboxUnavailableError,
-    _InProcessExecutionBackend,
+    create_code_execution_backend,
 )
 from llmtrace.benchmarks.models import (
     AdapterFailure,
@@ -139,6 +139,34 @@ _QUICK_TASK_SPECS: dict[str, TaskSpec] = {
         metadata={"scoring": "constraint_satisfaction"},
     ),
 }
+
+# ---------------------------------------------------------------------------
+# Canonical generation policy — single source of truth
+# ---------------------------------------------------------------------------
+
+# The Quick Suite is a fixed measuring stick: temperature=0, max_tokens=512.
+# The generation config that is actually sent, the one hashed into a
+# BehaviorRunSnapshot, and the one declared by the execution plan MUST all
+# come from here — never from three separate literals.
+QUICK_SUITE_GENERATION_CONFIG: dict[str, float | int] = {
+    "temperature": 0.0,
+    "max_tokens": 512,
+}
+
+QUICK_SUITE_BENCHMARK_REQUESTS = 32
+QUICK_SUITE_SUITE_ID = "llmtrace_quick_v1"
+QUICK_SUITE_SUITE_VERSION = "0.1.0"
+
+
+def get_quick_suite_completion_options() -> CompletionOptions:
+    """Return the canonical Quick Suite CompletionOptions."""
+    return CompletionOptions(**QUICK_SUITE_GENERATION_CONFIG)  # type: ignore[arg-type]
+
+
+def get_quick_suite_generation_config() -> dict[str, float | int]:
+    """Return a copy of the canonical Quick Suite generation config dict."""
+    return dict(QUICK_SUITE_GENERATION_CONFIG)
+
 
 # ---------------------------------------------------------------------------
 # Resource loading
@@ -324,7 +352,9 @@ class QuickSuiteAdapter(BenchmarkAdapter):
         *,
         code_backend: CodeExecutionBackend | None = None,
     ) -> None:
-        self._code_backend = code_backend or _InProcessExecutionBackend()
+        # Fail closed: without an explicitly injected backend, only a secure
+        # sandbox (Docker) is acceptable — never an in-process executor.
+        self._code_backend = code_backend if code_backend is not None else create_code_execution_backend()
 
     # -- Properties ---------------------------------------------------------
 
@@ -335,6 +365,23 @@ class QuickSuiteAdapter(BenchmarkAdapter):
     @property
     def adapter_version(self) -> str:
         return self._ADAPTER_VERSION
+
+    def get_task_definition(self, task_id: str) -> BenchmarkTaskDefinition:
+        """Return the canonical task definition (per-task provenance source)."""
+        task_def = _QUICK_TASK_DEFS.get(task_id)
+        if task_def is None:
+            raise BenchmarkAdapterError(f"Unknown Quick Suite task: {task_id}")
+        return task_def
+
+    def validate_resources(self) -> None:
+        """Preflight: every task resource must exist with the exact item count."""
+        for spec in self.list_tasks():
+            resources = _load_task_resources(spec.task_id)
+            items = resources.get("items", [])
+            if len(items) != spec.num_samples:
+                raise BenchmarkAdapterError(
+                    f"Task {spec.task_id} has {len(items)} items but num_samples={spec.num_samples}"
+                )
 
     # -- Task listing -------------------------------------------------------
 
@@ -431,10 +478,10 @@ class QuickSuiteAdapter(BenchmarkAdapter):
             item_id = f"{task_id}:item-{idx:03d}"
 
             try:
-                options = CompletionOptions(temperature=0.0, max_tokens=512)
+                options = get_quick_suite_completion_options()
 
                 evidence = await provider.complete(
-                    model="test-model",
+                    model=provider.config.model,
                     messages=[{"role": "user", "content": prompt}],
                     options=options,
                 )

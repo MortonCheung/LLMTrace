@@ -6,7 +6,6 @@ import json
 from typing import Any
 
 from llmtrace.benchmarks.models import CompletionOptions
-from llmtrace.config import AuditConfig
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.providers.base import (
     BaseProvider,
@@ -19,9 +18,6 @@ from llmtrace.providers.url_utils import join_url
 
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI-compatible 协议 Provider."""
-
-    def __init__(self, config: AuditConfig, api_key: str) -> None:
-        super().__init__(config, api_key)
 
     def _build_headers(self) -> dict[str, str]:
         return {

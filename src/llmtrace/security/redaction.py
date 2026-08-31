@@ -34,9 +34,21 @@ def redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 def redact_url(url: str) -> str:
-    """脱敏 URL 中的敏感查询参数."""
+    """脱敏 URL 中的凭据与敏感查询参数.
+
+    Covers both credential leakage (``https://user:password@host/``) and
+    secret query values (``https://host/?api_key=secret``).
+    """
     parsed = urlparse(url)
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        # 保留 host[:port]，去掉 userinfo 凭据
+        netloc = "[REDACTED]@" + netloc.rsplit("@", 1)[1]
+
     if not parsed.query:
+        if netloc != parsed.netloc:
+            return urlunparse(parsed._replace(netloc=netloc))
         return url
 
     params = parse_qs(parsed.query, keep_blank_values=True)
@@ -54,7 +66,7 @@ def redact_url(url: str) -> str:
             new_query_parts.append(f"{key}={v}")
 
     new_query = "&".join(new_query_parts)
-    new_parsed = parsed._replace(query=new_query)
+    new_parsed = parsed._replace(query=new_query, netloc=netloc)
     return urlunparse(new_parsed)
 
 
