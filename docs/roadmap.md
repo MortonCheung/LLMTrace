@@ -195,7 +195,33 @@ Reference Comparison   != 模型身份识别
 完成标准：`llmtrace run` 一键完成真实审计，全链路可回溯 Evidence，无 secret 落盘，
 不可比数据 fail closed。√ 已达成。
 
-## v0.4 Reference + Calibration
+## v0.4 Reference + Calibration — IN PROGRESS
+
+### v0.4-A Trusted Reference Run & Reference Set Foundation（已完成）
+
+- **Suite Content Identity**：Quick Suite manifest → canonical semantic payload → `get_quick_suite_content_sha256()`；
+  `get_quick_suite_source_revisions()` 以 manifest 为单一真相源（不二次硬编码 revision 表）
+- **Suite Identity 贯穿 Execution**：`UnifiedExecutionPlan.suite_content_sha256`（必填）、
+  `RunArtifactManifest.suite_content_sha256`、manifest version 0.1.0 → 0.2.0、plan_id canonical input 纳入 content SHA
+- **ReferenceProvenance 增强（向后兼容）**：新增 10 个 optional 字段（execution_id / endpoint_redacted / adapter_id /
+  adapter_version / generation_config_sha256 / run_manifest_sha256 / capability_profile_sha256 /
+  qualification_policy_id / qualification_policy_version / benchmark_revisions）
+- **Reference Qualification（Gate 1–10，fail closed）**：Artifact Integrity → Capability Profile 存在 →
+  读落盘已验证 profile → Measurement 完整（32/32 GRADED）→ Scoring Policy → Suite → Generation Config →
+  Adapter → Capability Coverage → Dimension Coverage；机器可读 reason codes
+- **ReferenceSnapshotBuilder**：verify → qualify → build → save；suite_sha256 取自 manifest.suite_content_sha256；
+  run_manifest_sha256 = manifest.json 实际字节 SHA；benchmark_revisions 从 suite manifest 获取
+- **ReferenceSet / ReferenceSetMember / ReferenceSetRepository**：content_sha256 canonical 自校验、
+  12-gate Compatibility、生产 builder 拒绝 `test_fixture`、append-only 磁盘（exclusive create）
+- **ReferenceCaptureService**：复用 `UnifiedAuditRunner`，`source_type = operator_verified_api_run`，
+  禁止 `official_api_verified`
+- **CLI**：`llmtrace reference capture`（dry-run 0 副作用 / 0 HTTP）与 `llmtrace reference set-create`
+- 安全边界：API Key memory-only、URL credentials scrubbed、Reference 层只存 hash/provenance/不可变指针
+
+完成标准：Operator 对可信 endpoint 执行一次参考运行 → 通过 10 道资格门禁 → 生成带完整 provenance 的
+ReferenceSnapshot → 构建自校验 ReferenceSet；失败任何门禁都不生成 reference，且运行工件仍保留。√ 已达成。
+
+### v0.4-B Reference Calibration & 0–100（planned）
 
 - 官方 Reference Model 体系与实测基线
 - 0–100 Calibration（正式能力分）

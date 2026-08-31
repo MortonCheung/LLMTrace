@@ -3,10 +3,10 @@
 > 产品名称：LLMTrace  
 > 中文名称：模型寻迹  
 > 文档版本：1.0  
-> 当前代码版本：v0.2.0  
-> 当前阶段：评测粘合层与能力评分基础已完成，能力评分 MVP 规划阶段  
+> 当前代码版本：v0.3-E  
+> 当前阶段：v0.4 Reference + Calibration IN PROGRESS；v0.4-A Trusted Reference Run & Reference Set Foundation 已完成，v0.4-B Calibration 规划中  
 > 仓库：`MortonCheung/LLMTrace`  
-> 当前开发基线：`main`，v0.1 证据审计 MVP 与 v0.2 基准评测基础设施已完成
+> 当前开发基线：`main`，v0.1 证据审计 MVP、v0.2 基准评测基础设施、v0.3-A/B/C/D/E 全部已完成
 
 ---
 
@@ -47,9 +47,9 @@ LLMTrace 不重新发明已经成熟的学术基准。外部项目和研究负�
 
 ## 2. 当前开发基线
 
-### 2.1 已完成：v0.1 证据审计 MVP
+### 2.1 已完成：v0.1 → v0.3-E
 
-当前仓库已经完成第一条纵向闭环：
+当前仓库已完成五条纵向闭环：
 
 ```text
 用户配置
@@ -60,49 +60,43 @@ LLMTrace 不重新发明已经成熟的学术基准。外部项目和研究负�
 → JSON / HTML Report
 ```
 
-现有能力：
+```text
+用户配置
+→ 统一执行计划（UnifiedAuditRunner：PRECHECK → PLAN → PROTOCOL → BENCHMARK → SCORING → SNAPSHOT → 比较 → REPORT/ARTIFACT COMMIT）
+→ Quick Suite 32 题（llmtrace_quick_v1）
+→ CapabilityProfile（UNCALIBRATED）
+→ Behavior Drift / Reference Comparison
+→ append-only Run Artifact
+```
 
-- OpenAI-compatible 和 Anthropic-compatible；
-- Base URL 与鉴权适配；
-- 连接、鉴权、模型列表、基线、无效模型、流式、元数据和稳定性探针；
-- 模型标识漂移检测；
-- LOW / MEDIUM / HIGH / INCONCLUSIVE 风险等级；
-- Evidence 唯一 ID 与 Finding 引用；
-- 原始响应 SHA-256、请求 ID、响应 ID、Token、延迟；
-- JSON、HTML 报告和跨报告比较；
-- honest / fallback / inconsistent Mock Server；
-- CLI：`audit`、`inspect`、`compare`。
+已完成能力（对应版本）：
 
-已记录的本地验证结果：
-
-- 149 个测试通过；
-- Ruff、Mypy、格式检查通过；
-- 总覆盖率约 70%；
-- honest 判定 LOW；
-- fallback 与 inconsistent 判定 HIGH。
+- v0.1 证据审计 MVP：OpenAI/Anthropic-compatible 协议适配、探针、模型标识漂移检测、JSON/HTML 报告、CLI `audit` / `inspect` / `compare`
+- v0.2 评测粘合层与能力评分基础：Source/Suite/Task/Run/Score 统一数据模型、Benchmark Adapter Protocol、`lm-evaluation-harness` 最小适配器、四维能力评分引擎（uncalibrated）
+- v0.3-A Item-Level Benchmark Foundation：`BenchmarkItemResult` 逐题评分、`GradeResult` 状态模型、CodeExecutionBackend（Docker sandbox）
+- v0.3-B Quick Suite：四维 32 题 `llmtrace_quick_v1`、不可变固定子集（SHA-256 排名）、`coverage_weight = 0.75`
+- v0.3-C Reference Model Snapshot：`ReferenceSnapshot` / `ReferenceRepository` / `CapabilityComparator`，不可变、追加式参考画像
+- v0.3-D Behavior Drift Foundation：`BehaviorRunSnapshot` / `BehaviorDriftEngine` / 四类 Detector，稳定身份逐项对齐
+- v0.3-E Unified Execution & Artifact Foundation：`llmtrace run` 一键真实审计、`UnifiedAuditRunner`、`RunArtifactRepository`、`RequestBudget` / `EvidenceRecorder`、Base URL 与 secret 脱敏
 
 ### 2.2 当前缺口
 
 尚未完成：
 
-- 标准化能力题库；
-- 外部评测 Adapter；
-- 0–100 分能力体系；
-- 参考模型成绩库；
-- 声明模型差距；
-- 行为相似度；
-- 混合路由与动态降级；
+- 0–100 分能力体系（v0.4-B Calibration，规划中）；
+- 官方参考模型成绩库与 CalibrationPolicy（v0.4-B，规划中）；
+- 行为相似度 / 指纹（v0.5）；
+- 混合路由与动态降级（v0.5）；
 - 动态网络来源更新；
-- 后端任务服务；
-- SQLite 历史记录；
-- 简易 Web 页面。
+- 后端任务服务、SQLite 历史记录、简易 Web 页面（v0.6）。
 
 ### 2.3 进度判断
 
 ```text
 协议审计 MVP：100%
-完整能力验货后端：约 35%
-完整产品（后端 + 参考体系 + 相似度 + 简易前端）：约 25%
+参考运行 / ReferenceSnapshot / ReferenceSet 基础设施：已落地（v0.4-A，无 0–100 输出）
+能力验货闭环（含 Calibration）：进行中（v0.4-B 规划中）
+完整产品（后端 + 参考体系 + 相似度 + 简易前端）：进行中
 ```
 
 ---
