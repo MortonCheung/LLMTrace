@@ -12,7 +12,7 @@ qualification gate, executed in a clear order and failing closed:
     Gate 7  — Generation Config         (plan / manifest identical)
     Gate 8  — Adapter                   (id + version recorded)
     Gate 9  — Capability Coverage       (computed from policy, never hardcoded)
-    Gate 10 — Dimension Coverage        (every enabled dimension measured)
+    Gate 10 — Dimension Coverage        (comparable set == policy enabled set)
 
 Any failure REJECTS the run; there is no "save anyway + warning" path.
 """
@@ -23,7 +23,7 @@ import hashlib
 import json
 import math
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from llmtrace.adapters.quick_suite import (
     QUICK_SUITE_BENCHMARK_REQUESTS,
@@ -182,16 +182,24 @@ def qualify_reference_run(
     warnings: list[str] = []
 
     # -- Gate 1: Artifact Integrity -----------------------------------------
+    # Fail closed on anything that makes the artifact untrustworthy — missing,
+    # hash-mismatched, unreadable, unparseable, or schema-invalid.  A
+    # malformed manifest must never escape as an exception: the caller is
+    # entitled to a structured ReferenceQualificationResult.
     try:
         artifact_repository.verify(execution_id)
-    except ArtifactIntegrityError as exc:
+    except (ArtifactIntegrityError, ArtifactNotFoundError) as exc:
         warnings.append(str(exc))
         return _rejected(resolved_policy, execution_id, [ARTIFACT_INTEGRITY_FAILURE], warnings)
-    except ArtifactNotFoundError as exc:
-        warnings.append(str(exc))
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+        warnings.append(f"manifest of execution '{execution_id}' is unreadable or malformed: {exc}")
         return _rejected(resolved_policy, execution_id, [ARTIFACT_INTEGRITY_FAILURE], warnings)
 
-    manifest = artifact_repository.load_manifest(execution_id)
+    try:
+        manifest = artifact_repository.load_manifest(execution_id)
+    except (ArtifactNotFoundError, ArtifactIntegrityError, OSError, json.JSONDecodeError, ValidationError) as exc:
+        warnings.append(f"manifest of execution '{execution_id}' is unreadable or malformed: {exc}")
+        return _rejected(resolved_policy, execution_id, [ARTIFACT_INTEGRITY_FAILURE], warnings)
 
     # -- Gate 2: Capability Profile exists ----------------------------------
     profile = None
@@ -268,6 +276,24 @@ def qualify_reference_run(
 
     # -- Gate 10: Dimension Coverage -----------------------------------------
     if profile is not None:
+        # The comparable set must be *exactly* the policy's enabled set.  A
+        # superset is just as incompatible as a subset: an extra SCORED /
+        # UNCALIBRATED dimension changes what the profile measures, so a run
+        # that scored dimensions the policy disabled is a different
+        # measurement, not a better one.
+        actual_comparable_dimensions = {
+            result.dimension
+            for result in profile.dimensions
+            if result.status in (DimensionScoreStatus.SCORED, DimensionScoreStatus.UNCALIBRATED)
+        }
+        expected_dimensions = set(scoring_policy.enabled_dimensions)
+        if actual_comparable_dimensions != expected_dimensions:
+            reason_codes.append(INCOMPATIBLE_COVERAGE)
+
+        # Defence in depth: an enabled dimension that is present but carries no
+        # measurement must still be rejected, even though the set comparison
+        # above already covers it (a status downgrade shrinks the comparable
+        # set).  Kept so a future status change cannot silently widen Gate 10.
         profile_dims = {d.dimension: d for d in profile.dimensions}
         for dim in scoring_policy.enabled_dimensions:
             dim_result = profile_dims.get(dim)

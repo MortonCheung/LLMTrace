@@ -64,10 +64,14 @@ def _capture_args(
 
 
 def _save_snapshots(reference_dir: Path, *snapshots: object) -> ReferenceRepository:
-    """Persist snapshots under ``<reference_dir>/snapshots`` and return the repo."""
+    """Persist snapshots under ``<reference_dir>/snapshots`` and return the repo.
+
+    Uses save_trusted() to write both snapshot.json and sidecar, making them
+    eligible for trusted ReferenceSet creation.
+    """
     repo = ReferenceRepository(directory=reference_dir / "snapshots")
     for snapshot in snapshots:
-        repo.save(snapshot)  # type: ignore[arg-type]
+        repo.save_trusted(snapshot)  # type: ignore[arg-type]
     return repo
 
 

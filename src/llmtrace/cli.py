@@ -42,7 +42,12 @@ from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
 from llmtrace.scoring.errors import ReferenceError, ReferenceNotFoundError
 from llmtrace.scoring.reference import ReferenceRepository
-from llmtrace.security.redaction import SecretScrubber, check_api_key, extract_url_secret_values
+from llmtrace.security.redaction import (
+    SecretScrubber,
+    check_api_key,
+    extract_url_secret_values,
+    redact_url,
+)
 
 app = typer.Typer(
     name="llmtrace",
@@ -587,8 +592,11 @@ def reference_capture(
                 "Snapshot ID": snapshot_id,
             }
         )
+        # Never echo a raw base URL: it may carry userinfo credentials or a
+        # secret query parameter (§34).  redact_url is the single scrubber.
         if not typer.confirm(
-            f"本次 reference capture 将向 {config.base_url} 发送最多 {plan.maximum_requests} 个请求。是否继续？"
+            f"本次 reference capture 将向 {redact_url(config.base_url)} 发送最多 "
+            f"{plan.maximum_requests} 个请求。是否继续？"
         ):
             raise typer.Exit(code=0)
 
@@ -617,7 +625,9 @@ def reference_capture(
 
     if result.status == ReferenceCaptureStatus.CAPTURED:
         snapshot_path = reference_dir / "snapshots" / f"{result.snapshot_id}.json"
+        sidecar_path = reference_dir / "snapshots" / f"{result.snapshot_id}.manifest.json"
         typer.echo(f"[OK] ReferenceSnapshot 已保存: {snapshot_path}")
+        typer.echo(f"     完整性锚点: {sidecar_path}")
         typer.echo(f"     execution_id: {result.execution_id}")
     elif result.status == ReferenceCaptureStatus.QUALIFICATION_REJECTED:
         print_error(
@@ -644,15 +654,19 @@ def reference_set_create(
 ) -> None:
     """从已验证的 ReferenceSnapshot 构建并保存 ReferenceSet（0 API 请求）.
 
-    流程：load snapshot → verify snapshot SHA → compatibility gate →
-    ReferenceSetBuilder → ReferenceSetRepository.save（§31）。
+    流程：load snapshot → verify trusted snapshot（sidecar 完整性锚点）→
+    compatibility gate → ReferenceSetBuilder → ReferenceSetRepository.save（§31）。
+
+    成员必须是 v0.4-A trusted snapshot（带 ``<snapshot_id>.manifest.json``
+    完整性 sidecar）。v0.3-C legacy snapshot 没有锚点，仍可读取用于原始能力
+    对比，但不能进入 trusted ReferenceSet。
     """
     try:
         snapshot_repo = ReferenceRepository.load(reference_dir / "snapshots")
         set_repo = ReferenceSetRepository(directory=reference_dir / "sets")
 
         loaded = [snapshot_repo.get(sid) for sid in snapshots]
-        sha_map = {sid: snapshot_repo.verify_snapshot(sid) for sid in snapshots}
+        sha_map = {sid: snapshot_repo.verify_trusted_snapshot(sid) for sid in snapshots}
         reference_set = ReferenceSetBuilder().build(
             reference_set_id=set_id,
             reference_set_version=set_version,

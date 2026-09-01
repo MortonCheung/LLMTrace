@@ -354,8 +354,16 @@ class TestQualificationPolicy:
         with pytest.raises(ValidationError):
             policy.policy_version = "0.2.0"  # type: ignore[misc]
 
-    def test_custom_policy_accepted(self, artifact_root: Path) -> None:
-        policy = ReferenceQualificationPolicy(policy_id="custom", policy_version="9.9.9")
+    def test_policy_injection_for_tests_only(self, artifact_root: Path) -> None:
+        # The policy parameter exists as a test seam only.  A real v2 policy
+        # would bring different rules/thresholds with its id/version, not just
+        # a relabelling of the same Gate 1–10 logic.  This test confirms the
+        # seam works; production code must call create_v1() or an explicit v2.
+        policy = ReferenceQualificationPolicy(
+            policy_id="test_seam_policy",
+            policy_version="999.0.0",
+            description="Test-only injection; production paths use create_v1()",
+        )
         repository, _ = commit_run(artifact_root)
         result = qualify_reference_run(
             execution_id=DEFAULT_EXECUTION_ID,
@@ -363,4 +371,5 @@ class TestQualificationPolicy:
             policy=policy,
         )
         assert result.qualified
-        assert result.policy_id == "custom"
+        assert result.policy_id == "test_seam_policy"
+        assert result.policy_version == "999.0.0"

@@ -5,7 +5,8 @@ from a qualified Run Artifact to a ``ReferenceSnapshot`` and on to a
 self-checksummed ``ReferenceSet``:
 
     Run Artifact → qualification (Gate 1–10) → ReferenceSnapshotBuilder
-        → ReferenceRepository → ReferenceSetBuilder (12-gate) → ReferenceSetRepository
+        → ReferenceRepository.save_trusted (snapshot.json + integrity sidecar)
+        → ReferenceSetBuilder (12-gate) → ReferenceSetRepository
 
 Security invariants (§34–§35): the reference layer stores only hashes,
 provenance, profiles, and immutable pointers.  It never stores response

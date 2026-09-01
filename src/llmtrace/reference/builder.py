@@ -4,7 +4,7 @@ The builder is the *only* production path from a run artifact to a
 ``ReferenceSnapshot``.  It enforces the strict order (§15):
 
     verify Run artifacts → qualification passes → build ReferenceSnapshot
-    → ReferenceRepository.save()
+    → ReferenceRepository.save_trusted()  (snapshot.json + integrity sidecar)
 
 A snapshot is never built from a transient in-memory profile: the persisted
 and verified ``capability_profile.json`` artifact is the single input source
@@ -154,8 +154,10 @@ class ReferenceSnapshotBuilder:
             provenance=provenance,
         )
 
-        # save last, after verify + qualify + build (§15)
-        return reference_repository.save(snapshot)
+        # save last, after verify + qualify + build (§15).  Trusted snapshots
+        # are written with their integrity sidecar, so a later tamper of the
+        # persisted bytes is detectable instead of self-verifying.
+        return reference_repository.save_trusted(snapshot)
 
 
 def _verified_profile(
