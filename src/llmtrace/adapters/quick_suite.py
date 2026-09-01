@@ -37,6 +37,7 @@ from llmtrace.benchmarks.models import (
     aggregate_item_results,
 )
 from llmtrace.models.evidence import HTTPEvidence
+from llmtrace.scoring.models import CapabilityDimension
 
 if TYPE_CHECKING:
     from llmtrace.providers.base import BaseProvider
@@ -1113,7 +1114,7 @@ def create_quick_registry() -> TaskScoringRegistry:
         TaskScoringRegistry: Pre-configured registry for Quick Suite v1 tasks.
     """
     from llmtrace.scoring.aggregator import TaskScoringRegistry
-    from llmtrace.scoring.models import CapabilityDimension, TaskScoringSpec
+    from llmtrace.scoring.models import TaskScoringSpec
 
     return TaskScoringRegistry(
         specs=[
@@ -1151,3 +1152,12 @@ def create_quick_registry() -> TaskScoringRegistry:
             ),
         ]
     )
+
+
+def get_quick_suite_calibration_floors() -> dict[CapabilityDimension, float]:
+    return {
+        CapabilityDimension.REASONING: 0.25,
+        CapabilityDimension.CODING: 0.0,
+        CapabilityDimension.MATH_SCIENCE: 0.0,
+        CapabilityDimension.INSTRUCTION_FOLLOWING: 0.0,
+    }

@@ -175,6 +175,37 @@ class DimensionScoreResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Calibration provenance
+# ---------------------------------------------------------------------------
+
+
+class CalibrationProvenance(BaseModel):
+    """Typed provenance for a calibrated CapabilityProfile.
+
+    Records every fact needed to reproduce the calibration result:
+    which policy, which ReferenceSet, how many reference identities, etc.
+    """
+
+    policy_id: str = Field(..., min_length=1, description="Calibration policy identifier")
+    policy_version: str = Field(..., min_length=1, description="Calibration policy version")
+    method: str = Field(..., min_length=1, description="Calibration method (e.g. piecewise_linear_v1)")
+
+    reference_set_id: str = Field(..., min_length=1, description="ReferenceSet identifier")
+    reference_set_version: str = Field(..., min_length=1, description="ReferenceSet version")
+    reference_set_content_sha256: str = Field(..., description="ReferenceSet content hash")
+
+    reference_identity_count: int = Field(..., ge=0, description="Number of distinct reference identities used")
+    coverage_weight: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Coverage weight of the calibrated profile",
+    )
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+# ---------------------------------------------------------------------------
 # Capability profile (top-level aggregate)
 # ---------------------------------------------------------------------------
 
@@ -224,6 +255,10 @@ class CapabilityProfile(BaseModel):
     )
     warnings: tuple[str, ...] = Field(default_factory=tuple, description="Non-fatal warnings")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    calibration: CalibrationProvenance | None = Field(
+        default=None,
+        description="Calibration provenance. None until Reference Calibration is applied.",
+    )
 
     model_config = {"frozen": True, "extra": "forbid"}
 

@@ -208,6 +208,9 @@ def run(
     check_streaming: bool = typer.Option(True, "--streaming/--no-streaming", help="是否检查流式接口"),
     output_dir: Path = typer.Option(Path("reports"), "--output-dir", "-o", help="artifact 根目录"),
     reference_snapshot: Path = typer.Option(None, "--reference-snapshot", help="ReferenceSnapshot JSON 路径"),
+    reference_set: Path = typer.Option(
+        None, "--reference-set", help="ReferenceSet JSON 路径（用于 Reference Calibration）"
+    ),
     baseline_snapshot: Path = typer.Option(None, "--baseline-snapshot", help="显式基线 BehaviorRunSnapshot JSON 路径"),
     compare_latest: bool = typer.Option(
         True, "--compare-latest/--no-compare-latest", help="自动与最新兼容历史运行比较"
@@ -235,7 +238,38 @@ def run(
     resolved_target = (
         sanitize_target_id(target_id) if target_id else derive_target_id(config.protocol.value, config.base_url)
     )
-    plan = build_unified_execution_plan(config, target_id=resolved_target)
+
+    reference_set_id: str | None = None
+    reference_set_version: str | None = None
+    reference_set_content_sha256: str | None = None
+    calibration_policy_id: str | None = None
+    calibration_policy_version: str | None = None
+
+    if reference_set is not None:
+        try:
+            from llmtrace.reference.reference_set import ReferenceSet
+
+            raw = reference_set.read_text(encoding="utf-8")
+            ref_set = ReferenceSet.model_validate_json(raw)
+            ref_set.verify_content_hash()
+            reference_set_id = ref_set.reference_set_id
+            reference_set_version = ref_set.reference_set_version
+            reference_set_content_sha256 = ref_set.content_sha256
+            calibration_policy_id = "llmtrace-reference-calibration-v1"
+            calibration_policy_version = "0.1.0"
+        except Exception as exc:
+            print_error(str(exc), "reference set 预检", partial=False)
+            raise typer.Exit(code=1)
+
+    plan = build_unified_execution_plan(
+        config,
+        target_id=resolved_target,
+        reference_set_id=reference_set_id,
+        reference_set_version=reference_set_version,
+        reference_set_content_sha256=reference_set_content_sha256,
+        calibration_policy_id=calibration_policy_id,
+        calibration_policy_version=calibration_policy_version,
+    )
 
     if dry_run:
         print_dry_run(
@@ -251,6 +285,7 @@ def run(
                 "预计费用": "unknown",
                 "需要安全 Sandbox": "是",
                 "参考对比": "是" if reference_snapshot else "否",
+                "Reference Calibration": "是" if reference_set else "否",
                 "历史对比": "是" if compare_latest else "否",
             }
         )
@@ -261,7 +296,6 @@ def run(
         print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
         raise typer.Exit(code=1)
 
-    # Confirmation
     if not non_interactive:
         if not sys.stdin.isatty():
             print_error("非交互式执行需要 --yes", "确认", partial=False)
@@ -289,6 +323,7 @@ def run(
             compare_latest=compare_latest,
             baseline_snapshot_path=baseline_snapshot,
             reference_snapshot_path=reference_snapshot,
+            reference_set_path=reference_set,
             max_wall_seconds=max_wall_seconds,
         )
     except SandboxUnavailableError as exc:
@@ -304,8 +339,6 @@ def run(
             import traceback
 
             traceback.print_exc()
-        # Non-debug error output crosses a display boundary — scrub every known
-        # secret (API key + base_url credentials) in case the exception echoes it.
         scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         print_error(scrubber.scrub_text(str(exc)), "统一执行", partial=True)
         raise typer.Exit(code=1)

@@ -50,8 +50,18 @@ def build_unified_execution_plan(
     *,
     target_id: str,
     policy: CapabilityScoringPolicy | None = None,
+    reference_set_id: str | None = None,
+    reference_set_version: str | None = None,
+    reference_set_content_sha256: str | None = None,
+    calibration_policy_id: str | None = None,
+    calibration_policy_version: str | None = None,
 ) -> UnifiedExecutionPlan:
-    """Build the complete execution plan before any API request is sent."""
+    """Build the complete execution plan before any API request is sent.
+
+    When reference_set / calibration parameters are provided the plan_id
+    binds them, so a different ReferenceSet or calibration policy produces
+    a different artifact identity.
+    """
     resolved_policy = policy if policy is not None else CapabilityScoringPolicy.create_v1()
 
     protocol_requests = protocol_probe_request_count(config)
@@ -65,31 +75,31 @@ def build_unified_execution_plan(
         json.dumps(generation_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     ).hexdigest()
 
-    # Canonical suite content identity — recomputed on every plan so that any
-    # change to the Quick Suite items (even without a suite_version bump)
-    # invalidates the plan_id.
     suite_content_sha256 = get_quick_suite_content_sha256()
+
+    plan_id_input: dict[str, object] = {
+        "protocol": str(config.protocol.value),
+        "base_url": redact_url(config.base_url),
+        "model": config.model,
+        "repeat_count": config.repeat_count,
+        "check_streaming": config.check_streaming,
+        "max_output_tokens": config.max_output_tokens,
+        "suite_id": QUICK_SUITE_SUITE_ID,
+        "suite_version": QUICK_SUITE_SUITE_VERSION,
+        "suite_content_sha256": suite_content_sha256,
+        "generation_config": generation_config,
+    }
+    if reference_set_content_sha256 is not None:
+        plan_id_input["reference_set_content_sha256"] = reference_set_content_sha256
+    if calibration_policy_id is not None:
+        plan_id_input["calibration_policy_id"] = calibration_policy_id
+    if calibration_policy_version is not None:
+        plan_id_input["calibration_policy_version"] = calibration_policy_version
 
     plan = UnifiedExecutionPlan(
         plan_id=hashlib.sha256(
             json.dumps(
-                {
-                    "protocol": str(config.protocol.value),
-                    # Canonical redacted endpoint — a secret-bearing URL must
-                    # never become the input of a long-lived artifact identity.
-                    # Same semantics as derive_target_id(): credentials and
-                    # secret query values are stripped, non-sensitive query
-                    # parameters keep defining the endpoint.
-                    "base_url": redact_url(config.base_url),
-                    "model": config.model,
-                    "repeat_count": config.repeat_count,
-                    "check_streaming": config.check_streaming,
-                    "max_output_tokens": config.max_output_tokens,
-                    "suite_id": QUICK_SUITE_SUITE_ID,
-                    "suite_version": QUICK_SUITE_SUITE_VERSION,
-                    "suite_content_sha256": suite_content_sha256,
-                    "generation_config": generation_config,
-                },
+                plan_id_input,
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=True,
@@ -102,7 +112,7 @@ def build_unified_execution_plan(
         planned_requests=planned_requests,
         maximum_requests=planned_requests,
         maximum_output_token_ceiling=token_ceiling,
-        estimated_cost=None,  # no trusted pricing source yet — never invent numbers
+        estimated_cost=None,
         suite_id=QUICK_SUITE_SUITE_ID,
         suite_version=QUICK_SUITE_SUITE_VERSION,
         suite_content_sha256=suite_content_sha256,
@@ -110,5 +120,10 @@ def build_unified_execution_plan(
         scoring_policy_version=resolved_policy.policy_version,
         generation_config_sha256=generation_sha,
         requires_secure_code_sandbox=True,
+        calibration_policy_id=calibration_policy_id,
+        calibration_policy_version=calibration_policy_version,
+        reference_set_id=reference_set_id,
+        reference_set_version=reference_set_version,
+        reference_set_content_sha256=reference_set_content_sha256,
     )
     return plan

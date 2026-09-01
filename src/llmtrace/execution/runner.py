@@ -39,6 +39,14 @@ from llmtrace.providers.factory import create_provider
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
 from llmtrace.scoring.aggregator import TaskScoringRegistry, aggregate_capability_profile
+from llmtrace.scoring.calibration import (
+    CalibrationCurveBundle,
+    CalibrationError,
+    ReferenceCalibrationPolicy,
+    aggregate_reference_identities,
+    build_calibration_curves,
+    calibrate_capability_profile,
+)
 from llmtrace.scoring.comparison import CapabilityComparator, ComparisonResult
 from llmtrace.scoring.errors import ScoringError
 from llmtrace.scoring.models import CapabilityProfile
@@ -83,6 +91,7 @@ class UnifiedRunRequest(BaseModel):
     compare_latest: bool = True
     baseline_snapshot_path: Path | None = None
     reference_snapshot_path: Path | None = None
+    reference_set_path: Path | None = None
     max_wall_seconds: float | None = Field(default=None, gt=0)
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -113,10 +122,9 @@ class UnifiedAuditRunner:
         compare_latest: bool = True,
         baseline_snapshot_path: Path | None = None,
         reference_snapshot_path: Path | None = None,
+        reference_set_path: Path | None = None,
         max_wall_seconds: float | None = None,
     ) -> None:
-        # Preflight happens here — constructing a fail-closed backend raises
-        # SandboxUnavailableError before any request is sent.
         self._code_backend = code_backend if code_backend is not None else create_code_execution_backend()
         self._config = config
         self._api_key = api_key
@@ -125,13 +133,13 @@ class UnifiedAuditRunner:
         self._compare_latest = compare_latest
         self._baseline_snapshot_path = baseline_snapshot_path
         self._reference_snapshot_path = reference_snapshot_path
+        self._reference_set_path = reference_set_path
         self._max_wall_seconds = max_wall_seconds
         self._recorder = InMemoryEvidenceRecorder()
         self._policy = CapabilityScoringPolicy.create_v1()
-        # Output-boundary scrubber: known secrets are the API key plus every
-        # secret value embedded in the endpoint URL (userinfo credentials and
-        # sensitive query parameters).  They must never reach a persisted
-        # artifact, whichever side (request or response) they leak from.
+        self._calibration_policy: ReferenceCalibrationPolicy | None = None
+        self._reference_set = None
+        self._calibration_identity_count = 0
         self._scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         self._budget: RequestBudget | None = None
 
@@ -157,13 +165,30 @@ class UnifiedAuditRunner:
 
     async def _execute(self, execution_id: str, started_at: datetime) -> UnifiedRunResult:
         warnings: list[str] = []
-        plan = build_unified_execution_plan(self._config, target_id=self._target_id, policy=self._policy)
+
+        plan = build_unified_execution_plan(
+            self._config,
+            target_id=self._target_id,
+            policy=self._policy,
+            reference_set_id=(
+                self._reference_set.reference_set_id if self._reference_set is not None else None
+            ),
+            reference_set_version=(
+                self._reference_set.reference_set_version if self._reference_set is not None else None
+            ),
+            reference_set_content_sha256=(
+                self._reference_set.content_sha256 if self._reference_set is not None else None
+            ),
+            calibration_policy_id=(
+                self._calibration_policy.policy_id if self._calibration_policy is not None else None
+            ),
+            calibration_policy_version=(
+                self._calibration_policy.policy_version if self._calibration_policy is not None else None
+            ),
+        )
         budget = RequestBudget(plan.maximum_requests)
         self._budget = budget
 
-        # ---- PREFLIGHT -----------------------------------------------------
-        # Every predictable failure must happen before a provider exists and
-        # before the first real HTTP request is sent.
         self._preflight()
 
         provider = create_provider(
@@ -221,6 +246,23 @@ class UnifiedAuditRunner:
                     f"{measurement.ungradable_item_count} ungradable, "
                     f"{measurement.graded_item_count} graded of {measurement.total_item_count} items"
                 )
+
+        # ---- REFERENCE CALIBRATION ----------------------------------------
+        if capability_profile is not None and self._reference_set is not None:
+            try:
+                curves = self._build_calibration_curves(warnings)
+                if curves is not None:
+                    identity_count = self._calibration_identity_count
+                    capability_profile = calibrate_capability_profile(
+                        capability_profile,
+                        curves,
+                        self._policy,
+                        self._calibration_policy,  # type: ignore[arg-type]
+                        self._reference_set,
+                        identity_count,
+                    )
+            except CalibrationError as exc:
+                warnings.append(f"reference calibration skipped: {exc.error_code}")
 
         # ---- HISTORY COMPARISON -------------------------------------------
         behavior_drift = None
@@ -284,18 +326,7 @@ class UnifiedAuditRunner:
     # -- Preflight -------------------------------------------------------------
 
     def _preflight(self) -> None:
-        """Fail closed on every predictable problem, before any HTTP request.
-
-        Checks (I/O + schema validity only — compatibility stays with
-        ``BehaviorDriftEngine`` / ``CapabilityComparator`` after the current
-        profile exists):
-
-        - Quick Suite manifest + resource integrity (files, counts, hashes);
-        - secure code-execution sandbox availability;
-        - explicit baseline snapshot exists and parses as a BehaviorRunSnapshot;
-        - explicit reference snapshot exists and parses as a ReferenceSnapshot;
-        - artifact root can be created and written (probe file, cleaned up).
-        """
+        """Fail closed on every predictable problem, before any HTTP request."""
         from llmtrace.adapters.quick_suite import verify_quick_suite_resources
 
         try:
@@ -327,6 +358,22 @@ class UnifiedAuditRunner:
                 ReferenceSnapshot.model_validate_json(raw)
             except ValueError as exc:
                 raise PreflightError(f"reference snapshot is not a valid ReferenceSnapshot: {path}") from exc
+
+        if self._reference_set_path is not None:
+            try:
+                from llmtrace.reference.reference_set import ReferenceSet
+
+                raw = self._reference_set_path.read_text(encoding="utf-8")
+                ref_set = ReferenceSet.model_validate_json(raw)
+                ref_set.verify_content_hash()
+                self._reference_set = ref_set
+                self._calibration_policy = ReferenceCalibrationPolicy.create_v1()
+            except OSError as exc:
+                raise PreflightError(f"reference set unreadable: {self._reference_set_path}") from exc
+            except ValueError as exc:
+                raise PreflightError(f"reference set is not a valid ReferenceSet: {self._reference_set_path}") from exc
+            except Exception as exc:
+                raise PreflightError(f"reference set integrity failure: {exc}") from exc
 
         try:
             self._repository.ensure_writable()
@@ -380,6 +427,59 @@ class UnifiedAuditRunner:
         from llmtrace.adapters.quick_suite import create_quick_registry
 
         return create_quick_registry()
+
+    def _load_reference_set_profiles(
+        self,
+    ) -> dict[str, CapabilityProfile] | None:
+        """Load capability profiles for every member snapshot in the ReferenceSet.
+
+        Returns None if any member's profile cannot be loaded (fail-open to
+        calibration warnings, not to run failure).
+        """
+        if self._reference_set is None:
+            return None
+        profiles: dict[str, CapabilityProfile] = {}
+        for member in self._reference_set.members:
+            if member.execution_id is None:
+                return None
+            profile = self._repository.load_capability_profile(member.execution_id)
+            if profile is None:
+                return None
+            profiles[member.snapshot_id] = profile
+        return profiles
+
+    def _build_calibration_curves(
+        self,
+        warnings: list[str],
+    ) -> CalibrationCurveBundle | None:
+        """Build calibration curves from the pinned ReferenceSet.
+
+        TOCTOU prevention: the ReferenceSet was loaded once in preflight.
+        This method loads member profiles from the repository (read-only) and
+        builds calibration curves in memory.
+        """
+        assert self._reference_set is not None
+        assert self._calibration_policy is not None
+
+        profiles = self._load_reference_set_profiles()
+        if profiles is None:
+            warnings.append("reference calibration skipped: could not load member profiles")
+            return None
+
+        identities = aggregate_reference_identities(self._reference_set.members, profiles)
+        self._calibration_identity_count = len(identities)
+
+        if len(identities) < self._calibration_policy.minimum_distinct_reference_identities:
+            warnings.append(
+                f"reference calibration skipped: {len(identities)} distinct identities, "
+                f"need >= {self._calibration_policy.minimum_distinct_reference_identities}"
+            )
+            return None
+
+        from llmtrace.adapters.quick_suite import get_quick_suite_calibration_floors
+
+        random_floors = get_quick_suite_calibration_floors()
+        return build_calibration_curves(identities, self._policy, self._calibration_policy, random_floors)
 
     # -- History -------------------------------------------------------------
 
@@ -603,6 +703,11 @@ class UnifiedAuditRunner:
             baseline_execution_id=baseline_execution_id,
             baseline_behavior_snapshot_sha256=baseline_snapshot_sha,
             reference_snapshot_id=reference_snapshot_id,
+            calibration_policy_id=result.plan.calibration_policy_id,
+            calibration_policy_version=result.plan.calibration_policy_version,
+            reference_set_id=result.plan.reference_set_id,
+            reference_set_version=result.plan.reference_set_version,
+            reference_set_content_sha256=result.plan.reference_set_content_sha256,
             warnings=result.warnings,
         )
         self._repository.commit(manifest, artifacts)
