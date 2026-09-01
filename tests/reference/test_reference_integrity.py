@@ -1,9 +1,10 @@
 """Adversarial regression tests for v0.4-A trusted reference integrity.
 
 Covers Blocker 1 (sidecar integrity anchor), Blocker 2 (URL console scrub),
-Blocker 3 (Gate 10 exact dimension set), and Hardening 1 (malformed manifest
-fail-closed).  Each test simulates a specific attack or corruption scenario
-and asserts fail-closed behavior.
+Blocker 3 (Gate 10 exact dimension set), Hardening 1 (malformed manifest
+fail-closed), Hardening 2 (policy rejection), and the sidecar race cleanup
+ownership invariant.  Each test simulates a specific attack or corruption
+scenario and asserts fail-closed behavior.
 """
 
 from __future__ import annotations
@@ -11,9 +12,12 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from llmtrace.reference.builder import ReferenceSnapshotBuilder
 from llmtrace.reference.qualification import (
     ARTIFACT_INTEGRITY_FAILURE,
     INCOMPATIBLE_COVERAGE,
@@ -33,7 +37,13 @@ from llmtrace.scoring.models import (
 from llmtrace.scoring.reference import ReferenceRepository, ReferenceSnapshot
 from llmtrace.security.redaction import redact_url
 
-from .helpers import DEFAULT_EXECUTION_ID, commit_run, make_capability_profile, make_manifest, make_snapshot
+from .helpers import (
+    DEFAULT_EXECUTION_ID,
+    commit_run,
+    make_capability_profile,
+    make_manifest,
+    make_snapshot,
+)
 
 # ===========================================================================
 # Blocker 1 — Sidecar integrity anchor
@@ -44,34 +54,30 @@ class TestSidecarIntegrityAnchor:
     """Case A-D: pre-load tamper / post-save tamper / sidecar tamper / legacy."""
 
     def test_case_a_pre_load_tamper_rejected_by_set_create(self, tmp_path: Path) -> None:
-        """Case A: tamper snapshot.json before load → set-create must fail."""
+        """Case A: tamper snapshot.json before load -> set-create must fail."""
         repo_dir = tmp_path / "snapshots"
         repo = ReferenceRepository(directory=repo_dir)
         snapshot = make_snapshot(snapshot_id="trusted-snap")
         repo.save_trusted(snapshot)
 
-        # Tamper the snapshot body before any fresh load.
         snapshot_path = repo_dir / "trusted-snap.json"
         tampered = json.loads(snapshot_path.read_text(encoding="utf-8"))
         tampered["model_id"] = "tampered-model"
         snapshot_path.write_text(json.dumps(tampered, indent=2), encoding="utf-8")
 
-        # Fresh load reads tampered content.
         fresh_repo = ReferenceRepository.load(repo_dir)
         loaded = fresh_repo.get("trusted-snap")
         assert loaded.model_id == "tampered-model"
 
-        # verify_trusted_snapshot must detect the mismatch.
         with pytest.raises(ReferenceIntegrityError, match="integrity check failed"):
             fresh_repo.verify_trusted_snapshot("trusted-snap")
 
     def test_case_b_post_save_body_tamper_rejected(self, tmp_path: Path) -> None:
-        """Case B: modify snapshot.json, leave sidecar intact → verify fails."""
+        """Case B: modify snapshot.json, leave sidecar intact -> verify fails."""
         repo = ReferenceRepository(directory=tmp_path)
         snapshot = make_snapshot(snapshot_id="snap-b")
         repo.save_trusted(snapshot)
 
-        # Tamper body after save.
         snapshot_path = tmp_path / "snap-b.json"
         tampered = json.loads(snapshot_path.read_text(encoding="utf-8"))
         tampered["provider_id"] = "evil-provider"
@@ -81,7 +87,7 @@ class TestSidecarIntegrityAnchor:
             repo.verify_snapshot("snap-b")
 
     def test_case_c_sidecar_sha_tamper_rejected(self, tmp_path: Path) -> None:
-        """Case C: modify sidecar.snapshot_sha256 → verify fails."""
+        """Case C: modify sidecar.snapshot_sha256 -> verify fails."""
         repo = ReferenceRepository(directory=tmp_path)
         snapshot = make_snapshot(snapshot_id="snap-c")
         repo.save_trusted(snapshot)
@@ -95,36 +101,31 @@ class TestSidecarIntegrityAnchor:
             repo.verify_snapshot("snap-c")
 
     def test_case_d_legacy_snapshot_readable_but_set_rejected(self, tmp_path: Path) -> None:
-        """Case D: v0.3-C legacy (no sidecar) → readable, but set-create rejects."""
+        """Case D: v0.3-C legacy (no sidecar) -> readable, but set-create rejects."""
         repo = ReferenceRepository(directory=tmp_path)
         snapshot = make_snapshot(snapshot_id="legacy-snap")
-        repo.save(snapshot)  # Old save path — no sidecar.
+        repo.save(snapshot)
 
-        # Legacy snapshot remains readable.
         loaded = repo.get("legacy-snap")
         assert loaded.snapshot_id == "legacy-snap"
 
-        # verify_snapshot with no expected falls back to current serialization.
         actual_sha = repo.verify_snapshot("legacy-snap")
         assert len(actual_sha) == 64
 
-        # verify_trusted_snapshot demands a sidecar.
         with pytest.raises(ReferenceSnapshotManifestMissingError, match="no integrity manifest"):
             repo.verify_trusted_snapshot("legacy-snap")
 
     def test_sidecar_provenance_mismatch_rejected(self, tmp_path: Path) -> None:
-        """Tamper snapshot provenance → sidecar binding check fails."""
+        """Tamper snapshot provenance -> sidecar binding check fails."""
         repo = ReferenceRepository(directory=tmp_path)
         snapshot = make_snapshot(snapshot_id="snap-prov")
         repo.save_trusted(snapshot)
 
-        # Tamper provenance hash in snapshot body.
         snapshot_path = tmp_path / "snap-prov.json"
         tampered = json.loads(snapshot_path.read_text(encoding="utf-8"))
         tampered["provenance"]["run_manifest_sha256"] = "e" * 64
         snapshot_path.write_text(json.dumps(tampered, indent=2), encoding="utf-8")
 
-        # Fresh load picks up tampered provenance.
         fresh_repo = ReferenceRepository.load(tmp_path)
 
         with pytest.raises(ReferenceSnapshotProvenanceMismatchError, match="provenance disagrees"):
@@ -141,9 +142,9 @@ class TestSidecarIntegrityAnchor:
             suite_sha256="a" * 64,
             benchmark_revision="quick-v1-rev",
             runner_version="0.4.0",
-            execution_id=None,  # Missing
-            run_manifest_sha256=None,  # Missing
-            capability_profile_sha256=None,  # Missing
+            execution_id=None,
+            run_manifest_sha256=None,
+            capability_profile_sha256=None,
         )
         snapshot = ReferenceSnapshot(
             snapshot_id="incomplete-snap",
@@ -212,7 +213,6 @@ class TestGate10ExactDimensionSet:
     """Extra SCORED/UNCALIBRATED dimension must be rejected."""
 
     def test_extra_scored_dimension_rejected(self, artifact_root: Path) -> None:
-        # Policy enables 4 dimensions; profile has 5 (4 expected + 1 extra SCORED).
         profile = CapabilityProfile(
             scoring_policy_id="llmtrace-capability-v1",
             scoring_policy_version="0.1.0",
@@ -254,7 +254,6 @@ class TestGate10ExactDimensionSet:
         assert INCOMPATIBLE_COVERAGE in result.reason_codes
 
     def test_extra_uncalibrated_dimension_rejected(self, artifact_root: Path) -> None:
-        # 5 UNCALIBRATED dimensions when policy only enables 4.
         profile = CapabilityProfile(
             scoring_policy_id="llmtrace-capability-v1",
             scoring_policy_version="0.1.0",
@@ -302,16 +301,18 @@ class TestGate10ExactDimensionSet:
 
 
 class TestMalformedManifestFailClosed:
-    """Invalid JSON / missing field / schema violation → REJECTED + ARTIFACT_INTEGRITY_FAILURE."""
+    """Invalid JSON / missing field / schema violation -> REJECTED + ARTIFACT_INTEGRITY_FAILURE."""
 
     def test_invalid_json_manifest_rejected(self, artifact_root: Path) -> None:
         from llmtrace.execution.artifacts import RunArtifactRepository
 
         repository = RunArtifactRepository(artifact_root)
         manifest = make_manifest()
-        repository.commit(manifest, {"capability_profile.json": make_capability_profile().model_dump_json()})
+        repository.commit(
+            manifest,
+            {"capability_profile.json": make_capability_profile().model_dump_json()},
+        )
 
-        # Corrupt manifest to invalid JSON.
         manifest_path = artifact_root / "runs" / DEFAULT_EXECUTION_ID / "manifest.json"
         manifest_path.write_text("{invalid json", encoding="utf-8")
 
@@ -328,9 +329,11 @@ class TestMalformedManifestFailClosed:
 
         repository = RunArtifactRepository(artifact_root)
         manifest = make_manifest()
-        repository.commit(manifest, {"capability_profile.json": make_capability_profile().model_dump_json()})
+        repository.commit(
+            manifest,
+            {"capability_profile.json": make_capability_profile().model_dump_json()},
+        )
 
-        # Remove a required field from manifest.
         manifest_path = artifact_root / "runs" / DEFAULT_EXECUTION_ID / "manifest.json"
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         del data["execution_id"]
@@ -348,9 +351,11 @@ class TestMalformedManifestFailClosed:
 
         repository = RunArtifactRepository(artifact_root)
         manifest = make_manifest()
-        repository.commit(manifest, {"capability_profile.json": make_capability_profile().model_dump_json()})
+        repository.commit(
+            manifest,
+            {"capability_profile.json": make_capability_profile().model_dump_json()},
+        )
 
-        # Set adapter_id to empty string (violates min_length=1).
         manifest_path = artifact_root / "runs" / DEFAULT_EXECUTION_ID / "manifest.json"
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         data["adapter_id"] = ""
@@ -362,3 +367,129 @@ class TestMalformedManifestFailClosed:
         )
         assert not result.qualified
         assert ARTIFACT_INTEGRITY_FAILURE in result.reason_codes
+
+
+# ===========================================================================
+# Hardening 2 — Qualification policy rejection
+# ===========================================================================
+
+
+class TestQualificationPolicyRejection:
+    """An arbitrary policy id/version must not produce trusted QUALIFIED."""
+
+    def test_unknown_policy_rejected(self, artifact_root: Path) -> None:
+        from llmtrace.reference.qualification import ReferenceQualificationPolicy
+
+        policy = ReferenceQualificationPolicy(
+            policy_id="fake_policy",
+            policy_version="999.0.0",
+        )
+        repository, _ = commit_run(artifact_root)
+        result = qualify_reference_run(
+            execution_id=DEFAULT_EXECUTION_ID,
+            artifact_repository=repository,
+            policy=policy,
+        )
+        assert not result.qualified
+        assert "UNKNOWN_POLICY" in result.reason_codes
+
+    def test_snapshot_builder_rejects_unknown_policy(self, tmp_path: Path) -> None:
+        """Direct library call to builder with fake policy must also fail."""
+        from llmtrace.reference.qualification import (
+            ReferenceQualificationError,
+            ReferenceQualificationPolicy,
+        )
+
+        artifact_root = tmp_path / "artifacts"
+        repository, _ = commit_run(artifact_root)
+        ref_repo = ReferenceRepository(directory=tmp_path / "snapshots")
+
+        fake_policy = ReferenceQualificationPolicy(
+            policy_id="evil_policy",
+            policy_version="0.0.1",
+        )
+        builder = ReferenceSnapshotBuilder(qualification_policy=fake_policy)
+
+        with pytest.raises(ReferenceQualificationError):
+            builder.build(
+                execution_id=DEFAULT_EXECUTION_ID,
+                artifact_repository=repository,
+                reference_repository=ref_repo,
+                provider_id="test-provider",
+                snapshot_id="should-not-exist",
+                created_by="test",
+                source_type="test_fixture",
+            )
+
+        assert list(ref_repo.list()) == []
+
+
+# ===========================================================================
+# Sidecar race — ownership tracking
+# ===========================================================================
+
+
+class TestSidecarRaceCleanup:
+    """Verify ownership tracking in _write_trusted_files: only files created
+    by the current invocation are cleaned up on failure."""
+
+    def test_sidecar_exclusive_create_race_cleans_owned_snapshot(self, tmp_path: Path) -> None:
+        """Test A: pre-existing sidecar blocks sidecar open('x') -> FileExistsError.
+        The snapshot body created by this invocation must be cleaned.
+        The pre-existing sidecar must NOT be deleted."""
+        from llmtrace.scoring.errors import DuplicateSnapshotError
+
+        repo = ReferenceRepository(directory=tmp_path)
+        snapshot = make_snapshot(snapshot_id="race-snap")
+        sidecar_path = tmp_path / "race-snap.manifest.json"
+
+        sidecar_path.write_text('{"pre-existing": true}', encoding="utf-8")
+
+        original_open = Path.open
+
+        def intercepted_open(
+            self: Path,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            if self == sidecar_path and args and args[0] == "x":
+                raise FileExistsError(17, "File exists", str(sidecar_path))
+            return original_open(self, *args, **kwargs)
+
+        with (
+            patch.object(Path, "open", intercepted_open),
+            pytest.raises(DuplicateSnapshotError),
+        ):
+            repo.save_trusted(snapshot)
+
+        assert not (tmp_path / "race-snap.json").exists(), "snapshot body created by failing invocation must be cleaned"
+        assert sidecar_path.exists(), "external/pre-existing sidecar must not be deleted"
+        assert sidecar_path.read_text(encoding="utf-8") == '{"pre-existing": true}'
+        assert "race-snap" not in repo.list()
+
+    def test_generic_failure_cleans_owned_files_only(self, tmp_path: Path) -> None:
+        """Test B: snapshot body created, then generic exception before sidecar write.
+        Both owned files must be cleaned; memory index untouched."""
+        repo = ReferenceRepository(directory=tmp_path)
+        snapshot = make_snapshot(snapshot_id="fail-snap")
+
+        original_open = Path.open
+
+        def fail_on_sidecar_write(
+            self: Path,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            if self.name == "fail-snap.manifest.json" and args and args[0] == "x":
+                raise OSError("disk full")
+            return original_open(self, *args, **kwargs)
+
+        with (
+            patch.object(Path, "open", fail_on_sidecar_write),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            repo.save_trusted(snapshot)
+
+        assert not (tmp_path / "fail-snap.json").exists(), "snapshot body must be cleaned after failure"
+        assert not (tmp_path / "fail-snap.manifest.json").exists(), "sidecar must be cleaned after failure"
+        assert "fail-snap" not in repo.list()

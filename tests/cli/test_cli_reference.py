@@ -8,6 +8,7 @@ set-create``（happy path / missing snapshot / incompatible member）。
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -189,6 +190,63 @@ class TestCaptureLive:
         stdout = _strip_ansi(result.stdout)
         assert result.exit_code == 1
         assert "不存在或为空" in stdout
+
+
+# ---------------------------------------------------------------------------
+# CLI-level URL scrub regression
+# ---------------------------------------------------------------------------
+
+
+class TestCLICaptureURLScrubRegression:
+    """End-to-end: secrets must never appear in confirm prompt or error output."""
+
+    SECRET_URL = "https://myuser:mypassword@example.com/v1?api_key=secret123&region=us"
+
+    def test_confirm_prompt_scrubs_credentials(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        captured_prompts: list[str] = []
+
+        def capturing_confirm(message: str, *args: object, **kwargs: object) -> bool:
+            captured_prompts.append(message)
+            return False
+
+        monkeypatch.setenv("LLMTRACE_TEST_KEY", "sk-test-secret")
+        monkeypatch.setattr("typer.confirm", capturing_confirm)
+
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+        reference_dir = tmp_path / "references"
+        output_dir = tmp_path / "reference-runs"
+        result = runner.invoke(
+            app,
+            _capture_args(reference_dir=reference_dir, output_dir=output_dir) + ["--base-url", self.SECRET_URL],
+        )
+        stdout = _strip_ansi(result.stdout)
+        all_text = stdout + " ".join(captured_prompts)
+
+        assert "myuser" not in all_text
+        assert "mypassword" not in all_text
+        assert "secret123" not in all_text
+
+    def test_exception_output_scrubs_secrets(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        async def fake_capture(self: object, **kwargs: object) -> ReferenceCaptureResult:
+            raise RuntimeError("API request failed: myuser:mypassword@evil.com api_key=secret123 query failed")
+
+        monkeypatch.setenv("LLMTRACE_TEST_KEY", "sk-test-secret")
+        monkeypatch.setattr(ReferenceCaptureService, "capture", fake_capture)
+
+        reference_dir = tmp_path / "references"
+        output_dir = tmp_path / "reference-runs"
+        result = runner.invoke(
+            app,
+            _capture_args(reference_dir=reference_dir, output_dir=output_dir)
+            + ["--base-url", self.SECRET_URL]
+            + ["--yes"],
+        )
+        stdout = _strip_ansi(result.stdout)
+
+        assert "myuser" not in stdout
+        assert "mypassword" not in stdout
+        assert "secret123" not in stdout
 
 
 # ---------------------------------------------------------------------------

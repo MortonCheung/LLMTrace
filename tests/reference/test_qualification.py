@@ -354,15 +354,16 @@ class TestQualificationPolicy:
         with pytest.raises(ValidationError):
             policy.policy_version = "0.2.0"  # type: ignore[misc]
 
-    def test_policy_injection_for_tests_only(self, artifact_root: Path) -> None:
-        # The policy parameter exists as a test seam only.  A real v2 policy
-        # would bring different rules/thresholds with its id/version, not just
-        # a relabelling of the same Gate 1–10 logic.  This test confirms the
-        # seam works; production code must call create_v1() or an explicit v2.
+    def test_unknown_policy_rejected_until_policy_rules_exist(self, artifact_root: Path) -> None:
+        """An arbitrary policy id/version cannot produce trusted QUALIFIED.
+
+        v0.4-A hardcodes gate rules — an arbitrary label would produce false
+        provenance.  Only create_v1() is accepted.
+        """
         policy = ReferenceQualificationPolicy(
-            policy_id="test_seam_policy",
+            policy_id="custom_future_policy",
             policy_version="999.0.0",
-            description="Test-only injection; production paths use create_v1()",
+            description="Should be rejected until real v2 rules exist",
         )
         repository, _ = commit_run(artifact_root)
         result = qualify_reference_run(
@@ -370,6 +371,7 @@ class TestQualificationPolicy:
             artifact_repository=repository,
             policy=policy,
         )
-        assert result.qualified
-        assert result.policy_id == "test_seam_policy"
+        assert not result.qualified
+        assert "UNKNOWN_POLICY" in result.reason_codes
+        assert result.policy_id == "custom_future_policy"
         assert result.policy_version == "999.0.0"

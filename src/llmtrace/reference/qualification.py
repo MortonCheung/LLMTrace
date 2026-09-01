@@ -172,12 +172,31 @@ def qualify_reference_run(
     machine-readable ``reason_codes``.  On QUALIFIED the result carries the
     *persisted and verified* capability profile (Gate 3).
 
+    Only ``create_v1()`` is accepted.  An unknown policy id/version is
+    rejected because v0.4-A hardcodes gate rules — an arbitrary label
+    would produce false provenance.
+
     Args:
         execution_id: RunArtifact execution to qualify.
         artifact_repository: Repository owning the run artifact.
         policy: Qualification policy; defaults to ``create_v1()``.
     """
     resolved_policy = policy if policy is not None else ReferenceQualificationPolicy.create_v1()
+
+    _expected_v1 = ReferenceQualificationPolicy.create_v1()
+    if (
+        resolved_policy.policy_id != _expected_v1.policy_id
+        or resolved_policy.policy_version != _expected_v1.policy_version
+    ):
+        return _rejected(
+            resolved_policy,
+            execution_id,
+            ["UNKNOWN_POLICY"],
+            [
+                f"qualification policy '{resolved_policy.policy_id}@{resolved_policy.policy_version}' "
+                f"is not the accepted v1 policy; trusted provenance requires create_v1()",
+            ],
+        )
     reason_codes: list[str] = []
     warnings: list[str] = []
 

@@ -541,40 +541,51 @@ class ReferenceRepository:
         The sidecar's ``snapshot_sha256`` is taken from the bytes actually on
         disk after the body write, so it records what was persisted rather
         than what the caller intended to persist.
+
+        Ownership tracking: only files *created by this invocation* are cleaned
+        up on failure.  A pre-existing sidecar left by a concurrent writer is
+        never deleted — the ``open("x")`` ``FileExistsError`` is the atomic
+        duplicate detector; the pre-flight ``.exists()`` check was removed
+        because it races with concurrent callers.
         """
         assert self._directory is not None
         self._directory.mkdir(parents=True, exist_ok=True)
         snapshot_path = self._file_path(snapshot.snapshot_id)
         sidecar_path = self._manifest_path(snapshot.snapshot_id)
 
-        # Pre-flight: refuse to touch either file if the record already exists.
-        for existing in (snapshot_path, sidecar_path):
-            if existing.exists():
-                raise DuplicateSnapshotError(
-                    f"ReferenceSnapshot '{snapshot.snapshot_id}' already exists on disk at '{existing}'; "
-                    f"snapshots are immutable and append-only — create a new snapshot_id for a new version"
-                )
+        snapshot_created = False
+        sidecar_created = False
 
-        sidecar = self._build_sidecar(snapshot)
         try:
             with snapshot_path.open("x", encoding="utf-8") as f:
+                snapshot_created = True
                 f.write(snapshot.model_dump_json(indent=2))
-            # Hash what is really on disk, not the in-memory serialisation.
+
             persisted_sha256 = sha256_of(snapshot_path.read_text(encoding="utf-8"))
+            sidecar = self._build_sidecar(snapshot)
             sidecar = sidecar.model_copy(update={"snapshot_sha256": persisted_sha256})
+
             with sidecar_path.open("x", encoding="utf-8") as f:
+                sidecar_created = True
                 f.write(sidecar.model_dump_json(indent=2))
+
         except FileExistsError as exc:
+            if snapshot_created:
+                snapshot_path.unlink(missing_ok=True)
+            if sidecar_created:
+                sidecar_path.unlink(missing_ok=True)
+
             raise DuplicateSnapshotError(
                 f"ReferenceSnapshot '{snapshot.snapshot_id}' already exists on disk at '{exc.filename}'; "
                 f"snapshots are immutable and append-only — create a new snapshot_id for a new version"
             ) from exc
+
         except Exception:
-            # Never leave a body without its anchor: a half-written trusted
-            # snapshot would pass every later check by falling back to the
-            # un-anchored legacy path.
-            snapshot_path.unlink(missing_ok=True)
-            sidecar_path.unlink(missing_ok=True)
+            if snapshot_created:
+                snapshot_path.unlink(missing_ok=True)
+            if sidecar_created:
+                sidecar_path.unlink(missing_ok=True)
+
             raise
 
     @staticmethod
