@@ -33,7 +33,10 @@ from llmtrace.scoring.errors import (
     IncompatibleCoverageError,
     InvalidPolicyError,
     ReferenceError,
+    ReferenceIntegrityError,
     ReferenceNotFoundError,
+    ReferenceSnapshotManifestMissingError,
+    ReferenceSnapshotProvenanceMismatchError,
     ScoringPolicyMismatchError,
     SuiteMismatchError,
     SuiteVersionMismatchError,
@@ -48,9 +51,11 @@ from llmtrace.scoring.models import (
 )
 from llmtrace.scoring.policy import CapabilityScoringPolicy
 from llmtrace.scoring.reference import (
+    MANIFEST_VERSION_V1,
     ReferenceProvenance,
     ReferenceRepository,
     ReferenceSnapshot,
+    ReferenceSnapshotManifest,
 )
 
 __all__ = [
@@ -71,13 +76,18 @@ __all__ = [
     "ReferenceProvenance",
     "ReferenceRepository",
     "ReferenceSnapshot",
+    "ReferenceSnapshotManifest",
+    "MANIFEST_VERSION_V1",
     "AggregationError",
     "ComparisonError",
     "DuplicateSnapshotError",
     "IncompatibleCoverageError",
     "InvalidPolicyError",
     "ReferenceError",
+    "ReferenceIntegrityError",
     "ReferenceNotFoundError",
+    "ReferenceSnapshotManifestMissingError",
+    "ReferenceSnapshotProvenanceMismatchError",
     "ScoringPolicyMismatchError",
     "SuiteMismatchError",
     "SuiteVersionMismatchError",

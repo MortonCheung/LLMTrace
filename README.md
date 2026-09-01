@@ -46,6 +46,23 @@
 - **中央 Evidence Recorder + Request Budget**：每个真实 HTTP 请求 exactly-once 记录，总请求数有硬上限
 - **append-only 工件库**：一次执行 = 一个不可变目录（manifest + 报告 + 能力画像 + 行为快照 + benchmark 结果），含 SHA-256 校验
 
+### v0.4-A 受信任参考运行与 ReferenceSet 基础（实验性，新增）
+
+- **Suite Content Identity**：Quick Suite manifest 的 canonical content SHA-256（`suite_content_sha256`），
+  贯穿执行计划、运行工件与参考快照 provenance
+- **Reference Qualification（Gate 1–10）**：对一次落盘的运行工件逐道门禁 fail closed 校验，
+  只有 32/32 全部评分的可信运行才能成为 ReferenceSnapshot，机器可读 reason codes
+- **ReferenceSnapshotBuilder**：verify → qualify → build → save，provenance 记录 execution_id、
+  adapter、generation config、run manifest 与 capability profile 的 SHA、qualification policy 与
+  benchmark revisions
+- **ReferenceSet / ReferenceSetRepository**：12-gate Compatibility 校验、canonical content hash 自校验、
+  append-only 磁盘存储；生产 builder 拒绝 `test_fixture` 来源
+- **CLI**：`llmtrace reference capture`（Operator 对可信 endpoint 捕获参考运行）与
+  `llmtrace reference set-create`（从已验证快照构建参考组，0 API 请求）
+
+> 注意：`ReferenceSet` 当前**不产生 calibrated 0–100 分数**。参考快照/参考组是可信、
+> 不可变、可审计的历史能力事实；正式 0–100 能力分属于 v0.4-B Calibration（规划中）。
+
 ## 语义边界：LLMTrace 能说什么、不能说什么
 
 - ✅ 能说：「在相同测试条件下，本次运行与历史运行观察到显著行为漂移。」
@@ -139,6 +156,50 @@ llmtrace inspect reports/llmtrace_20260804_120000_abc123.json
 llmtrace compare reports/run_a.json reports/run_b.json
 ```
 
+### Reference workflow（实验性，v0.4-A）
+
+先 `--dry-run` 查看计划（0 HTTP、0 工件、不要求 API key 存在）：
+
+```bash
+llmtrace reference capture \
+  --protocol openai \
+  --base-url https://api.example.com/v1 \
+  --model reference-model \
+  --api-key-env MY_API_KEY \
+  --provider-id operator \
+  --snapshot-id ref-model-2026-08 \
+  --created-by operator \
+  --dry-run
+```
+
+Operator 确认 endpoint 是可信参考源后执行真实捕获（复用 `llmtrace run` 的统一执行链）：
+
+```bash
+llmtrace reference capture \
+  --protocol openai \
+  --base-url https://api.example.com/v1 \
+  --model reference-model \
+  --api-key-env MY_API_KEY \
+  --provider-id operator \
+  --snapshot-id ref-model-2026-08 \
+  --created-by operator \
+  --yes
+```
+
+资格门禁（Gate 1–10）全部通过后生成 ReferenceSnapshot；任一失败则只保留运行工件、不生成快照。
+从已验证快照构建 ReferenceSet（0 API 请求）：
+
+```bash
+llmtrace reference set-create \
+  --reference-dir references \
+  --set-id refset-v1 \
+  --set-version 1.0.0 \
+  --snapshot ref-model-2026-08 \
+  --snapshot ref-model-2026-07
+```
+
+> `ReferenceSet` 当前不产生 calibrated 0–100 分数（v0.4-B Calibration 规划中）。
+
 ## 模拟服务器
 
 项目包含一个本地模拟服务器，用于不消耗 API 的端到端验证：
@@ -176,7 +237,8 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 | v0.3-C | Reference Model Snapshot（已完成） |
 | v0.3-D | Behavior Drift Foundation（已完成） |
 | v0.3-E | Unified Execution & Artifact Foundation（已完成：`llmtrace run`） |
-| v0.4 | Reference + Calibration |
+| v0.4-A | Trusted Reference Run & Reference Set Foundation（已完成：`llmtrace reference capture / set-create`，无 0–100 输出） |
+| v0.4-B | Reference Calibration & 0–100（规划中） |
 | v0.5 | Fingerprint + Routing |
 | v0.6 | Product Service / Web |
 

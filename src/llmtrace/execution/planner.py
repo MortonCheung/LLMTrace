@@ -9,6 +9,7 @@ from llmtrace.adapters.quick_suite import (
     QUICK_SUITE_BENCHMARK_REQUESTS,
     QUICK_SUITE_SUITE_ID,
     QUICK_SUITE_SUITE_VERSION,
+    get_quick_suite_content_sha256,
     get_quick_suite_generation_config,
 )
 from llmtrace.config import AuditConfig
@@ -64,6 +65,11 @@ def build_unified_execution_plan(
         json.dumps(generation_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     ).hexdigest()
 
+    # Canonical suite content identity — recomputed on every plan so that any
+    # change to the Quick Suite items (even without a suite_version bump)
+    # invalidates the plan_id.
+    suite_content_sha256 = get_quick_suite_content_sha256()
+
     plan = UnifiedExecutionPlan(
         plan_id=hashlib.sha256(
             json.dumps(
@@ -81,6 +87,7 @@ def build_unified_execution_plan(
                     "max_output_tokens": config.max_output_tokens,
                     "suite_id": QUICK_SUITE_SUITE_ID,
                     "suite_version": QUICK_SUITE_SUITE_VERSION,
+                    "suite_content_sha256": suite_content_sha256,
                     "generation_config": generation_config,
                 },
                 sort_keys=True,
@@ -98,6 +105,7 @@ def build_unified_execution_plan(
         estimated_cost=None,  # no trusted pricing source yet — never invent numbers
         suite_id=QUICK_SUITE_SUITE_ID,
         suite_version=QUICK_SUITE_SUITE_VERSION,
+        suite_content_sha256=suite_content_sha256,
         scoring_policy_id=resolved_policy.policy_id,
         scoring_policy_version=resolved_policy.policy_version,
         generation_config_sha256=generation_sha,

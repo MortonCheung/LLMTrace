@@ -25,6 +25,8 @@ import shutil
 import uuid
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from llmtrace.analysis.behavior_models import BehaviorRunSnapshot
 from llmtrace.execution.models import MANIFEST_VERSION, RunArtifactManifest
 
@@ -139,6 +141,22 @@ class RunArtifactRepository:
             raise ArtifactNotFoundError(f"no manifest for execution '{execution_id}'")
         return RunArtifactManifest.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
+    def read_manifest_raw(self, execution_id: str) -> str:
+        """Return the raw ``manifest.json`` bytes as text.
+
+        Read-only provenance API: the reference layer needs the SHA-256 of the
+        *actual* manifest file bytes (not a re-serialization) to record honest
+        ``run_manifest_sha256`` provenance.
+        """
+        path = self._run_dir(execution_id) / _MANIFEST_FILENAME
+        if not path.exists():
+            raise ArtifactNotFoundError(f"no manifest for execution '{execution_id}'")
+        return path.read_text(encoding="utf-8")
+
+    def manifest_sha256(self, execution_id: str) -> str:
+        """SHA-256 of the actual ``manifest.json`` bytes on disk."""
+        return sha256_of(self.read_manifest_raw(execution_id))
+
     def read_artifact(self, execution_id: str, filename: str) -> str:
         if not _ARTIFACT_NAME_RE.match(filename) or filename == _MANIFEST_FILENAME:
             raise ArtifactRepositoryError(f"invalid artifact filename: {filename!r}")
@@ -148,8 +166,18 @@ class RunArtifactRepository:
         return path.read_text(encoding="utf-8")
 
     def verify(self, execution_id: str) -> None:
-        """Recompute every artifact hash and compare with the manifest."""
-        manifest = self.load_manifest(execution_id)
+        """Recompute every artifact hash and compare with the manifest.
+
+        A manifest that cannot be read or parsed is an integrity failure, not
+        a crash: the qualification gate chain must be able to turn it into a
+        structured REJECT instead of letting a ``ValueError`` escape.
+        """
+        try:
+            manifest = self.load_manifest(execution_id)
+        except (OSError, json.JSONDecodeError, ValidationError) as exc:
+            raise ArtifactIntegrityError(
+                f"manifest of execution '{execution_id}' is unreadable or malformed: {exc}"
+            ) from exc
         for name, expected in manifest.artifacts.items():
             try:
                 actual = sha256_of(self.read_artifact(execution_id, name))

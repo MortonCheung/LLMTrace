@@ -257,6 +257,79 @@ def verify_quick_suite_resources() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Canonical suite content identity
+# ---------------------------------------------------------------------------
+
+
+def _load_quick_suite_manifest() -> dict[str, Any]:
+    """Load the Quick Suite manifest after resource integrity passes.
+
+    The manifest is the single source of truth for suite identity and task
+    provenance (source revisions, subset hashes, sample counts).  Resource
+    verification runs first, so a corrupted suite can never produce a
+    "valid" identity hash.
+    """
+    verify_quick_suite_resources()
+    manifest_path = _RESOURCE_DIR / "manifest.json"
+    with open(manifest_path) as f:
+        return cast(dict[str, Any], json.load(f))
+
+
+def get_quick_suite_content_sha256() -> str:
+    """Canonical semantic content identity for the Quick Suite.
+
+    The identity is the SHA-256 (64 lowercase hex) of a deterministic
+    canonical payload built from the Quick Suite manifest — NOT the raw
+    manifest file bytes — so cosmetic JSON changes (whitespace, key order,
+    newlines) never change the suite's semantic identity.
+
+    Any task resource corruption makes this fail closed via
+    ``verify_quick_suite_resources()``: a suite identity is never minted for
+    damaged resources.
+    """
+    manifest = _load_quick_suite_manifest()
+    tasks = manifest["tasks"]
+
+    task_payloads = []
+    for task_id in sorted(tasks):
+        meta = tasks[task_id]
+        task_payloads.append(
+            {
+                "task_id": meta["task_id"],
+                "dimension": meta["dimension"],
+                "source_id": meta["source_id"],
+                "upstream_revision": meta["upstream_revision"],
+                "subset_sha256": meta["subset_sha256"],
+                "sample_count": meta["sample_count"],
+                "adapter_id": meta["adapter_id"],
+            }
+        )
+
+    payload = {
+        "suite_id": manifest["suite_id"],
+        "suite_version": manifest["suite_version"],
+        "total_items": manifest["total_items"],
+        "selection_algorithm": manifest["selection_algorithm"],
+        "selection_seed_format": manifest["selection_seed_format"],
+        "tasks": task_payloads,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def get_quick_suite_source_revisions() -> dict[str, str]:
+    """Return ``task_id → upstream source revision`` from the manifest.
+
+    The Quick Suite manifest is the single source of truth — this helper
+    never re-hardcodes a second revision table.  Keys are deterministically
+    sorted for stable provenance records.
+    """
+    manifest = _load_quick_suite_manifest()
+    tasks = manifest["tasks"]
+    return {tid: str(tasks[tid]["upstream_revision"]) for tid in sorted(tasks)}
+
+
+# ---------------------------------------------------------------------------
 # Grading helpers
 # ---------------------------------------------------------------------------
 

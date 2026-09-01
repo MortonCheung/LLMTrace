@@ -35,6 +35,40 @@ class DuplicateSnapshotError(ReferenceError):
     """
 
 
+class ReferenceIntegrityError(ReferenceError):
+    """Raised when a reference snapshot's on-disk bytes no longer match its recorded hash.
+
+    For a v0.4-A trusted snapshot the recorded hash is the one held in the
+    immutable ``<snapshot_id>.manifest.json`` sidecar — never a
+    re-serialisation of the object that was just read from disk.
+    """
+
+    error_code = "REFERENCE_SNAPSHOT_INTEGRITY_FAILURE"
+
+
+class ReferenceSnapshotManifestMissingError(ReferenceError):
+    """Raised when a trusted ReferenceSet member has no integrity sidecar.
+
+    A v0.3-C legacy snapshot (no ``<snapshot_id>.manifest.json``) remains
+    readable for raw capability comparison, but it may never enter a trusted
+    ReferenceSet: without an out-of-band anchor there is nothing to verify
+    the on-disk bytes against.
+    """
+
+    error_code = "REFERENCE_SNAPSHOT_MANIFEST_MISSING"
+
+
+class ReferenceSnapshotProvenanceMismatchError(ReferenceError):
+    """Raised when a snapshot's provenance disagrees with its integrity sidecar.
+
+    The sidecar records the run provenance hashes independently of the
+    snapshot body, so editing the body makes the two drift apart — the
+    snapshot is then no longer the record the sidecar attests to.
+    """
+
+    error_code = "REFERENCE_SNAPSHOT_PROVENANCE_MISMATCH"
+
+
 class ComparisonError(ScoringError):
     """Base exception for capability comparison errors."""
 
