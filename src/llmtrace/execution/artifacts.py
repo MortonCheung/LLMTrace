@@ -267,7 +267,7 @@ class RunArtifactRepository:
             from llmtrace.scoring.models import CapabilityProfile
 
             return CapabilityProfile.model_validate_json(raw)
-        except (ValueError, Exception) as exc:
+        except ValueError as exc:
             raise ArtifactIntegrityError(
                 f"capability profile of execution '{execution_id}' is corrupted and cannot be parsed: {exc}"
             ) from exc

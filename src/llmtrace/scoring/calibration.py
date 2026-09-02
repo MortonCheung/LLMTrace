@@ -379,9 +379,7 @@ def build_calibration_curves(
                 f"dimension {dimension.value}: median {x50:.6f} <= random floor {floor:.6f}"
             )
         if x90 >= x100:
-            raise CalibrationSaturatedError(
-                f"dimension {dimension.value}: P90 {x90:.6f} >= ceiling {x100:.6f}"
-            )
+            raise CalibrationSaturatedError(f"dimension {dimension.value}: P90 {x90:.6f} >= ceiling {x100:.6f}")
 
         anchor = CalibrationAnchor(x0=floor, x50=x50, x90=x90, x100=x100)
         dimension_curves[dimension] = AxisCalibrationCurve(anchor=anchor)
@@ -389,26 +387,19 @@ def build_calibration_curves(
     total_raws = [identity.total_raw for identity in identities]
     unique_total = len({round(r, 9) for r in total_raws})
     if unique_total < 3:
-        raise InsufficientCalibrationSpreadError(
-            f"total: only {unique_total} distinct raw values, need >= 3"
-        )
+        raise InsufficientCalibrationSpreadError(f"total: only {unique_total} distinct raw values, need >= 3")
 
     total_floor = sum(
-        random_floors.get(d, 0.0) * scoring_policy.weight_for(d)
-        for d in scoring_policy.enabled_dimensions
+        random_floors.get(d, 0.0) * scoring_policy.weight_for(d) for d in scoring_policy.enabled_dimensions
     )
     total_x50 = statistics.median(total_raws)
     total_x90 = _linear_quantile(total_raws, calibration_policy.flagship_quantile)
     total_x100 = scoring_policy.coverage_weight_for(*scoring_policy.enabled_dimensions)
 
     if total_x50 <= total_floor:
-        raise InsufficientCalibrationSpreadError(
-            f"total: median {total_x50:.6f} <= random floor {total_floor:.6f}"
-        )
+        raise InsufficientCalibrationSpreadError(f"total: median {total_x50:.6f} <= random floor {total_floor:.6f}")
     if total_x90 >= total_x100:
-        raise CalibrationSaturatedError(
-            f"total: P90 {total_x90:.6f} >= ceiling {total_x100:.6f}"
-        )
+        raise CalibrationSaturatedError(f"total: P90 {total_x90:.6f} >= ceiling {total_x100:.6f}")
 
     total_anchor = CalibrationAnchor(x0=total_floor, x50=total_x50, x90=total_x90, x100=total_x100)
 

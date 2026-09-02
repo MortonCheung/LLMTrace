@@ -56,6 +56,7 @@ from llmtrace.security.redaction import SecretScrubber, extract_url_secret_value
 
 if TYPE_CHECKING:
     from llmtrace.config import AuditConfig
+    from llmtrace.reference.reference_set import ReferenceSet
     from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 
 
@@ -138,7 +139,7 @@ class UnifiedAuditRunner:
         self._recorder = InMemoryEvidenceRecorder()
         self._policy = CapabilityScoringPolicy.create_v1()
         self._calibration_policy: ReferenceCalibrationPolicy | None = None
-        self._reference_set = None
+        self._reference_set: ReferenceSet | None = None
         self._calibration_identity_count = 0
         self._scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         self._budget: RequestBudget | None = None
@@ -170,9 +171,7 @@ class UnifiedAuditRunner:
             self._config,
             target_id=self._target_id,
             policy=self._policy,
-            reference_set_id=(
-                self._reference_set.reference_set_id if self._reference_set is not None else None
-            ),
+            reference_set_id=(self._reference_set.reference_set_id if self._reference_set is not None else None),
             reference_set_version=(
                 self._reference_set.reference_set_version if self._reference_set is not None else None
             ),
@@ -252,12 +251,13 @@ class UnifiedAuditRunner:
             try:
                 curves = self._build_calibration_curves(warnings)
                 if curves is not None:
+                    assert self._calibration_policy is not None
                     identity_count = self._calibration_identity_count
                     capability_profile = calibrate_capability_profile(
                         capability_profile,
                         curves,
                         self._policy,
-                        self._calibration_policy,  # type: ignore[arg-type]
+                        self._calibration_policy,
                         self._reference_set,
                         identity_count,
                     )

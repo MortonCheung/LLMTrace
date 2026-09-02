@@ -248,6 +248,7 @@ def run(
     if reference_set is not None:
         try:
             from llmtrace.reference.reference_set import ReferenceSet
+            from llmtrace.scoring.calibration import ReferenceCalibrationPolicy
 
             raw = reference_set.read_text(encoding="utf-8")
             ref_set = ReferenceSet.model_validate_json(raw)
@@ -255,8 +256,9 @@ def run(
             reference_set_id = ref_set.reference_set_id
             reference_set_version = ref_set.reference_set_version
             reference_set_content_sha256 = ref_set.content_sha256
-            calibration_policy_id = "llmtrace-reference-calibration-v1"
-            calibration_policy_version = "0.1.0"
+            policy = ReferenceCalibrationPolicy.create_v1()
+            calibration_policy_id = policy.policy_id
+            calibration_policy_version = policy.policy_version
         except Exception as exc:
             print_error(str(exc), "reference set 预检", partial=False)
             raise typer.Exit(code=1)
@@ -272,23 +274,33 @@ def run(
     )
 
     if dry_run:
-        print_dry_run(
-            {
-                "Target": resolved_target,
-                "协议": config.protocol.value,
-                "声明模型": config.model,
-                "Suite": f"{plan.suite_id} {plan.suite_version}",
-                "协议探针请求": str(plan.protocol_probe_requests),
-                "Benchmark 请求": str(plan.benchmark_requests),
-                "总请求上限": str(plan.maximum_requests),
-                "输出 Token 上限": str(plan.maximum_output_token_ceiling),
-                "预计费用": "unknown",
-                "需要安全 Sandbox": "是",
-                "参考对比": "是" if reference_snapshot else "否",
-                "Reference Calibration": "是" if reference_set else "否",
-                "历史对比": "是" if compare_latest else "否",
-            }
-        )
+        dry_run_info = {
+            "Target": resolved_target,
+            "协议": config.protocol.value,
+            "声明模型": config.model,
+            "Suite": f"{plan.suite_id} {plan.suite_version}",
+            "协议探针请求": str(plan.protocol_probe_requests),
+            "Benchmark 请求": str(plan.benchmark_requests),
+            "总请求上限": str(plan.maximum_requests),
+            "输出 Token 上限": str(plan.maximum_output_token_ceiling),
+            "预计费用": "unknown",
+            "需要安全 Sandbox": "是",
+            "参考对比": "是" if reference_snapshot else "否",
+        }
+        if reference_set is not None:
+            dry_run_info["Reference Calibration"] = "是"
+            dry_run_info["ReferenceSet ID"] = reference_set_id or "N/A"
+            dry_run_info["ReferenceSet Version"] = reference_set_version or "N/A"
+            dry_run_info["ReferenceSet Content SHA"] = (
+                (reference_set_content_sha256[:16] + "...") if reference_set_content_sha256 else "N/A"
+            )
+            dry_run_info["Calibration Policy"] = (
+                f"{calibration_policy_id} {calibration_policy_version}" if calibration_policy_id else "N/A"
+            )
+        else:
+            dry_run_info["Reference Calibration"] = "否"
+        dry_run_info["历史对比"] = "是" if compare_latest else "否"
+        print_dry_run(dry_run_info)
         return
 
     api_key = check_api_key(config.api_key_env)

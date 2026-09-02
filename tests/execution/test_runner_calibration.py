@@ -92,9 +92,7 @@ def _build_ref_set(
         members=tuple(members),
         content_sha256="",
     )
-    ref_set = ref_set.model_copy(
-        update={"content_sha256": ref_set.compute_content_sha256()}
-    )
+    ref_set = ref_set.model_copy(update={"content_sha256": ref_set.compute_content_sha256()})
     return ref_set, exec_ids
 
 

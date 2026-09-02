@@ -340,9 +340,7 @@ class TestCalibrateCapabilityProfile:
         identities = []
         for i, score in enumerate(scores):
             dim_raws = {dim: score for dim in CapabilityDimension if dim in _POLICY.enabled_dimensions}
-            identities.append(
-                _make_identity(f"p{i}", f"m{i}", dim_raws, score)
-            )
+            identities.append(_make_identity(f"p{i}", f"m{i}", dim_raws, score))
         return build_calibration_curves(identities, _POLICY, _CAL_POLICY, _DEFAULT_FLOORS)
 
     def test_calibration_fills_scores(self) -> None:

@@ -222,8 +222,7 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
     )
     if is_calibrated:
         _console.print(
-            "[bold green]CALIBRATED：[/][green]capability 分数已经过 Reference Calibration，"
-            "为 0–100 正式评分。[/]"
+            "[bold green]CALIBRATED：[/][green]capability 分数已经过 Reference Calibration，为 0–100 正式评分。[/]"
         )
     else:
         _console.print(
