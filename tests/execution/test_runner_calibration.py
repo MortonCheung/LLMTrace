@@ -118,8 +118,7 @@ class TestRunnerPreflightReferenceSet:
         assert runner._calibration_context.reference_set.reference_set_id == "calib-set"
         assert runner._calibration_context.calibration_policy is not None
         assert (
-            runner._calibration_context.calibration_policy.policy_id
-            == ReferenceCalibrationPolicy.create_v1().policy_id
+            runner._calibration_context.calibration_policy.policy_id == ReferenceCalibrationPolicy.create_v1().policy_id
         )
         # Verified profiles must be pinned in context
         assert len(runner._calibration_context.verified_profiles) == 5
