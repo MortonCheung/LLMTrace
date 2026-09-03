@@ -195,7 +195,7 @@ Reference Comparison   != 模型身份识别
 完成标准：`llmtrace run` 一键完成真实审计，全链路可回溯 Evidence，无 secret 落盘，
 不可比数据 fail closed。√ 已达成。
 
-## v0.4 Reference + Calibration — IN PROGRESS
+## v0.4 Reference + Calibration — IN PROGRESS（A/B 均已完成，v0.4 整体收尾中）
 
 ### v0.4-A Trusted Reference Run & Reference Set Foundation（已完成）
 
@@ -221,12 +221,34 @@ Reference Comparison   != 模型身份识别
 完成标准：Operator 对可信 endpoint 执行一次参考运行 → 通过 10 道资格门禁 → 生成带完整 provenance 的
 ReferenceSnapshot → 构建自校验 ReferenceSet；失败任何门禁都不生成 reference，且运行工件仍保留。√ 已达成。
 
-### v0.4-B Reference Calibration & 0–100（planned）
+### v0.4-B Reference Calibration & Claimed Model Gap（已完成）
 
-- 官方 Reference Model 体系与实测基线
-- 0–100 Calibration（正式能力分）
-- 声明模型差距与分项差距
-- 版本化参考组与 LiteLLM ReferenceProvider
+- **CalibrationPolicy v1（`llmtrace-reference-calibration-v1` / 0.1.0）**：版本化不可变映射规则——
+  piecewise linear 单调锚点（0 = 随机基线、50 = 参考组中位数、90 = P90 flagship、100 = 套件上限）、
+  ≥5 个不同参考身份、同模型多快照取中位数、越界 clamp
+- **Reference Anchored Monotonic Piecewise Calibration**：`build_calibration_curves`（每维度 + 总分
+  锚点曲线，单调、确定性）→ `calibrate_capability_profile`（raw → 0–100，raw 分数全部保留）
+- **Claimed Model Gap**：严格 model_id 匹配声明模型的可信参考配置，输出总分 + 分维度差距
+  （candidate − reference）；零匹配 → gap 不可用不猜测；多匹配 → `AmbiguousClaimedModelError`
+  拒绝任选；报告显式声明"能力对比，非模型身份证明"
+- **Fail-closed 校准守卫**：身份不足 / 离散度不足 / 校准饱和 / 候选测量不完整（存在 FAILURE 或
+  UNGRADABLE）/ scoring policy 不一致 → 保持 `UNCALIBRATED` + warning，不产生假分数
+- **Preflight 信任链重验**：`validate_reference_set_for_calibration`（sidecar / snapshot SHA /
+  identity / profile SHA / run manifest / source_type），失败即拒绝、0 次 HTTP 请求
+- **报告与 provenance 贯穿**：manifest（calibration_policy_id、reference_set_id、
+  reference_set_content_sha256）、Console（Capability Score + Claimed Model Comparison 表）、
+  JSON（calibration_status / calibration / claimed_model_gap + interpretation）、
+  HTML（Capability Score 与 Claimed Model Comparison 区块）
+- **方法论研究**：调研 Artificial Analysis / tinyBenchmarks (IRT) / lm-eval-harness bootstrap /
+  fixed parameter calibration / MINCE，采纳与拒绝理由记录于
+  `docs/architecture/open_source_influences.md`（v0.4-B 一节）
+
+完成标准：可信 ReferenceSet → `llmtrace run --reference-set` → 正式 0–100 Capability Score +
+Claimed Model Gap（总分 + 分维度），全链 provenance 可回溯；任何不满足条件的情况 fail closed
+不产生假分数；无校准时完全向后兼容（UNCALIBRATED）。√ 已达成。
+
+遗留（移入后续版本）：官方参考模型成绩库规模化、LiteLLM ReferenceProvider 集成、
+Quick Suite 重复运行的统计置信区间（v0.5+）。
 
 ## v0.5 Fingerprint + Routing
 

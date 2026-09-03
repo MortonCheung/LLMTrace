@@ -1,9 +1,14 @@
-# Trusted Reference Run & Reference Set Foundation
+# Trusted Reference Run & Reference Set / Reference Calibration
 
 v0.4-A 为 v0.4-B Calibration 建立可信、不可变、可复现、可审计的参考事实基础设施：
 一条 Operator 确认可信的运行（**Reference Run**）→ 通过 10 道资格门禁（**Reference
 Qualification**）→ 生成带完整 provenance 的 **ReferenceSnapshot** → 多个已验证快照组成
 **ReferenceSet**。领域模型见 `src/llmtrace/reference/`。
+
+v0.4-B 在此之上实现 **Reference Anchored Monotonic Piecewise Calibration**：从可信
+ReferenceSet 推导正式 0–100 能力分（**Capability Score**），并输出被测 endpoint 与
+**声明模型**可信参考配置之间的能力差距（**Claimed Model Gap**）。校准领域模型见
+`src/llmtrace/scoring/calibration.py`。
 
 本文件记录这层架构约定与语义边界。
 
@@ -73,16 +78,63 @@ coverage_weight），任何不一致 fail closed。同一模型允许在同一 s
 - API Key 仅存在于内存；endpoint 只存 `endpoint_redacted`（凭据已脱敏）。
 - Reference 层只存 hash / provenance / profile / 不可变指针，不存 secret。
 
-## 语义边界
+## v0.4-B Reference Calibration（正式 0–100 能力分）
+
+### 校准链路
+
+```text
+ReferenceSet JSON（--reference-set）
+→ Preflight：validate_reference_set_for_calibration（信任链重验：sidecar / SHA / identity / profile SHA / run manifest / source_type）
+→ aggregate_reference_identities（同 model 跨 provider 聚合，重复快照取中位数）
+→ build_calibration_curves（每维度 + 总分锚点曲线）
+→ calibrate_capability_profile（raw → 0–100）
+→ compute_claimed_model_gap（声明模型差距）
+→ Console / JSON / HTML 报告 + manifest 校准 provenance
+```
+
+### CalibrationPolicy v1（`llmtrace-reference-calibration-v1` / 0.1.0）
+
+版本化、不可变的映射规则；改变规则必须开新 policy 版本，不能只换 id。v1 锁定：
+
+- **分段线性（piecewise linear）单调映射**，锚点：`0 = random floor`（各维度随机基线，
+  总分为加权 floor）、`50 = 参考组中位数`、`90 = P90（flagship_quantile=0.90）`、
+  `100 = 套件上限`（维度 raw=1.0；总分为 coverage_weight=0.75）。
+- **最少 5 个不同参考身份**（distinct reference identities）才允许校准。
+- 超出锚点区间的 raw 值 clamp 到 0–100。
+- 同一模型多次快照取中位数（同模型多时点快照不重复占据身份）。
+
+### Fail-Closed 条件（不产生任何假分数）
+
+任一条件触发即跳过校准（warning + 保持 `UNCALIBRATED`，原始分数与全部工件不受影响）：
+
+- `< 5` 个不同参考身份，或任一维度参考数据不足；
+- 任一维度 / 总分离散度不足（不同 raw 值 `< 3`，或中位数 ≤ random floor）；
+- 校准饱和（P90 ≥ 套件上限）;
+- 候选测量不完整（存在 FAILURE / UNGRADABLE 题目——正式分数不允许建立在部分测量上）;
+- 候选 profile 的 scoring policy 与校准上下文不一致；
+- ReferenceSet 信任链验证失败（preflight 直接拒绝，0 次 HTTP 请求）。
+
+### Claimed Model Gap（声明模型差距）
+
+- 声明模型 ID 与参考身份做**严格匹配**（不做模糊匹配 / 前缀匹配）。
+- 恰好一个匹配 → 输出总分差距与分维度差距（candidate − reference，负值 = 低于参考）。
+- 零个匹配 → gap 不可用（warning），不猜测最近邻。
+- 多个匹配（同 model_id 出现在多个 provider）→ 拒绝任选其一（`AmbiguousClaimedModelError`）。
+- **语义红线：这是能力对比，不是模型身份证明。** 报告中显式携带 interpretation 字段。
+
+### 语义边界（v0.4-B 更新）
 
 ```text
 ReferenceSnapshot   = 一次已验证参考运行的不可变能力事实
-ReferenceSet        = 多个兼容快照的版本化组合
-CalibrationPolicy   = future（v0.4-B）从 ReferenceSet 推导 0–100 的映射规则
+ReferenceSet        = 多个兼容快照的版本化组合（校准宇宙 calibration universe）
+CalibrationPolicy   = 从 ReferenceSet 推导 0–100 的版本化映射规则
+Capability Score    = 相对某个已定义校准宇宙的相对分数，不是绝对能力
 
 ReferenceSnapshot != ReferenceSet != CalibrationPolicy
-Reference Comparison != Calibration
-ReferenceSet 当前不产生 calibrated 0–100 分数
+Reference Comparison != Calibration（前者是两个 profile 的原始对比，后者是 raw → 0–100 的正式映射）
+Calibration Score is versioned：policy id+version + reference set id+version+content SHA 贯穿 provenance
+0–100 is relative to a defined calibration universe：换参考组 = 换坐标系，分数不可跨组比较
+Raw scores are retained：raw_normalized_score / provisional_raw_index 永远保留，校准只增不改
 ```
 
 ## CLI
@@ -90,6 +142,8 @@ ReferenceSet 当前不产生 calibrated 0–100 分数
 ```bash
 llmtrace reference capture    # Operator 对可信 endpoint 捕获参考运行（--dry-run 0 副作用）
 llmtrace reference set-create # 从已验证快照构建 ReferenceSet（0 API 请求）
+llmtrace run --reference-set references/sets/refset-v1_0.1.0.json
+# ↑ 统一审计 + 正式 0–100 校准 + 声明模型差距（preflight 即验证信任链）
 ```
 
 ## 参考文档
