@@ -179,9 +179,16 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
 
     if result.capability_profile is not None:  # type: ignore[attr-defined]
         profile = result.capability_profile  # type: ignore[attr-defined]
+        is_calibrated = profile.calibration is not None
+        if is_calibrated and profile.calibrated_total_score is not None:
+            table.add_row("Calibrated Score", f"{profile.calibrated_total_score:.1f} / 100")
         table.add_row("Coverage", f"{profile.coverage_weight:.2f}")
         for d in profile.dimensions:
-            table.add_row(f"  {d.dimension.value}", f"{d.raw_normalized_score:.4f} (raw)")
+            if is_calibrated and d.calibrated_score is not None:
+                score_text = f"{d.calibrated_score:.1f} (cal) / {d.raw_normalized_score:.4f} (raw)"
+                table.add_row(f"  {d.dimension.value}", score_text)
+            else:
+                table.add_row(f"  {d.dimension.value}", f"{d.raw_normalized_score:.4f} (raw)")
 
     drift_text = "no baseline"
     if result.behavior_drift is not None:  # type: ignore[attr-defined]
@@ -208,9 +215,52 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
 
     _console.print(table)
     _console.print()
-    _console.print(
-        "[bold yellow]UNCALIBRATED：[/][yellow]capability 分数为 raw / provisional，不是 0–100 正式评分。[/]"
+
+    is_calibrated = (
+        result.capability_profile is not None  # type: ignore[attr-defined]
+        and getattr(result.capability_profile, "calibration", None) is not None  # type: ignore[attr-defined]
     )
+    if is_calibrated:
+        _console.print(
+            "[bold green]CALIBRATED：[/][green]capability 分数已经过 Reference Calibration，为 0–100 正式评分。[/]"
+        )
+    else:
+        _console.print(
+            "[bold yellow]UNCALIBRATED：[/][yellow]capability 分数为 raw / provisional，不是 0–100 正式评分。[/]"
+        )
+
+    # ---- Claimed Model Gap（§13/§17：能力差距，不是模型身份识别） ---------
+    claimed_gap = getattr(result, "claimed_model_gap", None)
+    if claimed_gap is not None:
+        _console.print()
+        gap_table = Table(title="Claimed Model Comparison")
+        gap_table.add_column("项目", style="cyan")
+        gap_table.add_column("值", style="white")
+        gap_table.add_row("声明模型", claimed_gap.claimed_model_id)
+        gap_table.add_row(
+            "Trusted Reference",
+            f"{claimed_gap.reference_total_score:.1f} / 100"
+            f"（{claimed_gap.reference_provider_id} / {claimed_gap.reference_model_id}）",
+        )
+        gap_table.add_row("Measured Capability", f"{claimed_gap.candidate_total_score:.1f} / 100")
+        delta_style = "red" if claimed_gap.total_delta < 0 else "green"
+        gap_table.add_row(
+            "Capability Gap",
+            f"[{delta_style}]{claimed_gap.total_delta:+.1f}[/{delta_style}]",
+        )
+        for dg in claimed_gap.dimension_gaps:
+            dim_style = "red" if dg.delta < 0 else "green"
+            gap_table.add_row(
+                f"  {dg.dimension.value}",
+                f"{dg.candidate_score:.1f} vs {dg.reference_score:.1f}"
+                f"（[{dim_style}]{dg.delta:+.1f}[/{dim_style}]）",
+            )
+        _console.print(gap_table)
+        _console.print()
+        _console.print(
+            "[bold]解读：[/]被测端点的能力分与声明模型兼容的可信参考配置存在上述差距。"
+            "这是能力比较，不是模型身份证明。"
+        )
 
     if artifacts:
         _console.print()

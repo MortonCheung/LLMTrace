@@ -14,7 +14,7 @@ from llmtrace.models.findings import FindingResult
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.scoring.comparison import ComparisonResult
-from llmtrace.scoring.models import CapabilityProfile
+from llmtrace.scoring.models import CapabilityProfile, ClaimedModelGap
 from llmtrace.security.redaction import SecretScrubber, redact_url
 from llmtrace.utilities.hashing import sha256_hash
 
@@ -144,15 +144,18 @@ def _behavior_drift_to_dict(drift: BehaviorDriftResult) -> dict[str, object]:
 
 
 def _capability_profile_to_dict(profile: CapabilityProfile) -> dict[str, object]:
-    """将 CapabilityProfile 序列化为 capability_profile 段（明确 uncalibrated）."""
-    return {
+    """将 CapabilityProfile 序列化为 capability_profile 段."""
+    is_calibrated = profile.calibration is not None
+    calibration_status = "CALIBRATED" if is_calibrated else "UNCALIBRATED"
+
+    result: dict[str, object] = {
         "profile_version": profile.profile_version,
         "scoring_policy_id": profile.scoring_policy_id,
         "scoring_policy_version": profile.scoring_policy_version,
         "coverage_weight": profile.coverage_weight,
         "provisional_raw_index": profile.provisional_raw_index,
         "calibrated_total_score": profile.calibrated_total_score,
-        "calibration_status": "UNCALIBRATED",
+        "calibration_status": calibration_status,
         "dimensions": [
             {
                 "dimension": d.dimension.value,
@@ -173,6 +176,46 @@ def _capability_profile_to_dict(profile: CapabilityProfile) -> dict[str, object]
         "warnings": list(profile.warnings),
     }
 
+    if profile.calibration is not None:
+        result["calibration"] = {
+            "policy_id": profile.calibration.policy_id,
+            "policy_version": profile.calibration.policy_version,
+            "method": profile.calibration.method,
+            "reference_set_id": profile.calibration.reference_set_id,
+            "reference_set_version": profile.calibration.reference_set_version,
+            "reference_set_content_sha256": profile.calibration.reference_set_content_sha256,
+            "reference_identity_count": profile.calibration.reference_identity_count,
+            "coverage_weight": profile.calibration.coverage_weight,
+        }
+
+    return result
+
+
+def _claimed_model_gap_to_dict(gap: ClaimedModelGap) -> dict[str, object]:
+    """将 ClaimedModelGap 序列化为 claimed_model_gap 段（§18 语义）."""
+    return {
+        "available": True,
+        "claimed_model_id": gap.claimed_model_id,
+        "reference_provider_id": gap.reference_provider_id,
+        "reference_model_id": gap.reference_model_id,
+        "candidate_total_score": gap.candidate_total_score,
+        "reference_total_score": gap.reference_total_score,
+        "total_delta": gap.total_delta,
+        "dimension_gaps": [
+            {
+                "dimension": d.dimension.value,
+                "candidate_score": d.candidate_score,
+                "reference_score": d.reference_score,
+                "delta": d.delta,
+            }
+            for d in gap.dimension_gaps
+        ],
+        "interpretation": (
+            "capability comparison against the compatible trusted reference "
+            "configuration for the claimed model; not proof of model identity"
+        ),
+    }
+
 
 def generate_json_report(
     result: AuditResult,
@@ -183,6 +226,7 @@ def generate_json_report(
     capability_profile: CapabilityProfile | None = None,
     execution_metadata: dict[str, object] | None = None,
     secret_scrubber: SecretScrubber | None = None,
+    claimed_model_gap: ClaimedModelGap | None = None,
 ) -> Path:
     """生成 JSON 报告（v1.3 — 支持 benchmark / behavior_drift / capability_profile 段).
 
@@ -261,6 +305,9 @@ def generate_json_report(
 
     if capability_profile is not None:
         report["capability_profile"] = _capability_profile_to_dict(capability_profile)
+
+    if claimed_model_gap is not None:
+        report["claimed_model_gap"] = _claimed_model_gap_to_dict(claimed_model_gap)
 
     if execution_metadata is not None:
         report["execution"] = execution_metadata
