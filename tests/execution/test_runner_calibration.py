@@ -110,14 +110,19 @@ class TestRunnerPreflightReferenceSet:
             runner._preflight()
 
     def test_trusted_reference_set_sets_state(self, tmp_path: Path) -> None:
-        """Preflight on a real trust chain resolves ReferenceSet + policy."""
+        """Preflight on a real trust chain resolves CalibrationContext."""
         _ref_root, set_path = build_trusted_reference_root(tmp_path / "ref")
         runner = _runner(tmp_path, reference_set_path=set_path)
         runner._preflight()
-        assert runner._reference_set is not None
-        assert runner._reference_set.reference_set_id == "calib-set"
-        assert runner._calibration_policy is not None
-        assert runner._calibration_policy.policy_id == ReferenceCalibrationPolicy.create_v1().policy_id
+        assert runner._calibration_context is not None
+        assert runner._calibration_context.reference_set.reference_set_id == "calib-set"
+        assert runner._calibration_context.calibration_policy is not None
+        assert (
+            runner._calibration_context.calibration_policy.policy_id
+            == ReferenceCalibrationPolicy.create_v1().policy_id
+        )
+        # Verified profiles must be pinned in context
+        assert len(runner._calibration_context.verified_profiles) == 5
 
     def test_forged_member_snapshot_sha_rejected(self, tmp_path: Path) -> None:
         """D at the runner level: forged self-hash + wrong member SHA fails preflight."""

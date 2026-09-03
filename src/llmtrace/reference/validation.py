@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from llmtrace.adapters.quick_suite import (
     QUICK_SUITE_ADAPTER_ID,
@@ -44,7 +45,12 @@ from llmtrace.adapters.quick_suite import (
     get_quick_suite_content_sha256,
     get_quick_suite_generation_config_sha256,
 )
-from llmtrace.execution.artifacts import RunArtifactRepository
+from llmtrace.execution.artifacts import (
+    ArtifactIntegrityError,
+    ArtifactNotFoundError,
+    ArtifactRepositoryError,
+    RunArtifactRepository,
+)
 from llmtrace.scoring.calibration import (
     CalibrationError,
     ReferenceCalibrationPolicy,
@@ -65,6 +71,9 @@ from .builder import OPERATOR_VERIFIED_API_RUN
 from .qualification import ReferenceQualificationPolicy
 from .reference_set import ReferenceSet, ReferenceSetIntegrityError, ReferenceSetMember
 
+if TYPE_CHECKING:
+    from llmtrace.scoring.models import CapabilityProfile
+
 _SNAPSHOTS_DIRNAME = "snapshots"
 _SETS_DIRNAME = "sets"
 _CAPABILITY_PROFILE_ARTIFACT = "capability_profile.json"
@@ -78,6 +87,9 @@ _TRUST_CHAIN_ERRORS = (
     ReferenceNotFoundError,
     ReferenceSnapshotManifestMissingError,
     ReferenceSnapshotProvenanceMismatchError,
+    ArtifactRepositoryError,
+    ArtifactNotFoundError,
+    ArtifactIntegrityError,
 )
 
 
@@ -93,6 +105,11 @@ class CalibrationContext:
     Only :func:`validate_reference_set_for_calibration` produces it, so a
     context in hand means the trust chain and the compatibility gate both
     passed.
+
+    ``verified_profiles`` maps snapshot_id to its capability profile, loaded
+    and verified against the actual artifact bytes during preflight.  The
+    runner must use these pinned profiles, not reload from disk, to close the
+    TOCTOU window between preflight and calibration.
     """
 
     reference_set: ReferenceSet
@@ -100,6 +117,7 @@ class CalibrationContext:
     scoring_policy: CapabilityScoringPolicy
     snapshot_repository: ReferenceRepository
     reference_root: Path
+    verified_profiles: dict[str, CapabilityProfile]
 
 
 # ---------------------------------------------------------------------------
@@ -156,13 +174,15 @@ def _validate(
     reference_root = _resolve_reference_root(set_path)
     snapshot_repository = ReferenceRepository.load(reference_root / _SNAPSHOTS_DIRNAME)
 
+    verified_profiles: dict[str, CapabilityProfile] = {}
     for member in reference_set.members:
-        _verify_member(
+        profile = _verify_member(
             member,
             reference_set=reference_set,
             snapshot_repository=snapshot_repository,
             artifact_repository=artifact_repository,
         )
+        verified_profiles[member.snapshot_id] = profile
 
     scoring_policy = CapabilityScoringPolicy.create_v1()
     _assert_compatible(reference_set, scoring_policy)
@@ -173,6 +193,7 @@ def _validate(
         scoring_policy=scoring_policy,
         snapshot_repository=snapshot_repository,
         reference_root=reference_root,
+        verified_profiles=verified_profiles,
     )
 
 
@@ -234,8 +255,12 @@ def _verify_member(
     reference_set: ReferenceSet,
     snapshot_repository: ReferenceRepository,
     artifact_repository: RunArtifactRepository,
-) -> None:
-    """Re-verify one member's complete trust chain against the current disk."""
+) -> CapabilityProfile:
+    """Re-verify one member's complete trust chain against the current disk.
+
+    Returns the verified capability profile loaded from the actual artifact
+    bytes, so the caller can pin it in the CalibrationContext.
+    """
     set_label = f"ReferenceSet '{reference_set.reference_set_id}' v{reference_set.reference_set_version}"
 
     # -- 6.1 trusted sidecar + 6.2 snapshot SHA binding -------------------
@@ -325,6 +350,23 @@ def _verify_member(
         ),
         what=f"{set_label} member '{member.snapshot_id}' source execution_id chain",
     )
+
+    # -- 6.6 actual capability_profile.json bytes verification -----------
+    try:
+        profile = artifact_repository.load_capability_profile(member.execution_id)
+    except _TRUST_CHAIN_ERRORS as exc:
+        raise ReferenceSetIntegrityFailureError(
+            f"{set_label} member '{member.snapshot_id}' source run '{member.execution_id}' "
+            f"capability_profile.json could not be loaded or verified: {exc}"
+        ) from exc
+
+    if profile is None:
+        raise ReferenceSetIntegrityFailureError(
+            f"{set_label} member '{member.snapshot_id}' source run '{member.execution_id}' "
+            f"has no capability_profile.json artifact (already verified in manifest)"
+        )
+
+    return profile
 
 
 def _assert_uniform(bindings: tuple[tuple[str, str | None], ...], *, what: str) -> None:

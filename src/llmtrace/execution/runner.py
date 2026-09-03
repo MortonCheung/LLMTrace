@@ -44,7 +44,6 @@ from llmtrace.scoring.calibration import (
     CalibrationCurveBundle,
     CalibrationError,
     CandidateIncompatibleError,
-    ReferenceCalibrationPolicy,
     aggregate_reference_identities,
     build_calibration_curves,
     calibrate_capability_profile,
@@ -58,7 +57,7 @@ from llmtrace.security.redaction import SecretScrubber, extract_url_secret_value
 
 if TYPE_CHECKING:
     from llmtrace.config import AuditConfig
-    from llmtrace.reference.reference_set import ReferenceSet
+    from llmtrace.reference.validation import CalibrationContext
     from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 
 
@@ -140,8 +139,7 @@ class UnifiedAuditRunner:
         self._max_wall_seconds = max_wall_seconds
         self._recorder = InMemoryEvidenceRecorder()
         self._policy = CapabilityScoringPolicy.create_v1()
-        self._calibration_policy: ReferenceCalibrationPolicy | None = None
-        self._reference_set: ReferenceSet | None = None
+        self._calibration_context: CalibrationContext | None = None
         self._calibration_identity_count = 0
         self._scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         self._budget: RequestBudget | None = None
@@ -238,7 +236,7 @@ class UnifiedAuditRunner:
                 )
 
         # ---- REFERENCE CALIBRATION ----------------------------------------
-        if capability_profile is not None and self._reference_set is not None:
+        if capability_profile is not None and self._calibration_context is not None:
             if not self._measurement_allows_formal_calibration(measurement, plan):
                 # B2: a formal 0–100 calibrated score may never sit on a
                 # partial candidate measurement.  This is a skip, not a run
@@ -263,14 +261,14 @@ class UnifiedAuditRunner:
                         )
                     curves = self._build_calibration_curves(warnings)
                     if curves is not None:
-                        assert self._calibration_policy is not None
+                        assert self._calibration_context is not None
                         identity_count = self._calibration_identity_count
                         capability_profile = calibrate_capability_profile(
                             capability_profile,
                             curves,
                             self._policy,
-                            self._calibration_policy,
-                            self._reference_set,
+                            self._calibration_context.calibration_policy,
+                            self._calibration_context.reference_set,
                             identity_count,
                         )
                 except CalibrationError as exc:
@@ -388,8 +386,7 @@ class UnifiedAuditRunner:
                 raise PreflightError(f"reference set rejected for formal calibration: {exc.error_code}: {exc}") from exc
             except OSError as exc:
                 raise PreflightError(f"reference set unreadable: {self._reference_set_path}") from exc
-            self._reference_set = context.reference_set
-            self._calibration_policy = context.calibration_policy
+            self._calibration_context = context
 
         try:
             self._repository.ensure_writable()
@@ -459,8 +456,10 @@ class UnifiedAuditRunner:
         builder: ``_execute``, the history/reference comparison paths, and the
         timeout salvage path all use it.
         """
-        reference_set = self._reference_set
-        calibration_policy = self._calibration_policy
+        reference_set = self._calibration_context.reference_set if self._calibration_context is not None else None
+        calibration_policy = (
+            self._calibration_context.calibration_policy if self._calibration_context is not None else None
+        )
         return build_unified_execution_plan(
             self._config,
             target_id=self._target_id,
@@ -484,58 +483,37 @@ class UnifiedAuditRunner:
 
         return create_quick_registry()
 
-    def _load_reference_set_profiles(
-        self,
-    ) -> dict[str, CapabilityProfile] | None:
-        """Load capability profiles for every member snapshot in the ReferenceSet.
-
-        Returns None if any member's profile cannot be loaded (fail-open to
-        calibration warnings, not to run failure).
-        """
-        if self._reference_set is None:
-            return None
-        profiles: dict[str, CapabilityProfile] = {}
-        for member in self._reference_set.members:
-            if member.execution_id is None:
-                return None
-            profile = self._repository.load_capability_profile(member.execution_id)
-            if profile is None:
-                return None
-            profiles[member.snapshot_id] = profile
-        return profiles
-
     def _build_calibration_curves(
         self,
         warnings: list[str],
     ) -> CalibrationCurveBundle | None:
-        """Build calibration curves from the pinned ReferenceSet.
+        """Build calibration curves from the pinned CalibrationContext.
 
-        TOCTOU prevention: the ReferenceSet was loaded once in preflight.
-        This method loads member profiles from the repository (read-only) and
-        builds calibration curves in memory.
+        TOCTOU prevention: the ReferenceSet and all member capability profiles
+        were verified once in preflight and pinned in the context.  This method
+        uses those verified profiles directly from memory, never reloading from
+        disk.
         """
-        assert self._reference_set is not None
-        assert self._calibration_policy is not None
+        assert self._calibration_context is not None
 
-        profiles = self._load_reference_set_profiles()
-        if profiles is None:
-            warnings.append("reference calibration skipped: could not load member profiles")
-            return None
+        reference_set = self._calibration_context.reference_set
+        calibration_policy = self._calibration_context.calibration_policy
+        profiles = self._calibration_context.verified_profiles
 
-        identities = aggregate_reference_identities(self._reference_set.members, profiles)
+        identities = aggregate_reference_identities(reference_set.members, profiles)
         self._calibration_identity_count = len(identities)
 
-        if len(identities) < self._calibration_policy.minimum_distinct_reference_identities:
+        if len(identities) < calibration_policy.minimum_distinct_reference_identities:
             warnings.append(
                 f"reference calibration skipped: {len(identities)} distinct identities, "
-                f"need >= {self._calibration_policy.minimum_distinct_reference_identities}"
+                f"need >= {calibration_policy.minimum_distinct_reference_identities}"
             )
             return None
 
         from llmtrace.adapters.quick_suite import get_quick_suite_calibration_floors
 
         random_floors = get_quick_suite_calibration_floors()
-        return build_calibration_curves(identities, self._policy, self._calibration_policy, random_floors)
+        return build_calibration_curves(identities, self._policy, calibration_policy, random_floors)
 
     # -- History -------------------------------------------------------------
 
