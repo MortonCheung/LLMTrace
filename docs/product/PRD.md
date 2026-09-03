@@ -4,7 +4,7 @@
 > 中文名称：模型寻迹  
 > 文档版本：1.0  
 > 当前代码版本：v0.3-E  
-> 当前阶段：v0.4 Reference + Calibration IN PROGRESS；v0.4-A Trusted Reference Run & Reference Set Foundation 已完成，v0.4-B Calibration 规划中  
+> 当前阶段：v0.4 Reference + Calibration IN PROGRESS；v0.4-A Trusted Reference Run & Reference Set Foundation 已完成，v0.4-B Reference Calibration & Claimed Model Gap 已完成（`llmtrace run --reference-set`）  
 > 仓库：`MortonCheung/LLMTrace`  
 > 当前开发基线：`main`，v0.1 证据审计 MVP、v0.2 基准评测基础设施、v0.3-A/B/C/D/E 全部已完成
 
@@ -83,8 +83,7 @@ LLMTrace 不重新发明已经成熟的学术基准。外部项目和研究负�
 
 尚未完成：
 
-- 0–100 分能力体系（v0.4-B Calibration，规划中）；
-- 官方参考模型成绩库与 CalibrationPolicy（v0.4-B，规划中）；
+- 官方参考模型成绩库规模化与 LiteLLM ReferenceProvider 集成（v0.4 遗留，后续版本）；
 - 行为相似度 / 指纹（v0.5）；
 - 混合路由与动态降级（v0.5）；
 - 动态网络来源更新；
@@ -94,8 +93,9 @@ LLMTrace 不重新发明已经成熟的学术基准。外部项目和研究负�
 
 ```text
 协议审计 MVP：100%
-参考运行 / ReferenceSnapshot / ReferenceSet 基础设施：已落地（v0.4-A，无 0–100 输出）
-能力验货闭环（含 Calibration）：进行中（v0.4-B 规划中）
+参考运行 / ReferenceSnapshot / ReferenceSet 基础设施：已落地（v0.4-A）
+0–100 校准与声明模型差距：已落地（v0.4-B：piecewise anchor CalibrationPolicy v1 + Claimed Model Gap，fail closed）
+能力验货闭环（含 Calibration）：核心已达成；剩余官方参考成绩库规模化
 完整产品（后端 + 参考体系 + 相似度 + 简易前端）：进行中
 ```
 
@@ -391,6 +391,10 @@ LLMTrace 只负责 Provider、任务选择、执行参数、结果转换和 Evid
 - 版本化权重；
 - 置信区间；
 - 能力、速度和成本分开报告。
+
+v0.4-B 落地情况：版本化 CalibrationPolicy（id+version）与"指数分是相对比较工具"的
+语义已实现；置信区间（重复运行统计）留待 v0.5+。方法论调研与采纳/拒绝记录见
+`docs/architecture/open_source_influences.md`。
 
 ### 9.4 Hugging Face Leaderboard 原则
 
