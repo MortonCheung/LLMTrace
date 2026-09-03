@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from llmtrace.adapters.base import BenchmarkAdapterError
 from llmtrace.adapters.code_execution import CodeExecutionBackend, create_code_execution_backend
+from llmtrace.adapters.quick_suite import QUICK_SUITE_ADAPTER_ID, QUICK_SUITE_ADAPTER_VERSION
 from llmtrace.analysis.behavior_drift import BehaviorDriftEngine, BehaviorDriftResult
 from llmtrace.analysis.behavior_models import (
     BehaviorDriftCompatibilityError,
@@ -42,6 +43,7 @@ from llmtrace.scoring.aggregator import TaskScoringRegistry, aggregate_capabilit
 from llmtrace.scoring.calibration import (
     CalibrationCurveBundle,
     CalibrationError,
+    CandidateIncompatibleError,
     ReferenceCalibrationPolicy,
     aggregate_reference_identities,
     build_calibration_curves,
@@ -167,28 +169,17 @@ class UnifiedAuditRunner:
     async def _execute(self, execution_id: str, started_at: datetime) -> UnifiedRunResult:
         warnings: list[str] = []
 
-        plan = build_unified_execution_plan(
-            self._config,
-            target_id=self._target_id,
-            policy=self._policy,
-            reference_set_id=(self._reference_set.reference_set_id if self._reference_set is not None else None),
-            reference_set_version=(
-                self._reference_set.reference_set_version if self._reference_set is not None else None
-            ),
-            reference_set_content_sha256=(
-                self._reference_set.content_sha256 if self._reference_set is not None else None
-            ),
-            calibration_policy_id=(
-                self._calibration_policy.policy_id if self._calibration_policy is not None else None
-            ),
-            calibration_policy_version=(
-                self._calibration_policy.policy_version if self._calibration_policy is not None else None
-            ),
-        )
+        # B1: preflight runs BEFORE the plan is built.  It resolves every
+        # predictable local dependency — including the ReferenceSet /
+        # CalibrationPolicy state — so a plan built afterwards always carries
+        # the complete calibration provenance bundle on a run that calibrates.
+        # Preflight never sends HTTP, never creates a provider, and never
+        # consumes budget, so ordering it first is safe.
+        self._preflight()
+
+        plan = self._plan()
         budget = RequestBudget(plan.maximum_requests)
         self._budget = budget
-
-        self._preflight()
 
         provider = create_provider(
             self._config,
@@ -248,21 +239,42 @@ class UnifiedAuditRunner:
 
         # ---- REFERENCE CALIBRATION ----------------------------------------
         if capability_profile is not None and self._reference_set is not None:
-            try:
-                curves = self._build_calibration_curves(warnings)
-                if curves is not None:
-                    assert self._calibration_policy is not None
-                    identity_count = self._calibration_identity_count
-                    capability_profile = calibrate_capability_profile(
-                        capability_profile,
-                        curves,
-                        self._policy,
-                        self._calibration_policy,
-                        self._reference_set,
-                        identity_count,
-                    )
-            except CalibrationError as exc:
-                warnings.append(f"reference calibration skipped: {exc.error_code}")
+            if not self._measurement_allows_formal_calibration(measurement, plan):
+                # B2: a formal 0–100 calibrated score may never sit on a
+                # partial candidate measurement.  This is a skip, not a run
+                # failure: the raw profile, the artifacts, and Behavior Drift
+                # all keep their normal semantics.
+                warnings.append("reference calibration skipped: candidate measurement incomplete")
+            else:
+                try:
+                    # Candidate-side compatibility: the candidate profile must
+                    # have been scored under the same policy the calibration
+                    # curves were built with — otherwise the calibrated scores
+                    # would mix two incompatible contexts.
+                    if (
+                        capability_profile.scoring_policy_id != self._policy.policy_id
+                        or capability_profile.scoring_policy_version != self._policy.policy_version
+                    ):
+                        raise CandidateIncompatibleError(
+                            "candidate profile was scored under "
+                            f"'{capability_profile.scoring_policy_id}'/"
+                            f"{capability_profile.scoring_policy_version}, but the calibration context is "
+                            f"'{self._policy.policy_id}'/{self._policy.policy_version}"
+                        )
+                    curves = self._build_calibration_curves(warnings)
+                    if curves is not None:
+                        assert self._calibration_policy is not None
+                        identity_count = self._calibration_identity_count
+                        capability_profile = calibrate_capability_profile(
+                            capability_profile,
+                            curves,
+                            self._policy,
+                            self._calibration_policy,
+                            self._reference_set,
+                            identity_count,
+                        )
+                except CalibrationError as exc:
+                    warnings.append(f"reference calibration skipped: {exc.error_code}")
 
         # ---- HISTORY COMPARISON -------------------------------------------
         behavior_drift = None
@@ -360,20 +372,24 @@ class UnifiedAuditRunner:
                 raise PreflightError(f"reference snapshot is not a valid ReferenceSnapshot: {path}") from exc
 
         if self._reference_set_path is not None:
-            try:
-                from llmtrace.reference.reference_set import ReferenceSet
+            # Shared validator: the runner and the CLI dry-run both reject a
+            # ReferenceSet that cannot support formal calibration here, before
+            # the first target request.  It re-verifies the trusted snapshot
+            # chain (sidecar, snapshot SHA, identity, capability profile SHA,
+            # run manifest, source_type) and the current-context compatibility.
+            from llmtrace.reference.validation import validate_reference_set_for_calibration
 
-                raw = self._reference_set_path.read_text(encoding="utf-8")
-                ref_set = ReferenceSet.model_validate_json(raw)
-                ref_set.verify_content_hash()
-                self._reference_set = ref_set
-                self._calibration_policy = ReferenceCalibrationPolicy.create_v1()
+            try:
+                context = validate_reference_set_for_calibration(
+                    set_path=self._reference_set_path,
+                    artifact_repository=self._repository,
+                )
+            except CalibrationError as exc:
+                raise PreflightError(f"reference set rejected for formal calibration: {exc.error_code}: {exc}") from exc
             except OSError as exc:
                 raise PreflightError(f"reference set unreadable: {self._reference_set_path}") from exc
-            except ValueError as exc:
-                raise PreflightError(f"reference set is not a valid ReferenceSet: {self._reference_set_path}") from exc
-            except Exception as exc:
-                raise PreflightError(f"reference set integrity failure: {exc}") from exc
+            self._reference_set = context.reference_set
+            self._calibration_policy = context.calibration_policy
 
         try:
             self._repository.ensure_writable()
@@ -381,6 +397,27 @@ class UnifiedAuditRunner:
             raise PreflightError("artifact root is not writable") from exc
 
     # -- Measurement health ------------------------------------------------------
+
+    @staticmethod
+    def _measurement_allows_formal_calibration(
+        measurement: BenchmarkMeasurementSummary | None,
+        plan: UnifiedExecutionPlan,
+    ) -> bool:
+        """Formal calibration requires a *complete* candidate measurement.
+
+        A degraded candidate — any FAILURE or UNGRADABLE item, or a graded
+        count that does not cover the whole planned benchmark — must never
+        produce a formal 0–100 calibrated score.  ``plan.benchmark_requests``
+        is the authoritative planned item count; no magic ``32`` is written
+        here.
+        """
+        if measurement is None:
+            return False
+        return (
+            measurement.graded_item_count == measurement.total_item_count == plan.benchmark_requests
+            and measurement.failure_item_count == 0
+            and measurement.ungradable_item_count == 0
+        )
 
     @staticmethod
     def _measurement_summary(runs: Sequence[BenchmarkRunResult]) -> BenchmarkMeasurementSummary | None:
@@ -414,7 +451,26 @@ class UnifiedAuditRunner:
     # -- Plan ----------------------------------------------------------------
 
     def _plan(self) -> UnifiedExecutionPlan:
-        return build_unified_execution_plan(self._config, target_id=self._target_id, policy=self._policy)
+        """Deterministic plan over the post-preflight immutable state.
+
+        Preflight has already resolved the ReferenceSet / CalibrationPolicy, so
+        a plan built here carries the complete calibration provenance bundle —
+        never a partial (all-or-none) record.  This is the *single* plan
+        builder: ``_execute``, the history/reference comparison paths, and the
+        timeout salvage path all use it.
+        """
+        reference_set = self._reference_set
+        calibration_policy = self._calibration_policy
+        return build_unified_execution_plan(
+            self._config,
+            target_id=self._target_id,
+            policy=self._policy,
+            reference_set_id=(reference_set.reference_set_id if reference_set is not None else None),
+            reference_set_version=(reference_set.reference_set_version if reference_set is not None else None),
+            reference_set_content_sha256=(reference_set.content_sha256 if reference_set is not None else None),
+            calibration_policy_id=(calibration_policy.policy_id if calibration_policy is not None else None),
+            calibration_policy_version=(calibration_policy.policy_version if calibration_policy is not None else None),
+        )
 
     @staticmethod
     def _generation_config() -> dict[str, float | int]:
@@ -693,8 +749,8 @@ class UnifiedAuditRunner:
             suite_id=result.plan.suite_id,
             suite_version=result.plan.suite_version,
             suite_content_sha256=result.plan.suite_content_sha256,
-            adapter_id="llmtrace-quick-v1",
-            adapter_version="0.1.0",
+            adapter_id=QUICK_SUITE_ADAPTER_ID,
+            adapter_version=QUICK_SUITE_ADAPTER_VERSION,
             scoring_policy_id=result.plan.scoring_policy_id,
             scoring_policy_version=result.plan.scoring_policy_version,
             generation_config_sha256=result.plan.generation_config_sha256,

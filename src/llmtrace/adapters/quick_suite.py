@@ -158,6 +158,13 @@ QUICK_SUITE_BENCHMARK_REQUESTS = 32
 QUICK_SUITE_SUITE_ID = "llmtrace_quick_v1"
 QUICK_SUITE_SUITE_VERSION = "0.1.0"
 
+# Adapter identity — single source of truth.  The run manifest, the
+# ReferenceSet compatibility gate, and the benchmark adapter itself must all
+# report the same identity, so it lives here instead of being a literal
+# scattered across three modules.
+QUICK_SUITE_ADAPTER_ID = "llmtrace-quick-v1"
+QUICK_SUITE_ADAPTER_VERSION = "0.1.0"
+
 
 def get_quick_suite_completion_options() -> CompletionOptions:
     """Return the canonical Quick Suite CompletionOptions."""
@@ -167,6 +174,19 @@ def get_quick_suite_completion_options() -> CompletionOptions:
 def get_quick_suite_generation_config() -> dict[str, float | int]:
     """Return a copy of the canonical Quick Suite generation config dict."""
     return dict(QUICK_SUITE_GENERATION_CONFIG)
+
+
+def get_quick_suite_generation_config_sha256() -> str:
+    """Canonical SHA-256 of the Quick Suite generation config.
+
+    The single authoritative digest of :data:`QUICK_SUITE_GENERATION_CONFIG`.
+    The execution plan, the reference qualification gate, and the ReferenceSet
+    compatibility gate must compare against exactly this value — never a
+    locally re-derived copy of the canonicalization rules.
+    """
+    config = get_quick_suite_generation_config()
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -480,8 +500,8 @@ class QuickSuiteAdapter(BenchmarkAdapter):
     source_sample_id and input_sha256 identity.
     """
 
-    _ADAPTER_ID = "llmtrace-quick-v1"
-    _ADAPTER_VERSION = "0.1.0"
+    _ADAPTER_ID = QUICK_SUITE_ADAPTER_ID
+    _ADAPTER_VERSION = QUICK_SUITE_ADAPTER_VERSION
 
     def __init__(
         self,

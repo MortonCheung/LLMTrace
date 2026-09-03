@@ -37,6 +37,29 @@ def _normalize_sha256(value: str, field_name: str) -> str:
     return value.lower()
 
 
+# The five calibration-context provenance fields.  They must always appear as
+# one complete bundle or not at all — a partial record would make the plan's
+# artifact identity un-auditable (§17 all-or-none invariant).
+_CALIBRATION_CONTEXT_FIELDS = (
+    "reference_set_id",
+    "reference_set_version",
+    "reference_set_content_sha256",
+    "calibration_policy_id",
+    "calibration_policy_version",
+)
+
+
+def _assert_calibration_context_all_or_none(model: BaseModel, label: str) -> None:
+    """Require the five calibration-context fields to be all None or all set."""
+    values = [getattr(model, name) for name in _CALIBRATION_CONTEXT_FIELDS]
+    if any(v is not None for v in values) and not all(v is not None for v in values):
+        missing = [name for name in _CALIBRATION_CONTEXT_FIELDS if getattr(model, name) is None]
+        raise ValueError(
+            f"{label} calibration context must be all-or-none "
+            f"(all fields set together or all None); missing: {', '.join(missing)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
@@ -124,6 +147,7 @@ class UnifiedExecutionPlan(BaseModel):
             raise ValueError(
                 f"maximum_requests ({self.maximum_requests}) must be >= planned_requests ({self.planned_requests})"
             )
+        _assert_calibration_context_all_or_none(self, "UnifiedExecutionPlan")
         return self
 
 
@@ -204,6 +228,13 @@ class RunArtifactManifest(BaseModel):
         if v is None:
             return None
         return _normalize_sha256(v, "suite_content_sha256")
+
+    @model_validator(mode="after")
+    def _check_calibration_context_completeness(self) -> RunArtifactManifest:
+        """Calibration provenance is copied from the plan, so it must obey the
+        same all-or-none rule.  Legacy manifests (all None) stay valid."""
+        _assert_calibration_context_all_or_none(self, "RunArtifactManifest")
+        return self
 
 
 # ---------------------------------------------------------------------------

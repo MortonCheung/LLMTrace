@@ -246,19 +246,23 @@ def run(
     calibration_policy_version: str | None = None
 
     if reference_set is not None:
+        # Shared validator — identical to the runner's preflight.  A
+        # ReferenceSet that cannot support formal calibration is rejected
+        # here, before any dry-run or execution proceeds.  Read-only: it
+        # never sends HTTP, never creates a provider, never runs candidate
+        # code, and never writes an artifact.
         try:
-            from llmtrace.reference.reference_set import ReferenceSet
-            from llmtrace.scoring.calibration import ReferenceCalibrationPolicy
+            from llmtrace.reference.validation import validate_reference_set_for_calibration
 
-            raw = reference_set.read_text(encoding="utf-8")
-            ref_set = ReferenceSet.model_validate_json(raw)
-            ref_set.verify_content_hash()
-            reference_set_id = ref_set.reference_set_id
-            reference_set_version = ref_set.reference_set_version
-            reference_set_content_sha256 = ref_set.content_sha256
-            policy = ReferenceCalibrationPolicy.create_v1()
-            calibration_policy_id = policy.policy_id
-            calibration_policy_version = policy.policy_version
+            context = validate_reference_set_for_calibration(
+                set_path=reference_set,
+                artifact_repository=RunArtifactRepository(output_dir),
+            )
+            reference_set_id = context.reference_set.reference_set_id
+            reference_set_version = context.reference_set.reference_set_version
+            reference_set_content_sha256 = context.reference_set.content_sha256
+            calibration_policy_id = context.calibration_policy.policy_id
+            calibration_policy_version = context.calibration_policy.policy_version
         except Exception as exc:
             print_error(str(exc), "reference set 预检", partial=False)
             raise typer.Exit(code=1)

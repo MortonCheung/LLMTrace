@@ -11,6 +11,7 @@ from llmtrace.adapters.quick_suite import (
     QUICK_SUITE_SUITE_VERSION,
     get_quick_suite_content_sha256,
     get_quick_suite_generation_config,
+    get_quick_suite_generation_config_sha256,
 )
 from llmtrace.config import AuditConfig
 from llmtrace.execution.models import UnifiedExecutionPlan
@@ -71,9 +72,9 @@ def build_unified_execution_plan(
     token_ceiling = protocol_output_token_ceiling(config) + benchmark_requests * 512
 
     generation_config = get_quick_suite_generation_config()
-    generation_sha = hashlib.sha256(
-        json.dumps(generation_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    ).hexdigest()
+    # Authoritative digest — the same value the reference qualification and
+    # ReferenceSet compatibility gates compare against.
+    generation_sha = get_quick_suite_generation_config_sha256()
 
     suite_content_sha256 = get_quick_suite_content_sha256()
 

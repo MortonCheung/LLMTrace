@@ -394,3 +394,48 @@ class TestCalibrateCapabilityProfile:
             raw_profile, curves, _POLICY, _CAL_POLICY, ref_set, reference_identity_count=7
         )
         assert calibrated.profile_version == "0.2.0"
+
+
+# ---------------------------------------------------------------------------
+# §15 / §16 — locked calibration constants (v0.4-B)
+# ---------------------------------------------------------------------------
+
+
+class TestLockedCalibrationConstants:
+    """Explicit regressions for the two Owner-confirmed constant locks.
+
+    Both are policy facts, not incidental values: the ARC Quick Suite is a
+    fixed four-way choice (so reasoning bottoms out at chance = 0.25), and the
+    total capability score is calibrated against the *coverage weight* ceiling
+    (0.75), never a normalised 1.0.
+    """
+
+    @staticmethod
+    def _identities() -> list[ReferenceIdentity]:
+        dims = [dim for dim in CapabilityDimension if dim in _POLICY.enabled_dimensions]
+        scores = [0.3, 0.4, 0.5, 0.6, 0.7]
+        return [
+            _make_identity(
+                provider_id=f"provider-{i}",
+                model_id=f"model-{i}",
+                dim_raws=dict.fromkeys(dims, score),
+                total_raw=score * 0.75,
+            )
+            for i, score in enumerate(scores)
+        ]
+
+    def test_total_ceiling_is_coverage_weight_not_one(self) -> None:
+        """100 == coverage_weight (0.75) — the ceiling must NOT become 1.0."""
+        bundle = build_calibration_curves(self._identities(), _POLICY, _CAL_POLICY, _DEFAULT_FLOORS)
+        assert bundle.total_curve.anchor.x100 == pytest.approx(0.75)
+
+    def test_reasoning_random_floor_is_fixed_quarter(self) -> None:
+        """ARC is a fixed 4-way choice → reasoning floor stays 0.25; the
+        other three dimensions have no chance floor."""
+        from llmtrace.adapters.quick_suite import get_quick_suite_calibration_floors
+
+        floors = get_quick_suite_calibration_floors()
+        assert floors[CapabilityDimension.REASONING] == pytest.approx(0.25)
+        assert floors[CapabilityDimension.CODING] == pytest.approx(0.0)
+        assert floors[CapabilityDimension.MATH_SCIENCE] == pytest.approx(0.0)
+        assert floors[CapabilityDimension.INSTRUCTION_FOLLOWING] == pytest.approx(0.0)
