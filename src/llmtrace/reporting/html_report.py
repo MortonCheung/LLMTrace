@@ -104,23 +104,36 @@ def _behavior_drift_to_template_data(drift: BehaviorDriftResult) -> dict[str, ob
 
 def _capability_profile_to_template_data(profile: CapabilityProfile) -> dict[str, object]:
     """Build Jinja-safe data for the Capability Profile HTML section."""
-    return {
+    is_calibrated = profile.calibration is not None
+    data: dict[str, object] = {
         "profile_version": profile.profile_version,
         "scoring_policy_id": profile.scoring_policy_id,
         "scoring_policy_version": profile.scoring_policy_version,
         "coverage_weight": profile.coverage_weight,
         "provisional_raw_index": profile.provisional_raw_index,
+        "calibrated_total_score": profile.calibrated_total_score,
+        "calibration_status": "CALIBRATED" if is_calibrated else "UNCALIBRATED",
         "dimensions": [
             {
                 "dimension": d.dimension.value,
                 "status": d.status.value,
                 "raw_score": d.raw_normalized_score,
+                "calibrated_score": d.calibrated_score,
                 "task_coverage": d.task_coverage,
                 "global_weight": d.global_weight,
             }
             for d in profile.dimensions
         ],
     }
+    if profile.calibration is not None:
+        data["calibration"] = {
+            "policy_id": profile.calibration.policy_id,
+            "policy_version": profile.calibration.policy_version,
+            "reference_set_id": profile.calibration.reference_set_id,
+            "reference_set_version": profile.calibration.reference_set_version,
+            "reference_identity_count": profile.calibration.reference_identity_count,
+        }
+    return data
 
 
 def generate_html_report(

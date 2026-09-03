@@ -179,9 +179,16 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
 
     if result.capability_profile is not None:  # type: ignore[attr-defined]
         profile = result.capability_profile  # type: ignore[attr-defined]
+        is_calibrated = profile.calibration is not None
+        if is_calibrated and profile.calibrated_total_score is not None:
+            table.add_row("Calibrated Score", f"{profile.calibrated_total_score:.1f} / 100")
         table.add_row("Coverage", f"{profile.coverage_weight:.2f}")
         for d in profile.dimensions:
-            table.add_row(f"  {d.dimension.value}", f"{d.raw_normalized_score:.4f} (raw)")
+            if is_calibrated and d.calibrated_score is not None:
+                score_text = f"{d.calibrated_score:.1f} (cal) / {d.raw_normalized_score:.4f} (raw)"
+                table.add_row(f"  {d.dimension.value}", score_text)
+            else:
+                table.add_row(f"  {d.dimension.value}", f"{d.raw_normalized_score:.4f} (raw)")
 
     drift_text = "no baseline"
     if result.behavior_drift is not None:  # type: ignore[attr-defined]
@@ -208,9 +215,19 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
 
     _console.print(table)
     _console.print()
-    _console.print(
-        "[bold yellow]UNCALIBRATED：[/][yellow]capability 分数为 raw / provisional，不是 0–100 正式评分。[/]"
+
+    is_calibrated = (
+        result.capability_profile is not None  # type: ignore[attr-defined]
+        and getattr(result.capability_profile, "calibration", None) is not None  # type: ignore[attr-defined]
     )
+    if is_calibrated:
+        _console.print(
+            "[bold green]CALIBRATED：[/][green]capability 分数已经过 Reference Calibration，为 0–100 正式评分。[/]"
+        )
+    else:
+        _console.print(
+            "[bold yellow]UNCALIBRATED：[/][yellow]capability 分数为 raw / provisional，不是 0–100 正式评分。[/]"
+        )
 
     if artifacts:
         _console.print()

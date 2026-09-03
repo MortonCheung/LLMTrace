@@ -37,6 +37,29 @@ def _normalize_sha256(value: str, field_name: str) -> str:
     return value.lower()
 
 
+# The five calibration-context provenance fields.  They must always appear as
+# one complete bundle or not at all — a partial record would make the plan's
+# artifact identity un-auditable (§17 all-or-none invariant).
+_CALIBRATION_CONTEXT_FIELDS = (
+    "reference_set_id",
+    "reference_set_version",
+    "reference_set_content_sha256",
+    "calibration_policy_id",
+    "calibration_policy_version",
+)
+
+
+def _assert_calibration_context_all_or_none(model: BaseModel, label: str) -> None:
+    """Require the five calibration-context fields to be all None or all set."""
+    values = [getattr(model, name) for name in _CALIBRATION_CONTEXT_FIELDS]
+    if any(v is not None for v in values) and not all(v is not None for v in values):
+        missing = [name for name in _CALIBRATION_CONTEXT_FIELDS if getattr(model, name) is None]
+        raise ValueError(
+            f"{label} calibration context must be all-or-none "
+            f"(all fields set together or all None); missing: {', '.join(missing)}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
@@ -82,12 +105,36 @@ class UnifiedExecutionPlan(BaseModel):
     generation_config_sha256: str = Field(..., min_length=1, description="SHA-256 of the canonical generation config")
     requires_secure_code_sandbox: bool = Field(..., description="HumanEval requires a secure sandbox")
 
+    calibration_policy_id: str | None = Field(
+        default=None,
+        description="Calibration policy id; None when calibration is not requested",
+    )
+    calibration_policy_version: str | None = Field(
+        default=None,
+        description="Calibration policy version; None when calibration is not requested",
+    )
+    reference_set_id: str | None = Field(default=None, description="ReferenceSet id; None when no calibration")
+    reference_set_version: str | None = Field(
+        default=None, description="ReferenceSet version; None when no calibration"
+    )
+    reference_set_content_sha256: str | None = Field(
+        default=None,
+        description="ReferenceSet content hash; None when no calibration",
+    )
+
     model_config = {"frozen": True, "extra": "forbid"}
 
     @field_validator("suite_content_sha256")
     @classmethod
     def _validate_suite_content_sha256(cls, v: str) -> str:
         return _normalize_sha256(v, "suite_content_sha256")
+
+    @field_validator("reference_set_content_sha256")
+    @classmethod
+    def _validate_ref_set_content_sha256(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalize_sha256(v, "reference_set_content_sha256")
 
     @model_validator(mode="after")
     def _check_consistency(self) -> UnifiedExecutionPlan:
@@ -100,6 +147,7 @@ class UnifiedExecutionPlan(BaseModel):
             raise ValueError(
                 f"maximum_requests ({self.maximum_requests}) must be >= planned_requests ({self.planned_requests})"
             )
+        _assert_calibration_context_all_or_none(self, "UnifiedExecutionPlan")
         return self
 
 
@@ -107,7 +155,7 @@ class UnifiedExecutionPlan(BaseModel):
 # Artifact manifest
 # ---------------------------------------------------------------------------
 
-MANIFEST_VERSION = "0.2.0"
+MANIFEST_VERSION = "0.3.0"
 
 
 class RunArtifactManifest(BaseModel):
@@ -154,6 +202,15 @@ class RunArtifactManifest(BaseModel):
     baseline_behavior_snapshot_sha256: str | None = Field(default=None)
     reference_snapshot_id: str | None = Field(default=None)
 
+    calibration_policy_id: str | None = Field(
+        default=None,
+        description="Calibration policy id; None when calibration was not requested or failed",
+    )
+    calibration_policy_version: str | None = Field(default=None)
+    reference_set_id: str | None = Field(default=None)
+    reference_set_version: str | None = Field(default=None)
+    reference_set_content_sha256: str | None = Field(default=None)
+
     warnings: tuple[str, ...] = Field(default_factory=tuple)
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -171,6 +228,13 @@ class RunArtifactManifest(BaseModel):
         if v is None:
             return None
         return _normalize_sha256(v, "suite_content_sha256")
+
+    @model_validator(mode="after")
+    def _check_calibration_context_completeness(self) -> RunArtifactManifest:
+        """Calibration provenance is copied from the plan, so it must obey the
+        same all-or-none rule.  Legacy manifests (all None) stay valid."""
+        _assert_calibration_context_all_or_none(self, "RunArtifactManifest")
+        return self
 
 
 # ---------------------------------------------------------------------------

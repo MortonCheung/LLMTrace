@@ -144,15 +144,18 @@ def _behavior_drift_to_dict(drift: BehaviorDriftResult) -> dict[str, object]:
 
 
 def _capability_profile_to_dict(profile: CapabilityProfile) -> dict[str, object]:
-    """将 CapabilityProfile 序列化为 capability_profile 段（明确 uncalibrated）."""
-    return {
+    """将 CapabilityProfile 序列化为 capability_profile 段."""
+    is_calibrated = profile.calibration is not None
+    calibration_status = "CALIBRATED" if is_calibrated else "UNCALIBRATED"
+
+    result: dict[str, object] = {
         "profile_version": profile.profile_version,
         "scoring_policy_id": profile.scoring_policy_id,
         "scoring_policy_version": profile.scoring_policy_version,
         "coverage_weight": profile.coverage_weight,
         "provisional_raw_index": profile.provisional_raw_index,
         "calibrated_total_score": profile.calibrated_total_score,
-        "calibration_status": "UNCALIBRATED",
+        "calibration_status": calibration_status,
         "dimensions": [
             {
                 "dimension": d.dimension.value,
@@ -172,6 +175,20 @@ def _capability_profile_to_dict(profile: CapabilityProfile) -> dict[str, object]
         ],
         "warnings": list(profile.warnings),
     }
+
+    if profile.calibration is not None:
+        result["calibration"] = {
+            "policy_id": profile.calibration.policy_id,
+            "policy_version": profile.calibration.policy_version,
+            "method": profile.calibration.method,
+            "reference_set_id": profile.calibration.reference_set_id,
+            "reference_set_version": profile.calibration.reference_set_version,
+            "reference_set_content_sha256": profile.calibration.reference_set_content_sha256,
+            "reference_identity_count": profile.calibration.reference_identity_count,
+            "coverage_weight": profile.calibration.coverage_weight,
+        }
+
+    return result
 
 
 def generate_json_report(

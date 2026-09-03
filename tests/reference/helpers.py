@@ -12,6 +12,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from llmtrace.adapters.quick_suite import (
     QUICK_SUITE_BENCHMARK_REQUESTS,
@@ -31,13 +32,16 @@ from llmtrace.benchmarks.models import (
 )
 from llmtrace.execution.artifacts import RunArtifactRepository
 from llmtrace.execution.models import RunArtifactManifest, UnifiedRunStatus
+from llmtrace.reference.builder import OPERATOR_VERIFIED_API_RUN, TEST_FIXTURE, ReferenceSnapshotBuilder
+from llmtrace.reference.reference_set import ReferenceSetBuilder
+from llmtrace.reference.repository import ReferenceSetRepository
 from llmtrace.scoring.models import (
     CapabilityDimension,
     CapabilityProfile,
     DimensionScoreResult,
     DimensionScoreStatus,
 )
-from llmtrace.scoring.reference import ReferenceProvenance, ReferenceSnapshot
+from llmtrace.scoring.reference import ReferenceProvenance, ReferenceRepository, ReferenceSnapshot
 
 DEFAULT_EXECUTION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
@@ -88,6 +92,7 @@ def make_manifest(
     scoring_policy_version: str = _SCORING_POLICY_VERSION,
     adapter_id: str = _ADAPTER_ID,
     adapter_version: str = _ADAPTER_VERSION,
+    candidate_model_id: str = "my-real-model",
     completed_at: datetime | None = None,
 ) -> RunArtifactManifest:
     """A manifest that qualifies by default; override a field to corrupt a gate.
@@ -104,7 +109,7 @@ def make_manifest(
         execution_id=execution_id,
         report_id="llmtrace_test",
         target_id="openai-test",
-        candidate_model_id="my-real-model",
+        candidate_model_id=candidate_model_id,
         base_url_redacted="http://test.example.com/v1",
         protocol="openai",
         created_at=datetime.now(UTC),
@@ -233,9 +238,19 @@ def make_benchmark_runs_json(*, failure: int = 0, ungradable: int = 0) -> str:
     return json.dumps({"runs": [r.model_dump(mode="json") for r in runs]}, indent=2)
 
 
-def make_capability_profile(score: float = 0.5, *, coverage_weight: float = _COVERAGE_WEIGHT) -> CapabilityProfile:
+def make_capability_profile(
+    score: float = 0.5,
+    *,
+    coverage_weight: float = _COVERAGE_WEIGHT,
+    provisional_raw_index: float | None = None,
+) -> CapabilityProfile:
     """A profile that qualifies by default: all four enabled dimensions
-    measured with ``uncalibrated`` status and the policy's coverage weight."""
+    measured with ``uncalibrated`` status and the policy's coverage weight.
+
+    ``provisional_raw_index`` defaults to ``score * coverage_weight`` — the
+    honest weighted sum the aggregator would produce — so calibration tests
+    get real spread across identities instead of a flat 0.0.
+    """
     dimensions = tuple(
         DimensionScoreResult(
             dimension=CapabilityDimension(dimension_name),
@@ -244,11 +259,13 @@ def make_capability_profile(score: float = 0.5, *, coverage_weight: float = _COV
         )
         for _task_id, _source_id, dimension_name in _QUICK_TASKS
     )
+    resolved_provisional = provisional_raw_index if provisional_raw_index is not None else score * coverage_weight
     return CapabilityProfile(
         scoring_policy_id=_SCORING_POLICY_ID,
         scoring_policy_version=_SCORING_POLICY_VERSION,
         dimensions=dimensions,
         coverage_weight=coverage_weight,
+        provisional_raw_index=resolved_provisional,
     )
 
 
@@ -336,3 +353,89 @@ def make_snapshot(
         capability_profile=make_capability_profile(),
         provenance=provenance,
     )
+
+
+# ---------------------------------------------------------------------------
+# Real trust-chain construction (production builders, no model_construct)
+# ---------------------------------------------------------------------------
+
+
+def build_trusted_reference_root(
+    root: Path,
+    *,
+    set_id: str = "calib-set",
+    set_version: str = "1",
+    member_count: int = 5,
+    scores: list[float] | None = None,
+    provider_ids: list[str] | None = None,
+    model_ids: list[str] | None = None,
+    source_type: str = OPERATOR_VERIFIED_API_RUN,
+    description: str = "test trusted set",
+) -> tuple[Path, Path]:
+    """Build a complete, *real* trust chain under *root*.
+
+    Layout produced — the standard v0.4-A repository layout::
+
+        root/
+        ├── runs/<execution_id>/...                     # RunArtifactRepository
+        └── references/
+            ├── snapshots/<snapshot_id>.json + .manifest.json
+            └── sets/<set_id>_<set_version>.json
+
+    Every link uses the production builders — committed run artifacts →
+    ``ReferenceSnapshotBuilder.build`` (qualification + trusted save) →
+    ``ReferenceSetBuilder.build`` → ``ReferenceSetRepository.save``.  No
+    ``model_construct``, no fake SHA-256s.
+
+    Returns ``(reference_root, set_path)``.
+    """
+    if member_count < 1:
+        raise ValueError("member_count must be >= 1")
+    resolved_scores = scores if scores is not None else [0.3 + 0.1 * i for i in range(member_count)]
+    if len(resolved_scores) < member_count:
+        raise ValueError("scores must cover every member")
+    resolved_providers = provider_ids if provider_ids is not None else [f"provider-{i}" for i in range(member_count)]
+    resolved_models = model_ids if model_ids is not None else [f"model-{i}" for i in range(member_count)]
+
+    # ``RunArtifactRepository`` appends ``runs/`` itself, so *root* is the
+    # artifact root — the same value the CLI's ``--output-dir`` and the runner
+    # use.  Member run artifacts therefore live at ``root/runs/<execution_id>``.
+    ref_root = root / "references"
+    snap_dir = ref_root / "snapshots"
+    set_dir = ref_root / "sets"
+
+    run_repo = RunArtifactRepository(root)
+    snapshot_repo = ReferenceRepository(directory=snap_dir)
+    set_repo = ReferenceSetRepository(directory=set_dir)
+    builder = ReferenceSnapshotBuilder()
+
+    loaded: list[ReferenceSnapshot] = []
+    snapshot_sha256s: dict[str, str] = {}
+    for i in range(member_count):
+        execution_id = str(uuid4())
+        profile = make_capability_profile(resolved_scores[i])
+        manifest = make_manifest(execution_id=execution_id, candidate_model_id=resolved_models[i])
+        commit_run(root, execution_id=execution_id, manifest=manifest, profile=profile)
+        snapshot = builder.build(
+            execution_id=execution_id,
+            artifact_repository=run_repo,
+            reference_repository=snapshot_repo,
+            provider_id=resolved_providers[i],
+            snapshot_id=f"snap-{i}",
+            created_by="operator",
+            source_type=source_type,
+        )
+        loaded.append(snapshot)
+        snapshot_sha256s[snapshot.snapshot_id] = snapshot_repo.verify_trusted_snapshot(snapshot.snapshot_id)
+
+    set_builder = ReferenceSetBuilder(allow_test_fixture=(source_type == TEST_FIXTURE))
+    reference_set = set_builder.build(
+        reference_set_id=set_id,
+        reference_set_version=set_version,
+        created_at=datetime.now(UTC),
+        snapshots=loaded,
+        snapshot_sha256s=snapshot_sha256s,
+        description=description,
+    )
+    set_repo.save(reference_set)
+    return ref_root, set_dir / f"{set_id}_{set_version}.json"
