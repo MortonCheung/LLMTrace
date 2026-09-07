@@ -2,12 +2,48 @@
 
 面向第三方 AI API、中转站和代理服务的黑盒模型审计工具。
 
+## Quick Start（本地 Web）
+
+```bash
+git clone https://github.com/MortonCheung/LLMTrace.git
+cd LLMTrace
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+llmtrace web
+```
+
+打开 http://127.0.0.1:8765 开始使用：New Audit 表单 → 实时进度（SSE）→ 结果报告 → 历史记录。
+默认只绑定 127.0.0.1（页面会接收 API Key）。
+
+不想消耗真实 API、只想体验完整流程时加 `--demo`（进程内 Mock 端点 + Quick Suite 32 题，
+页面带 DEMO 标识）：
+
+```bash
+llmtrace web --demo
+```
+
+要求 Python 3.11+。
+
+### CLI Quick Start（高级用户）
+
+```bash
+export MY_API_KEY="your-key"
+llmtrace run \
+  --protocol openai \
+  --base-url https://api.example.com/v1 \
+  --model claimed-model \
+  --api-key-env MY_API_KEY
+```
+
 ## 当前版本能做什么
 
 当前已完成 v0.1 证据审计 MVP、v0.2 基准评测基础设施、v0.3 能力评测收口
 （item-level 结果、Quick Suite 32 题、Reference Model Snapshot、Behavior Drift Foundation）、
-v0.3-E 一键统一审计执行链（`llmtrace run`），以及 v0.4 受信任参考体系与正式 0–100 校准
-（v0.4-A ReferenceSet + v0.4-B Reference Calibration & Claimed Model Gap）。
+v0.3-E 一键统一审计执行链（`llmtrace run`）、v0.4 受信任参考体系与正式 0–100 校准
+（v0.4-A ReferenceSet + v0.4-B Reference Calibration & Claimed Model Gap），以及 v0.5 Usable MVP
+（本地 Web 应用 + 持久 Run 索引 + Demo 模式）。
 
 ### v0.1 证据审计（基础能力）
 
@@ -84,6 +120,18 @@ v0.3-E 一键统一审计执行链（`llmtrace run`），以及 v0.4 受信任�
   相对坐标，不是绝对能力；Reference Comparison（原始对比）≠ Calibration（正式映射）；
   分数不可跨参考组比较
 
+### v0.5 Usable MVP（新增）
+
+- **本地 Web 应用**：`llmtrace web`（默认 `127.0.0.1:8765`，页面会接收 API Key）——
+  New Audit 表单 → 实时进度（SSE）→ 结果报告 → 历史记录，Jinja + Vanilla JS，无外部前端依赖
+- **RunService**：进程内单例管理 run 生命周期（create / estimate / start / cancel / progress /
+  result / history），后台任务 + 事件环形缓冲 + cooperative cancellation
+- **持久 Run 索引**：SQLite 记录每次 run 的状态与终态摘要（不含任何 secret）
+- **Demo 模式**：`llmtrace web --demo` 内置进程内 Mock 模型端点与 Quick Suite 32 题，
+  零 API Key、零外部请求体验完整流程（页面带 DEMO 标识）
+- **本机直连修复**：目标为 localhost/127.x 时 Provider 关闭环境代理 trust_env，
+  避免 HTTP_PROXY 劫持回环请求；远端端点仍保留 httpx 默认代理行为
+
 ## 语义边界：LLMTrace 能说什么、不能说什么
 
 - ✅ 能说：「在相同测试条件下，本次运行与历史运行观察到显著行为漂移。」
@@ -103,18 +151,6 @@ v0.3-E 一键统一审计执行链（`llmtrace run`），以及 v0.4 受信任�
 - 单次延迟不能直接判断模型身份
 - 输出文本不同不代表底层模型不同；行为相似度不是身份结论
 - Provider 失败（超时/限流）不等价于模型能力下降
-
-## 安装
-
-```bash
-git clone https://github.com/MortonCheung/LLMTrace.git
-cd LLMTrace
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
-要求 Python 3.11+。
 
 ## 使用示例
 
@@ -274,7 +310,17 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 | v0.3-E | Unified Execution & Artifact Foundation（已完成：`llmtrace run`） |
 | v0.4-A | Trusted Reference Run & Reference Set Foundation（已完成：`llmtrace reference capture / set-create`，无 0–100 输出） |
 | v0.4-B | Reference Calibration & Claimed Model Gap（已完成：`llmtrace run --reference-set` 正式 0–100 校准 + 声明模型差距） |
-| v0.5 | Fingerprint + Routing |
-| v0.6 | Product Service / Web |
+| v0.5 | Usable MVP（已完成：本地 Web + RunService + SQLite Run 索引 + `--demo` Mock 模式） |
+
+未来方向（先产品化，再精修）：
+
+```text
+MVP Hardening
+Reference Data Expansion
+Advanced Fingerprinting
+Routing Statistics
+Benchmark Expansion
+Web Polish
+```
 
 详细权威路线以 [`docs/roadmap.md`](./docs/roadmap.md) 为准。

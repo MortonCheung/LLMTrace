@@ -250,16 +250,35 @@ Claimed Model Gap（总分 + 分维度），全链 provenance 可回溯；任何
 遗留（移入后续版本）：官方参考模型成绩库规模化、LiteLLM ReferenceProvider 集成、
 Quick Suite 重复运行的统计置信区间（v0.5+）。
 
-## v0.5 Fingerprint + Routing
+## v0.5 Usable MVP（已完成）
 
-- 主动指纹题与行为向量
-- Top-K 相似度
-- Model Equality Testing 统计模式
-- 混合路由与跨时间动态降级
+> 定位转变：先产品化（可用的本地工具），再精修。Roadmap 不再按
+> "v0.5 Fingerprint + v0.6 Web" 串行展开，指纹/路由类能力进入未来方向。
 
-## v0.6 Product Service / Web
+- **本地 Web 应用**：`llmtrace web`（默认 `127.0.0.1:8765`）——New Audit / Running（SSE 实时进度）/
+  Result / History 页面，Jinja + Vanilla JS，无外部前端依赖；API Key 仅存进程内存
+- **RunService**：进程内单例管理 run 生命周期（create / estimate / start / cancel / progress /
+  result / history），后台任务 + 事件环形缓冲 + cooperative cancellation
+- **持久 Run Index**：SQLite 记录每次 run（终态 + 脱敏视图，不含任何 secret）
+- **Demo 模式**：`llmtrace web --demo` 内置进程内 Mock 模型端点（Quick Suite 32 题），
+  零 API Key / 零外部请求体验全流程；Mock Provider 全程复用真实执行链
+- **本机直连修复**：Provider 对 localhost/127.x 目标关闭环境代理（trust_env=False），
+  远端端点保留 httpx 默认代理行为；同时修复 probes→providers 的运行时循环导入
+- 质量：Ruff + Format + Mypy + Pytest 1229 题 + Coverage 88%
 
-- 输入接口与成本确认
-- 开始测试与实时进度
-- 结果报告与历史记录
-- 不依赖外部服务，可本地运行
+完成标准：`llmtrace web`（`--demo`）真实启动，Web 表单 → create → estimate → start → SSE →
+runner → report → history 全流程跑通，门禁全绿。√ 已达成。
+
+## 未来方向（先产品化，再精修）
+
+```text
+MVP Hardening
+Reference Data Expansion
+Advanced Fingerprinting
+Routing Statistics
+Benchmark Expansion
+Web Polish
+```
+
+完成标准（遗留项）：官方参考模型成绩库规模化、LiteLLM ReferenceProvider 集成、
+Quick Suite 重复运行的统计置信区间均进入上述未来方向。
