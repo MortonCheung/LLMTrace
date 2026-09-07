@@ -25,6 +25,8 @@ dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",
     "jinja2>=3.1.0",
+    "fastapi>=0.135.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +53,11 @@ where = ["src"]
 "llmtrace.adapters" = [
     "_resources/*.yaml",
     "_resources/*.json",
+]
+"llmtrace.web" = [
+    "templates/*.html",
+    "static/*.css",
+    "static/*.js",
 ]
 
 [tool.ruff]

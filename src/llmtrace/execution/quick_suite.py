@@ -17,6 +17,9 @@ from llmtrace.reporting.benchmark_mapper import build_benchmark_report_section
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from llmtrace.execution.progress import CancellationToken
     from llmtrace.providers.base import BaseProvider
 
 
@@ -45,9 +48,20 @@ class QuickSuiteRunner:
         provider: BaseProvider,
         *,
         code_backend: CodeExecutionBackend,
+        cancel_token: CancellationToken | None = None,
+        on_item_progress: Callable[[int, int], None] | None = None,
     ) -> None:
         self._provider = provider
         self._adapter = QuickSuiteAdapter(code_backend=code_backend)
+        self._cancel_token = cancel_token
+        self._on_item_progress = on_item_progress
+        self._items_completed = 0
+        self._items_total = 0
+
+    def _on_item_complete(self) -> None:
+        self._items_completed += 1
+        if self._on_item_progress is not None:
+            self._on_item_progress(self._items_completed, self._items_total)
 
     async def run(self) -> QuickSuiteExecutionResult:
         plans: list[RunPlan] = []
@@ -55,8 +69,11 @@ class QuickSuiteRunner:
         sections: list[BenchmarkReportSection] = []
 
         task_specs = self._adapter.list_tasks()
+        self._items_total = sum(spec.num_samples for spec in task_specs)
 
         for spec in task_specs:
+            if self._cancel_token is not None:
+                self._cancel_token.throw_if_cancelled()
             task_def = self._adapter.get_task_definition(spec.task_id)
             plan = self._adapter.build_plan(
                 task_def.suite_id,
@@ -67,7 +84,12 @@ class QuickSuiteRunner:
             )
             plans.append(plan)
 
-            attempt = await self._adapter.run_task(spec, self._provider)
+            attempt = await self._adapter.run_task(
+                spec,
+                self._provider,
+                cancel_token=self._cancel_token,
+                on_item_complete=self._on_item_complete,
+            )
 
             raw_result = {
                 "results": {},

@@ -72,6 +72,7 @@ class UnifiedRunStatus(StrEnum):
     COMPLETED_WITH_WARNINGS = "COMPLETED_WITH_WARNINGS"
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 # ---------------------------------------------------------------------------
