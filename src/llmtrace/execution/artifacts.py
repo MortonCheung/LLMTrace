@@ -24,11 +24,15 @@ import re
 import shutil
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from llmtrace.analysis.behavior_models import BehaviorRunSnapshot
 from llmtrace.execution.models import MANIFEST_VERSION, RunArtifactManifest
+
+if TYPE_CHECKING:
+    from llmtrace.scoring.models import CapabilityProfile
 
 _MANIFEST_FILENAME = "manifest.json"
 # execution_id is generated internally (UUID); user input must never reach a path.
@@ -236,6 +240,36 @@ class RunArtifactRepository:
         except ValueError as exc:
             raise ArtifactIntegrityError(
                 f"behavior snapshot of execution '{execution_id}' is corrupted and cannot be parsed: {exc}"
+            ) from exc
+
+    def load_capability_profile(self, execution_id: str) -> CapabilityProfile | None:
+        """Load a run's capability profile with artifact-integrity verification.
+
+        Returns None when the run has no capability_profile.json artifact.
+        """
+        manifest = self.load_manifest(execution_id)
+        expected_sha = manifest.artifacts.get("capability_profile.json")
+        if expected_sha is None:
+            return None
+        try:
+            raw = self.read_artifact(execution_id, "capability_profile.json")
+        except ArtifactNotFoundError as exc:
+            raise ArtifactIntegrityError(
+                f"capability profile of execution '{execution_id}' is listed in the manifest but missing on disk"
+            ) from exc
+        actual_sha = sha256_of(raw)
+        if actual_sha != expected_sha:
+            raise ArtifactIntegrityError(
+                f"capability profile of execution '{execution_id}' was modified: "
+                f"manifest {expected_sha} != actual {actual_sha}"
+            )
+        try:
+            from llmtrace.scoring.models import CapabilityProfile
+
+            return CapabilityProfile.model_validate_json(raw)
+        except ValueError as exc:
+            raise ArtifactIntegrityError(
+                f"capability profile of execution '{execution_id}' is corrupted and cannot be parsed: {exc}"
             ) from exc
 
     def find_behavior_snapshot_candidates(

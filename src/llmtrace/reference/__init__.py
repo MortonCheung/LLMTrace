@@ -49,6 +49,7 @@ from .reference_set import (
     ReferenceSetNotFoundError,
 )
 from .repository import ReferenceSetRepository
+from .validation import CalibrationContext, validate_reference_set_for_calibration
 
 __all__: list[str] = [
     # builder
@@ -91,4 +92,7 @@ __all__: list[str] = [
     "ReferenceSetBuilder",
     # repository
     "ReferenceSetRepository",
+    # calibration validation
+    "CalibrationContext",
+    "validate_reference_set_for_calibration",
 ]

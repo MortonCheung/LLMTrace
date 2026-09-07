@@ -208,6 +208,9 @@ def run(
     check_streaming: bool = typer.Option(True, "--streaming/--no-streaming", help="是否检查流式接口"),
     output_dir: Path = typer.Option(Path("reports"), "--output-dir", "-o", help="artifact 根目录"),
     reference_snapshot: Path = typer.Option(None, "--reference-snapshot", help="ReferenceSnapshot JSON 路径"),
+    reference_set: Path = typer.Option(
+        None, "--reference-set", help="ReferenceSet JSON 路径（用于 Reference Calibration）"
+    ),
     baseline_snapshot: Path = typer.Option(None, "--baseline-snapshot", help="显式基线 BehaviorRunSnapshot JSON 路径"),
     compare_latest: bool = typer.Option(
         True, "--compare-latest/--no-compare-latest", help="自动与最新兼容历史运行比较"
@@ -235,25 +238,73 @@ def run(
     resolved_target = (
         sanitize_target_id(target_id) if target_id else derive_target_id(config.protocol.value, config.base_url)
     )
-    plan = build_unified_execution_plan(config, target_id=resolved_target)
+
+    reference_set_id: str | None = None
+    reference_set_version: str | None = None
+    reference_set_content_sha256: str | None = None
+    calibration_policy_id: str | None = None
+    calibration_policy_version: str | None = None
+
+    if reference_set is not None:
+        # Shared validator — identical to the runner's preflight.  A
+        # ReferenceSet that cannot support formal calibration is rejected
+        # here, before any dry-run or execution proceeds.  Read-only: it
+        # never sends HTTP, never creates a provider, never runs candidate
+        # code, and never writes an artifact.
+        try:
+            from llmtrace.reference.validation import validate_reference_set_for_calibration
+
+            context = validate_reference_set_for_calibration(
+                set_path=reference_set,
+                artifact_repository=RunArtifactRepository(output_dir),
+            )
+            reference_set_id = context.reference_set.reference_set_id
+            reference_set_version = context.reference_set.reference_set_version
+            reference_set_content_sha256 = context.reference_set.content_sha256
+            calibration_policy_id = context.calibration_policy.policy_id
+            calibration_policy_version = context.calibration_policy.policy_version
+        except Exception as exc:
+            print_error(str(exc), "reference set 预检", partial=False)
+            raise typer.Exit(code=1)
+
+    plan = build_unified_execution_plan(
+        config,
+        target_id=resolved_target,
+        reference_set_id=reference_set_id,
+        reference_set_version=reference_set_version,
+        reference_set_content_sha256=reference_set_content_sha256,
+        calibration_policy_id=calibration_policy_id,
+        calibration_policy_version=calibration_policy_version,
+    )
 
     if dry_run:
-        print_dry_run(
-            {
-                "Target": resolved_target,
-                "协议": config.protocol.value,
-                "声明模型": config.model,
-                "Suite": f"{plan.suite_id} {plan.suite_version}",
-                "协议探针请求": str(plan.protocol_probe_requests),
-                "Benchmark 请求": str(plan.benchmark_requests),
-                "总请求上限": str(plan.maximum_requests),
-                "输出 Token 上限": str(plan.maximum_output_token_ceiling),
-                "预计费用": "unknown",
-                "需要安全 Sandbox": "是",
-                "参考对比": "是" if reference_snapshot else "否",
-                "历史对比": "是" if compare_latest else "否",
-            }
-        )
+        dry_run_info = {
+            "Target": resolved_target,
+            "协议": config.protocol.value,
+            "声明模型": config.model,
+            "Suite": f"{plan.suite_id} {plan.suite_version}",
+            "协议探针请求": str(plan.protocol_probe_requests),
+            "Benchmark 请求": str(plan.benchmark_requests),
+            "总请求上限": str(plan.maximum_requests),
+            "输出 Token 上限": str(plan.maximum_output_token_ceiling),
+            "预计费用": "unknown",
+            "需要安全 Sandbox": "是",
+            "参考对比": "是" if reference_snapshot else "否",
+        }
+        if reference_set is not None:
+            dry_run_info["Reference Calibration"] = "是"
+            dry_run_info["ReferenceSet ID"] = reference_set_id or "N/A"
+            dry_run_info["ReferenceSet Version"] = reference_set_version or "N/A"
+            dry_run_info["ReferenceSet Content SHA"] = (
+                (reference_set_content_sha256[:16] + "...") if reference_set_content_sha256 else "N/A"
+            )
+            dry_run_info["Calibration Policy"] = (
+                f"{calibration_policy_id} {calibration_policy_version}" if calibration_policy_id else "N/A"
+            )
+        else:
+            dry_run_info["Reference Calibration"] = "否"
+        dry_run_info["历史对比"] = "是" if compare_latest else "否"
+        print_dry_run(dry_run_info)
         return
 
     api_key = check_api_key(config.api_key_env)
@@ -261,7 +312,6 @@ def run(
         print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
         raise typer.Exit(code=1)
 
-    # Confirmation
     if not non_interactive:
         if not sys.stdin.isatty():
             print_error("非交互式执行需要 --yes", "确认", partial=False)
@@ -289,6 +339,7 @@ def run(
             compare_latest=compare_latest,
             baseline_snapshot_path=baseline_snapshot,
             reference_snapshot_path=reference_snapshot,
+            reference_set_path=reference_set,
             max_wall_seconds=max_wall_seconds,
         )
     except SandboxUnavailableError as exc:
@@ -304,8 +355,6 @@ def run(
             import traceback
 
             traceback.print_exc()
-        # Non-debug error output crosses a display boundary — scrub every known
-        # secret (API key + base_url credentials) in case the exception echoes it.
         scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         print_error(scrubber.scrub_text(str(exc)), "统一执行", partial=True)
         raise typer.Exit(code=1)

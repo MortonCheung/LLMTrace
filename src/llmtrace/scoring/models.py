@@ -175,6 +175,66 @@ class DimensionScoreResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Calibration provenance (audit trail for formal 0–100 scores)
+# ---------------------------------------------------------------------------
+
+
+class CalibrationProvenance(BaseModel):
+    """Audit trail for how a formal 0–100 score was produced (v0.4-B).
+
+    Records the exact ReferenceSet + policy identity so any score can later be
+    answered with: which reference universe, which suite, which policy
+    version produced this number.
+    """
+
+    policy_id: str = Field(..., min_length=1, description="Calibration policy identifier")
+    policy_version: str = Field(..., min_length=1, description="Calibration policy version")
+    method: str = Field(..., min_length=1, description="Calibration method identifier")
+    reference_set_id: str = Field(..., min_length=1, description="ReferenceSet used for calibration")
+    reference_set_version: str = Field(..., min_length=1, description="ReferenceSet version")
+    reference_set_content_sha256: str = Field(..., description="ReferenceSet content hash")
+    reference_identity_count: int = Field(..., ge=1, description="Distinct reference identities used")
+    coverage_weight: float = Field(..., ge=0.0, le=1.0, description="Candidate coverage weight at calibration time")
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+# ---------------------------------------------------------------------------
+# Claimed model capability gap (v0.4-B §13–§14)
+# ---------------------------------------------------------------------------
+
+
+class ClaimedModelDimensionGap(BaseModel):
+    """Per-dimension capability gap between candidate and claimed-model reference."""
+
+    dimension: CapabilityDimension = Field(..., description="Capability dimension")
+    candidate_score: float = Field(..., ge=0.0, le=100.0, description="Candidate calibrated dimension score")
+    reference_score: float = Field(..., ge=0.0, le=100.0, description="Claimed model reference dimension score")
+    delta: float = Field(..., description="candidate_score - reference_score; negative = below reference")
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+class ClaimedModelGap(BaseModel):
+    """Capability comparison against the claimed model's trusted reference.
+
+    This is a *capability gap*, not model identity evidence: a negative delta
+    means the measured endpoint performs below the compatible trusted
+    reference configuration for the claimed model — nothing more.
+    """
+
+    claimed_model_id: str = Field(..., min_length=1, description="Model id the endpoint claims to serve")
+    reference_provider_id: str = Field(..., min_length=1, description="Provider of the matched reference identity")
+    reference_model_id: str = Field(..., min_length=1, description="Model id of the matched reference identity")
+    candidate_total_score: float = Field(..., ge=0.0, le=100.0)
+    reference_total_score: float = Field(..., ge=0.0, le=100.0)
+    total_delta: float = Field(..., description="candidate_total_score - reference_total_score")
+    dimension_gaps: tuple[ClaimedModelDimensionGap, ...] = Field(default_factory=tuple)
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+
+# ---------------------------------------------------------------------------
 # Capability profile (top-level aggregate)
 # ---------------------------------------------------------------------------
 
@@ -224,6 +284,10 @@ class CapabilityProfile(BaseModel):
     )
     warnings: tuple[str, ...] = Field(default_factory=tuple, description="Non-fatal warnings")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    calibration: CalibrationProvenance | None = Field(
+        default=None,
+        description="Provenance of the calibrated scores. None when the profile is UNCALIBRATED.",
+    )
 
     model_config = {"frozen": True, "extra": "forbid"}
 

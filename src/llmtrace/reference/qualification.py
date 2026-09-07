@@ -19,7 +19,6 @@ Any failure REJECTS the run; there is no "save anyway + warning" path.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 
@@ -30,7 +29,7 @@ from llmtrace.adapters.quick_suite import (
     QUICK_SUITE_SUITE_ID,
     QUICK_SUITE_SUITE_VERSION,
     get_quick_suite_content_sha256,
-    get_quick_suite_generation_config,
+    get_quick_suite_generation_config_sha256,
 )
 from llmtrace.benchmarks.models import BenchmarkRunResult, ItemStatus
 from llmtrace.execution.artifacts import ArtifactIntegrityError, ArtifactNotFoundError, RunArtifactRepository
@@ -101,10 +100,13 @@ class ReferenceQualificationPolicy(BaseModel):
 
 
 def _expected_generation_config_sha256() -> str:
-    """Canonical SHA-256 of the Quick Suite generation config (single source)."""
-    config = get_quick_suite_generation_config()
-    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    """Canonical SHA-256 of the Quick Suite generation config (single source).
+
+    Delegates to the adapter's authoritative helper so the qualification gate,
+    the execution plan, and the ReferenceSet compatibility gate can never
+    drift into three different canonicalizations.
+    """
+    return get_quick_suite_generation_config_sha256()
 
 
 def _load_benchmark_runs(

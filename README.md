@@ -5,8 +5,9 @@
 ## 当前版本能做什么
 
 当前已完成 v0.1 证据审计 MVP、v0.2 基准评测基础设施、v0.3 能力评测收口
-（item-level 结果、Quick Suite 32 题、Reference Model Snapshot、Behavior Drift Foundation），
-以及 v0.3-E 一键统一审计执行链（`llmtrace run`）。
+（item-level 结果、Quick Suite 32 题、Reference Model Snapshot、Behavior Drift Foundation）、
+v0.3-E 一键统一审计执行链（`llmtrace run`），以及 v0.4 受信任参考体系与正式 0–100 校准
+（v0.4-A ReferenceSet + v0.4-B Reference Calibration & Claimed Model Gap）。
 
 ### v0.1 证据审计（基础能力）
 
@@ -60,8 +61,28 @@
 - **CLI**：`llmtrace reference capture`（Operator 对可信 endpoint 捕获参考运行）与
   `llmtrace reference set-create`（从已验证快照构建参考组，0 API 请求）
 
-> 注意：`ReferenceSet` 当前**不产生 calibrated 0–100 分数**。参考快照/参考组是可信、
-> 不可变、可审计的历史能力事实；正式 0–100 能力分属于 v0.4-B Calibration（规划中）。
+> 注意：`ReferenceSet` 本身**不产生 calibrated 0–100 分数**——参考快照/参考组是可信、
+> 不可变、可审计的历史能力事实。正式 0–100 能力分由 v0.4-B Calibration 在运行时
+> 通过 `--reference-set` 对候选测量推导（见下节），两者是不可混淆的概念。
+
+### v0.4-B Reference Calibration & 0–100（实验性，新增）
+
+- **正式 0–100 Capability Score**：`llmtrace run --reference-set` 在统一审计后对
+  raw 能力画像做 Reference Anchored Monotonic Piecewise Calibration——
+  `0 = 随机基线`、`50 = 参考组中位数`、`90 = P90（flagship）`、`100 = 套件上限`
+  的版本化分段线性锚点映射（`llmtrace-reference-calibration-v1`）
+- **Claimed Model Gap**：被测 endpoint 与声明模型的兼容可信参考配置之间的
+  总分差距与分维度差距；严格 model_id 匹配（无模糊匹配、歧义即拒绝）；
+  **是能力对比，不是模型身份证明**
+- **Fail-closed**：参考身份 < 5、离散度不足、校准饱和、候选测量不完整、
+  scoring policy 不一致、ReferenceSet 信任链验证失败——任一触发即保持
+  `UNCALIBRATED` 并输出 warning，绝不产生无依据分数；信任链失败在 preflight
+  即拒绝（0 次 HTTP 请求）
+- **Provenance 贯穿**：manifest / JSON / HTML 报告记录 calibration policy
+  id+version、reference set id+version+content SHA；raw 分数全部保留
+- **语义边界**：0–100 分是相对某个已定义校准宇宙（ReferenceSet + Policy）的
+  相对坐标，不是绝对能力；Reference Comparison（原始对比）≠ Calibration（正式映射）；
+  分数不可跨参考组比较
 
 ## 语义边界：LLMTrace 能说什么、不能说什么
 
@@ -71,6 +92,8 @@
 - ❌ 不能说：「输出文本不同，因此底层模型不同。」
 - ✅ 能说：「能力结果显著下降。」
 - ❌ 但如果主要原因是 Provider Failure，不能说：「模型能力显著下降。」
+- ✅ 能说：「相对参考组 X（v1），本次实测能力分 72.5，比声明模型的可信参考低 8 分。」
+- ❌ 不能说：「实测分数低于声明模型参考，所以服务商偷换了模型。」（能力对比 ≠ 身份证明）
 
 ## 当前版本不能证明什么
 
@@ -109,6 +132,17 @@ llmtrace run \
 一次 `run` 大约包含：协议探针（若干）+ Quick Suite 32 题 benchmark。实际请求数以
 `--dry-run` 为准；运行前会显示预计请求数、最大输出 token ceiling 与预计费用（未知），
 确认后才执行。`--yes` 跳过确认；`--compare-latest`（默认）自动与最新兼容历史运行做 Behavior Drift。
+提供 `--reference-set`（ReferenceSet JSON 路径）时，额外输出正式 0–100 校准分与
+声明模型差距（preflight 即重验参考组信任链，失败则 0 次 HTTP 请求直接拒绝）：
+
+```bash
+llmtrace run \
+  --protocol openai \
+  --base-url https://api.example.com/v1 \
+  --model claimed-model \
+  --api-key-env MY_API_KEY \
+  --reference-set references/sets/refset-v1_0.1.0.json
+```
 
 ```bash
 # 只显示执行计划，不发送任何请求（0 HTTP、0 工件、不要求 API key 存在）
@@ -198,7 +232,8 @@ llmtrace reference set-create \
   --snapshot ref-model-2026-07
 ```
 
-> `ReferenceSet` 当前不产生 calibrated 0–100 分数（v0.4-B Calibration 规划中）。
+> `ReferenceSet` 本身不产生 calibrated 0–100 分数；正式校准分在 `llmtrace run --reference-set`
+> 运行时对候选测量推导（见上文 v0.4-B 一节）。
 
 ## 模拟服务器
 
@@ -238,7 +273,7 @@ python examples/mock_proxy_server.py --mode honest --port 8080
 | v0.3-D | Behavior Drift Foundation（已完成） |
 | v0.3-E | Unified Execution & Artifact Foundation（已完成：`llmtrace run`） |
 | v0.4-A | Trusted Reference Run & Reference Set Foundation（已完成：`llmtrace reference capture / set-create`，无 0–100 输出） |
-| v0.4-B | Reference Calibration & 0–100（规划中） |
+| v0.4-B | Reference Calibration & Claimed Model Gap（已完成：`llmtrace run --reference-set` 正式 0–100 校准 + 声明模型差距） |
 | v0.5 | Fingerprint + Routing |
 | v0.6 | Product Service / Web |
 

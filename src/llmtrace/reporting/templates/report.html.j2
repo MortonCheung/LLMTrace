@@ -224,29 +224,72 @@
 
 {% if capability_profile %}
 <h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + 1 }}. Capability Profile</h2>
+{% if capability_profile.calibrated_total_score is not none %}
+<div class="meta">
+  <p><strong>Capability Score: {{ "%.1f"|format(capability_profile.calibrated_total_score) }} / 100</strong>
+    （{{ capability_profile.calibration_status }}）</p>
+</div>
+{% endif %}
 <div class="meta">
   <p>Profile: {{ capability_profile.profile_version }} | Policy: {{ capability_profile.scoring_policy_id }} {{ capability_profile.scoring_policy_version }}</p>
   <p>Coverage: {{ "%.2f"|format(capability_profile.coverage_weight) }} | Provisional Raw Index: {{ "%.4f"|format(capability_profile.provisional_raw_index) }}</p>
+  {% if capability_profile.calibration %}
+  <p>Calibration: {{ capability_profile.calibration.policy_id }} {{ capability_profile.calibration.policy_version }}
+    | Reference Set: {{ capability_profile.calibration.reference_set_id }} {{ capability_profile.calibration.reference_set_version }}
+    | Reference Identities: {{ capability_profile.calibration.reference_identity_count }}</p>
+  {% endif %}
 </div>
 <table>
-  <tr><th>Dimension</th><th>Status</th><th>Raw Score</th><th>Coverage</th><th>Weight</th></tr>
+  <tr><th>Dimension</th><th>Status</th><th>Raw Score</th><th>Calibrated</th><th>Coverage</th><th>Weight</th></tr>
   {% for d in capability_profile.dimensions %}
   <tr>
     <td>{{ d.dimension }}</td>
     <td>{{ d.status }}</td>
     <td>{{ "%.4f"|format(d.raw_score) }}</td>
+    <td>{% if d.calibrated_score is not none %}{{ "%.1f"|format(d.calibrated_score) }}{% else %}N/A{% endif %}</td>
     <td>{{ "%.2f"|format(d.task_coverage) }}</td>
     <td>{{ "%.2f"|format(d.global_weight) }}</td>
   </tr>
   {% endfor %}
 </table>
+{% if capability_profile.calibration %}
+<div class="disclaimer">
+  <strong>CALIBRATED：</strong>以上 calibrated 分数是在当前 Suite、Scoring Policy 和 ReferenceSet 定义的 LLMTrace calibration universe 中的版本化能力分（0–100），不是绝对世界排名。Raw 分数继续保留供审计。
+</div>
+{% else %}
 <div class="disclaimer">
   <strong>UNCALIBRATED：</strong>以上是 raw / provisional / uncalibrated 分数，不是 0–100 正式能力分。Provisional Raw Index 不是百分制评分，0.75 不代表 75/100。
 </div>
 {% endif %}
+{% endif %}
+
+{% if claimed_model_gap %}
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + 1 }}. Claimed Model Comparison</h2>
+<div class="meta">
+  <p>Claimed Model: <strong>{{ claimed_model_gap.claimed_model_id }}</strong></p>
+  <p>Trusted Reference: {{ "%.1f"|format(claimed_model_gap.reference_total_score) }} / 100
+    （{{ claimed_model_gap.reference_provider_id }} / {{ claimed_model_gap.reference_model_id }}）</p>
+  <p>Measured Capability: {{ "%.1f"|format(claimed_model_gap.candidate_total_score) }} / 100 |
+    <strong>Capability Gap: {{ "%+.1f"|format(claimed_model_gap.total_delta) }}</strong></p>
+</div>
+<table>
+  <tr><th>Dimension</th><th>Measured</th><th>Reference</th><th>Gap</th></tr>
+  {% for dg in claimed_model_gap.dimension_gaps %}
+  <tr>
+    <td>{{ dg.dimension }}</td>
+    <td>{{ "%.1f"|format(dg.candidate_score) }}</td>
+    <td>{{ "%.1f"|format(dg.reference_score) }}</td>
+    <td>{{ "%+.1f"|format(dg.delta) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="disclaimer">
+  <strong>解读：</strong>被测端点的能力分与声明模型兼容的可信参考配置存在上述差距。这是能力比较（capability comparison），不是模型身份证明（not proof of upstream model identity）。
+</div>
+{% endif %}
 
 {% if behavior_drift %}
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + 1 }}. Behavior Drift</h2>
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + 1 }}. Behavior Drift</h2>
 <div class="meta">
   <p>Overall Drift Level: <strong>{{ behavior_drift.drift_level }}</strong></p>
   <p>Baseline Run: {{ behavior_drift.baseline_run_id }} | Current Run: {{ behavior_drift.current_run_id }}</p>
@@ -294,7 +337,7 @@
 </div>
 {% endif %}
 
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
 <div class="disclaimer">
   <h3>重要限制</h3>
   <ul>

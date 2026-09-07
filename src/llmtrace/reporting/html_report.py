@@ -15,7 +15,7 @@ from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
 from llmtrace.reporting.evidence_validation import validate_report_evidence_refs
 from llmtrace.scoring.comparison import ComparisonResult
-from llmtrace.scoring.models import CapabilityProfile
+from llmtrace.scoring.models import CapabilityProfile, ClaimedModelGap
 from llmtrace.security.redaction import SecretScrubber, redact_url
 
 
@@ -104,21 +104,55 @@ def _behavior_drift_to_template_data(drift: BehaviorDriftResult) -> dict[str, ob
 
 def _capability_profile_to_template_data(profile: CapabilityProfile) -> dict[str, object]:
     """Build Jinja-safe data for the Capability Profile HTML section."""
-    return {
+    is_calibrated = profile.calibration is not None
+    data: dict[str, object] = {
         "profile_version": profile.profile_version,
         "scoring_policy_id": profile.scoring_policy_id,
         "scoring_policy_version": profile.scoring_policy_version,
         "coverage_weight": profile.coverage_weight,
         "provisional_raw_index": profile.provisional_raw_index,
+        "calibrated_total_score": profile.calibrated_total_score,
+        "calibration_status": "CALIBRATED" if is_calibrated else "UNCALIBRATED",
         "dimensions": [
             {
                 "dimension": d.dimension.value,
                 "status": d.status.value,
                 "raw_score": d.raw_normalized_score,
+                "calibrated_score": d.calibrated_score,
                 "task_coverage": d.task_coverage,
                 "global_weight": d.global_weight,
             }
             for d in profile.dimensions
+        ],
+    }
+    if profile.calibration is not None:
+        data["calibration"] = {
+            "policy_id": profile.calibration.policy_id,
+            "policy_version": profile.calibration.policy_version,
+            "reference_set_id": profile.calibration.reference_set_id,
+            "reference_set_version": profile.calibration.reference_set_version,
+            "reference_identity_count": profile.calibration.reference_identity_count,
+        }
+    return data
+
+
+def _claimed_model_gap_to_template_data(gap: ClaimedModelGap) -> dict[str, object]:
+    """Build Jinja-safe data for the Claimed Model Comparison HTML section."""
+    return {
+        "claimed_model_id": gap.claimed_model_id,
+        "reference_provider_id": gap.reference_provider_id,
+        "reference_model_id": gap.reference_model_id,
+        "candidate_total_score": gap.candidate_total_score,
+        "reference_total_score": gap.reference_total_score,
+        "total_delta": gap.total_delta,
+        "dimension_gaps": [
+            {
+                "dimension": d.dimension.value,
+                "candidate_score": d.candidate_score,
+                "reference_score": d.reference_score,
+                "delta": d.delta,
+            }
+            for d in gap.dimension_gaps
         ],
     }
 
@@ -131,6 +165,7 @@ def generate_html_report(
     behavior_drift: BehaviorDriftResult | None = None,
     capability_profile: CapabilityProfile | None = None,
     secret_scrubber: SecretScrubber | None = None,
+    claimed_model_gap: ClaimedModelGap | None = None,
 ) -> Path:
     """生成 HTML 报告.
 
@@ -242,6 +277,10 @@ def generate_html_report(
     if capability_profile is not None:
         capability_profile_data = _capability_profile_to_template_data(capability_profile)
 
+    claimed_model_gap_data: dict[str, object] | None = None
+    if claimed_model_gap is not None:
+        claimed_model_gap_data = _claimed_model_gap_to_template_data(claimed_model_gap)
+
     context: dict[str, object] = {
         "report_id": result.report_id,
         "utc_time": result.start_time.isoformat() if result.start_time else "",
@@ -278,6 +317,7 @@ def generate_html_report(
         "reference_comparison": reference_comparison_data,
         "behavior_drift": behavior_drift_data,
         "capability_profile": capability_profile_data,
+        "claimed_model_gap": claimed_model_gap_data,
     }
 
     # Scrub the full context BEFORE template rendering: a known secret must
