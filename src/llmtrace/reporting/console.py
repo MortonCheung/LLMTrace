@@ -252,14 +252,12 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
             dim_style = "red" if dg.delta < 0 else "green"
             gap_table.add_row(
                 f"  {dg.dimension.value}",
-                f"{dg.candidate_score:.1f} vs {dg.reference_score:.1f}"
-                f"（[{dim_style}]{dg.delta:+.1f}[/{dim_style}]）",
+                f"{dg.candidate_score:.1f} vs {dg.reference_score:.1f}（[{dim_style}]{dg.delta:+.1f}[/{dim_style}]）",
             )
         _console.print(gap_table)
         _console.print()
         _console.print(
-            "[bold]解读：[/]被测端点的能力分与声明模型兼容的可信参考配置存在上述差距。"
-            "这是能力比较，不是模型身份证明。"
+            "[bold]解读：[/]被测端点的能力分与声明模型兼容的可信参考配置存在上述差距。这是能力比较，不是模型身份证明。"
         )
 
     if artifacts:

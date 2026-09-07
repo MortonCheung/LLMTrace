@@ -277,9 +277,7 @@ class UnifiedAuditRunner:
                         # Only a fully calibrated candidate can be compared
                         # against the claimed model's trusted reference.
                         # Capability comparison only — never identity proof.
-                        claimed_model_gap = self._compute_claimed_gap(
-                            capability_profile, curves, warnings
-                        )
+                        claimed_model_gap = self._compute_claimed_gap(capability_profile, curves, warnings)
                 except CalibrationError as exc:
                     warnings.append(f"reference calibration skipped: {exc.error_code}")
 

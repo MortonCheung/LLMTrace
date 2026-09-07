@@ -280,9 +280,7 @@ class TestBuildCalibrationCurves:
             build_calibration_curves(identities, SCORING_POLICY, CALIBRATION_POLICY, _floors())
 
     def test_zero_spread_fail_closed(self) -> None:
-        identities = [
-            _identity("p", f"m{i}", dict.fromkeys(_DIMENSIONS, 0.5), 0.375) for i in range(5)
-        ]
+        identities = [_identity("p", f"m{i}", dict.fromkeys(_DIMENSIONS, 0.5), 0.375) for i in range(5)]
         with pytest.raises(InsufficientCalibrationSpreadError):
             build_calibration_curves(identities, SCORING_POLICY, CALIBRATION_POLICY, _floors())
 

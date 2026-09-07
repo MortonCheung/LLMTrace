@@ -60,9 +60,7 @@ def _build_reference_fixture(
     snapshots = []
     for index, (model_id, score) in enumerate(models):
         execution_id = f"aaaaaaaa-0000-0000-0000-{index:012d}"
-        manifest = make_manifest(execution_id=execution_id).model_copy(
-            update={"candidate_model_id": model_id}
-        )
+        manifest = make_manifest(execution_id=execution_id).model_copy(update={"candidate_model_id": model_id})
         profile = make_capability_profile(score).model_copy(
             update={"provisional_raw_index": round(score * _COVERAGE_WEIGHT, 6)}
         )
@@ -88,9 +86,7 @@ def _build_reference_fixture(
         reference_set_version=set_version,
         created_at=datetime(2026, 9, 1, tzinfo=UTC),
         snapshots=snapshots,
-        snapshot_sha256s={
-            s.snapshot_id: sha256_of(snapshot_repository.read_raw(s.snapshot_id)) for s in snapshots
-        },
+        snapshot_sha256s={s.snapshot_id: sha256_of(snapshot_repository.read_raw(s.snapshot_id)) for s in snapshots},
     )
 
     sets_dir = reference_root / "sets"
