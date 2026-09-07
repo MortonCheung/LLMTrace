@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}History — LLMTrace{% endblock %}
+{% block content %}
+<h1>History</h1>
+
+{% if runs %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>时间</th>
+      <th>模型</th>
+      <th>Endpoint</th>
+      <th class="num">综合分</th>
+      <th class="num">Gap</th>
+      <th>协议风险</th>
+      <th>状态</th>
+      <th class="num">耗时</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td class="mono">{{ r.created_at }}</td>
+      <td>{{ r.claimed_model }}</td>
+      <td class="mono" title="{{ r.base_url_redacted }}">{{ r.base_url_redacted }}</td>
+      <td class="num">{{ "%.1f"|format(r.capability_score) if r.capability_score is not none else "—" }}</td>
+      <td class="num">{{ r.claimed_gap if r.claimed_gap is not none else "—" }}</td>
+      <td>{{ r.risk_level or "—" }}</td>
+      <td><span class="badge badge-{{ r.status|lower }}">{{ r.status }}</span></td>
+      <td class="num">{{ "%.1fs"|format(r.duration_ms / 1000) if r.duration_ms else "—" }}</td>
+      <td><a class="link" href="/run/{{ r.run_id }}">open</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card empty">
+  <h2>还没有任何 Audit</h2>
+  <p class="muted">到 <a href="/">New Audit</a> 创建第一个 run。</p>
+</div>
+{% endif %}
+{% endblock %}

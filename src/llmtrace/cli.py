@@ -738,5 +738,43 @@ def reference_set_create(
     typer.echo(f"     成员数: {len(reference_set.members)}，Content SHA: {reference_set.content_sha256}")
 
 
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址（默认只绑定本机；--host 0.0.0.0 会打印安全警告）"),
+    port: int = typer.Option(8765, "--port", min=1, max=65535, help="监听端口"),
+    data_dir: str | None = typer.Option(None, "--data-dir", help="数据目录（默认 $LLMTRACE_HOME 或 ~/.llmtrace）"),
+    demo: bool = typer.Option(
+        False,
+        "--demo",
+        help="Demo 模式：进程内 Mock 模型端点 + 不安全 in-process sandbox（页面带 DEMO 标识）",
+    ),
+) -> None:
+    """启动本地 Web 应用（v0.5 Usable MVP）。
+
+    安全默认只绑定 127.0.0.1（页面会接收 API Key，§五十二）。API Key
+    只存在于进程内存，SQLite / 报告 / 事件均不含 key（§二十二 / §六十）。
+    """
+    import uvicorn
+
+    from llmtrace.appdir import ensure_app_layout
+    from llmtrace.web.app import create_app
+
+    layout = ensure_app_layout(Path(data_dir) if data_dir else None)
+
+    if demo:
+        typer.echo(
+            "[WARN] --demo：代码项在进程内直接执行（UNSAFE），并使用内置 Mock 模型端点。"
+            "仅用于演示，不要用来审计不可信模型的输出。"
+        )
+
+    if host in ("0.0.0.0", "::"):
+        typer.echo(f"[WARN] 绑定 {host}：页面会接收 API Key，仅应在可信本地网络使用（§五十二）。")
+
+    application = create_app(layout, demo=demo)
+    typer.echo("LLMTrace Web")
+    typer.echo(f"http://{host}:{port}")
+    uvicorn.run(application, host=host, port=port, log_level="info")
+
+
 if __name__ == "__main__":
     app()

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run_id }} — LLMTrace{% endblock %}
+{% block content %}
+<nav class="crumbs"><a href="/history">&larr; History</a></nav>
+
+<h1>Audit Run</h1>
+
+<section class="card run-summary" id="run-summary"
+         data-run-id="{{ run_id }}"
+         data-status="{{ run.status }}"
+         data-terminal="{{ "true" if terminal else "false" }}">
+  <div class="kv">
+    <span class="k">Status</span><span class="v" id="s-status">{{ run.status }}</span>
+    <span class="k">Endpoint</span><span class="v mono">{{ run.base_url_redacted }}</span>
+    <span class="k">Model</span><span class="v mono">{{ run.claimed_model }}</span>
+    <span class="k">Protocol</span><span class="v">{{ run.protocol }}</span>
+    {% if run.reference_set_id %}<span class="k">Reference</span><span class="v mono">{{ run.reference_set_id }}</span>{% endif %}
+    <span class="k">Created</span><span class="v">{{ run.created_at }}</span>
+  </div>
+  {% if not terminal %}
+  <div class="actions">
+    <button id="btn-cancel" class="danger">Cancel</button>
+  </div>
+  {% endif %}
+</section>
+
+<div id="run-live" {% if terminal %}hidden{% endif %}>
+  <section class="card">
+    <h2>Live Progress</h2>
+    <div class="stage-line" id="stage-line">connecting…</div>
+    <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+    <ul class="event-log" id="event-log"></ul>
+  </section>
+</div>
+
+<div id="run-result" {% if not terminal %}hidden{% endif %}>
+  <section class="card">
+    <h2>Result</h2>
+    <div id="result-body" class="result-body">
+      <p class="muted">Loading report…</p>
+    </div>
+  </section>
+</div>
+
+{% if run.error_summary %}
+<section class="card error-box"><strong>Error:</strong> {{ run.error_summary }}</section>
+{% endif %}
+{% endblock %}

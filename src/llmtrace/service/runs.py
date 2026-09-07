@@ -117,7 +117,7 @@ class _LiveRun:
 
     run_id: str
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
-    task: asyncio.Task | None = None
+    task: asyncio.Task[Any] | None = None
     # 事件重放缓冲（sink 同步 append，消费在同一 event loop 进行）。
     events: deque[ProgressEvent] = field(default_factory=lambda: deque(maxlen=2000))
     wake: asyncio.Event | None = None
@@ -283,9 +283,7 @@ class RunService:
         config = self._resolve_config(run_id, record)
         api_key = self._keys.get(run_id)
         if not api_key:
-            raise RunKeyUnavailableError(
-                "api key is not available in this server process; create a new run"
-            )
+            raise RunKeyUnavailableError("api key is not available in this server process; create a new run")
 
         live = self._runs.get(run_id)
         if live is not None and live.task is not None and not live.task.done():
@@ -334,9 +332,7 @@ class RunService:
         """置位 cooperative cancellation（§二十）；幂等。"""
         record = self._require_record(run_id)
         live = self._runs.get(run_id)
-        if record.status in ("PENDING",) or (
-            live is not None and live.task is not None and not live.task.done()
-        ):
+        if record.status in ("PENDING",) or (live is not None and live.task is not None and not live.task.done()):
             if live is not None:
                 live.cancel_token.cancel()
                 return {"run_id": run_id, "status": "CANCELLING"}
@@ -382,6 +378,10 @@ class RunService:
                     payload["report"] = None
         return payload
 
+    def view(self, run_id: str) -> dict[str, Any]:
+        """公开单条 run 记录视图（不含任何 secret / 内部 config）。"""
+        return _record_view(self._require_record(run_id))
+
     def history(self, limit: int = 100) -> list[dict[str, Any]]:
         """按创建时间倒序返回历史 run（不含任何 secret）。"""
         self._ensure_open()
@@ -389,9 +389,7 @@ class RunService:
 
     # -- 内部：终态落盘 ------------------------------------------------------
 
-    async def _run_and_finalize(
-        self, run_id: str, runner: UnifiedAuditRunner, live: _LiveRun
-    ) -> None:
+    async def _run_and_finalize(self, run_id: str, runner: UnifiedAuditRunner, live: _LiveRun) -> None:
         """后台任务：完整 audit → 终态 record（原子化 upsert）→ 终态事件。"""
         started = datetime.now(UTC)
         try:
@@ -418,7 +416,7 @@ class RunService:
             stage = STAGE_FAILED
 
         record = self._require_record(run_id)
-        update = {
+        update: dict[str, Any] = {
             "run_id": run_id,
             "target_id": record.target_id,
             "base_url_redacted": record.base_url_redacted,
