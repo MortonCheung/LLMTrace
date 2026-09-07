@@ -149,9 +149,7 @@ class RunIndex:
     def list_runs(self, limit: int = 100) -> list[RunRecord]:
         """按创建时间倒序返回最近运行。"""
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (int(limit),)
-            ).fetchall()
+            rows = self._conn.execute("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
         return [_row_to_record(r) for r in rows]
 
     def count(self) -> int:

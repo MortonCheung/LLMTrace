@@ -133,9 +133,7 @@ class TestConfidencePolicy:
         ],
     )
     def test_degraded_measurement_is_low(self, measurement: BenchmarkMeasurementSummary) -> None:
-        assessment = ConfidencePolicy.create_v1().assess(
-            measurement=measurement, capability_profile=None
-        )
+        assessment = ConfidencePolicy.create_v1().assess(measurement=measurement, capability_profile=None)
         assert assessment.level == ConfidenceLevel.LOW
 
     def test_unanchored_mostly_complete_is_medium(self) -> None:
@@ -186,26 +184,24 @@ class TestBehaviorSimilarity:
     def test_identical_behavior_is_1_0(self) -> None:
         candidate = BehaviorFeatureVector.from_snapshot(make_snapshot(run_id="run-a"), provider_id="openai")
         reference = BehaviorFeatureVector.from_snapshot(make_snapshot(run_id="run-b"), provider_id="openai")
-        result = assess_behavior_similarity(
-            candidate, [("gpt-x", "openai", reference)]
-        )
+        result = assess_behavior_similarity(candidate, [("gpt-x", "openai", reference)])
         assert result.unavailable is False
         assert result.entries[0].similarity == pytest.approx(1.0)
         assert result.entries[0].comparable_dimensions == 4
 
     def test_full_score_gap_lowers_similarity(self) -> None:
-        candidate = BehaviorFeatureVector.from_snapshot(
-            make_snapshot(run_id="run-candidate"), provider_id="openai"
+        candidate = BehaviorFeatureVector.from_snapshot(make_snapshot(run_id="run-candidate"), provider_id="openai")
+        reference_profile = make_profile(
+            scores=dict.fromkeys(
+                (
+                    CapabilityDimension.REASONING,
+                    CapabilityDimension.CODING,
+                    CapabilityDimension.MATH_SCIENCE,
+                    CapabilityDimension.INSTRUCTION_FOLLOWING,
+                ),
+                0.0,
+            )
         )
-        reference_profile = make_profile(scores=dict.fromkeys(
-            (
-                CapabilityDimension.REASONING,
-                CapabilityDimension.CODING,
-                CapabilityDimension.MATH_SCIENCE,
-                CapabilityDimension.INSTRUCTION_FOLLOWING,
-            ),
-            0.0,
-        ))
         reference = BehaviorFeatureVector.from_snapshot(
             make_snapshot(run_id="run-reference", profile=reference_profile),
             provider_id="openai",
@@ -254,21 +250,19 @@ class TestBehaviorSimilarity:
         assert result.unavailable is True
 
     def test_entries_are_ranked_by_similarity(self) -> None:
-        candidate = BehaviorFeatureVector.from_snapshot(
-            make_snapshot(run_id="run-c"), provider_id="openai"
+        candidate = BehaviorFeatureVector.from_snapshot(make_snapshot(run_id="run-c"), provider_id="openai")
+        far_profile = make_profile(
+            scores=dict.fromkeys(
+                (
+                    CapabilityDimension.REASONING,
+                    CapabilityDimension.CODING,
+                    CapabilityDimension.MATH_SCIENCE,
+                    CapabilityDimension.INSTRUCTION_FOLLOWING,
+                ),
+                0.0,
+            )
         )
-        far_profile = make_profile(scores=dict.fromkeys(
-            (
-                CapabilityDimension.REASONING,
-                CapabilityDimension.CODING,
-                CapabilityDimension.MATH_SCIENCE,
-                CapabilityDimension.INSTRUCTION_FOLLOWING,
-            ),
-            0.0,
-        ))
-        near = BehaviorFeatureVector.from_snapshot(
-            make_snapshot(run_id="run-near"), provider_id="openai"
-        )
+        near = BehaviorFeatureVector.from_snapshot(make_snapshot(run_id="run-near"), provider_id="openai")
         far = BehaviorFeatureVector.from_snapshot(
             make_snapshot(run_id="run-far", profile=far_profile), provider_id="openai"
         )
@@ -314,8 +308,7 @@ class TestRoutingStability:
     def test_dominant_model_with_stray_identity_is_mostly_stable(self) -> None:
         snapshot = make_snapshot(
             run_id="run-dominant",
-            items=[_graded_spec(i, model="gpt-x") for i in range(9)]
-            + [_graded_spec(9, model="gpt-y")],
+            items=[_graded_spec(i, model="gpt-x") for i in range(9)] + [_graded_spec(9, model="gpt-y")],
         )
         assessment = assess_routing_stability(snapshot)
         assert assessment.level == RoutingStabilityLevel.MOSTLY_STABLE

@@ -133,9 +133,7 @@ class TestProgressSink:
         assert benchmark_starts and benchmark_starts[0].requests >= 1
 
     @pytest.mark.asyncio
-    async def test_sink_defaults_to_noop_for_cli(
-        self, config: AuditConfig, api_key_env: None, tmp_path: Path
-    ) -> None:
+    async def test_sink_defaults_to_noop_for_cli(self, config: AuditConfig, api_key_env: None, tmp_path: Path) -> None:
         repo = RunArtifactRepository(tmp_path)
         with respx.mock as mock:
             _mock_openai(mock)

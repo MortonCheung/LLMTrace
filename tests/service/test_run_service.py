@@ -163,9 +163,7 @@ class TestCreateEstimate:
 
 class TestLifecycle:
     @pytest.mark.asyncio
-    async def test_full_run_completes_and_persists(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_full_run_completes_and_persists(self, tmp_path: Path) -> None:
         svc = _make_service(tmp_path)
         try:
             record = svc.create(_make_input())
@@ -250,9 +248,7 @@ class TestLifecycle:
                 while asyncio.get_event_loop().time() < deadline:
                     snap = svc.progress(record.run_id)
                     first_item = any(
-                        e["type"] == EVENT_PROGRESS
-                        and e["stage"] == STAGE_BENCHMARK
-                        and e["completed"] == 1
+                        e["type"] == EVENT_PROGRESS and e["stage"] == STAGE_BENCHMARK and e["completed"] == 1
                         for e in snap["events"]
                     )
                     if first_item:

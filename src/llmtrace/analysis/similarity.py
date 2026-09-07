@@ -133,9 +133,7 @@ def _similarity_between(candidate: BehaviorFeatureVector, reference: BehaviorFea
 
     dim_unit_weight = _WEIGHT_DIMENSIONS / len(shared_dims)
     for dim in shared_dims:
-        weighted_diff += dim_unit_weight * abs(
-            candidate.dimension_scores[dim] - reference.dimension_scores[dim]
-        )
+        weighted_diff += dim_unit_weight * abs(candidate.dimension_scores[dim] - reference.dimension_scores[dim])
     active_weight += _WEIGHT_DIMENSIONS
 
     weighted_diff += _WEIGHT_GRADED_RATIO * abs(candidate.graded_ratio - reference.graded_ratio)
@@ -178,9 +176,7 @@ def assess_behavior_similarity(
                 model_id=model_id,
                 provider_id=provider_id,
                 similarity=similarity,
-                comparable_dimensions=len(
-                    set(candidate.dimension_scores) & set(reference_vector.dimension_scores)
-                ),
+                comparable_dimensions=len(set(candidate.dimension_scores) & set(reference_vector.dimension_scores)),
             )
         )
 
