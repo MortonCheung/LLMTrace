@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from llmtrace.config import AuditConfig
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult, ProbeStatus, Severity
-from llmtrace.providers.base import BaseProvider
+
+if TYPE_CHECKING:
+    from llmtrace.providers.base import BaseProvider
 
 
 class ProbeOutcome(BaseModel):

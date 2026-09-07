@@ -1094,3 +1094,55 @@ class TestAnthropicCompletionOptionsMapping:
         async with AnthropicCompatibleProvider(config_anthropic, API_KEY) as provider:
             with pytest.raises(ValueError, match="do_sample=True is not supported"):
                 await provider.complete("claude-3-opus-20240229", [{"role": "user", "content": "Hi"}], options=options)
+
+
+# ---------------------------------------------------------------------------
+# Loopback direct-connection tests (HTTP_PROXY 劫持修复)
+# ---------------------------------------------------------------------------
+
+
+class TestLoopbackDirectConnection:
+    """本机目标直连、远端信任环境代理的单元测试.
+
+    修复背景：httpx AsyncClient 默认 ``trust_env=True`` 会把发往 localhost
+    的请求转交给环境里的 ``HTTP_PROXY``（通常无法回环）导致全部 FAILURE。
+    """
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("http://localhost:8765/v1", True),
+            ("http://127.0.0.1:8765/v1", True),
+            ("http://127.0.0.2:9999/v1", True),
+            ("http://[::1]:8765/v1", True),
+            ("http://0.0.0.0:8765/v1", True),
+            ("http://test.example.com/v1", False),
+            ("https://api.openai.com/v1", False),
+            ("http://192.168.1.10/v1", False),
+        ],
+    )
+    def test_is_loopback_url(self, url: str, expected: bool) -> None:
+        """_is_loopback_url 正确判定本机地址."""
+        from llmtrace.providers.base import _is_loopback_url
+
+        assert _is_loopback_url(url) is expected
+
+    @pytest.mark.asyncio
+    async def test_loopback_client_disables_trust_env(self) -> None:
+        """localhost 目标：客户端直连（trust_env=False），不走环境代理."""
+        config = AuditConfig(
+            protocol=Protocol.OPENAI,
+            base_url="http://127.0.0.1:8765/v1",
+            model="test-model",
+            api_key_env="TEST_KEY",
+            timeout=10.0,
+            max_output_tokens=64,
+        )
+        async with OpenAICompatibleProvider(config, API_KEY) as provider:
+            assert provider.client.trust_env is False
+
+    @pytest.mark.asyncio
+    async def test_remote_client_keeps_trust_env(self, config_openai: AuditConfig) -> None:
+        """远端目标：保留 httpx 默认 trust_env=True，支持用户环境代理."""
+        async with OpenAICompatibleProvider(config_openai, API_KEY) as provider:
+            assert provider.client.trust_env is True
