@@ -102,6 +102,75 @@ def test_audit_dry_run() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 默认值（§6 / §7）：protocol=openai，api-key-env=LLMTRACE_API_KEY
+# ---------------------------------------------------------------------------
+
+
+def test_run_help_shows_default_protocol() -> None:
+    """run --help 展示默认 protocol=openai 与默认 api-key env."""
+    result = runner.invoke(app, ["run", "--help"])
+    stdout = _strip_ansi(result.stdout)
+    assert result.exit_code == 0
+    assert "default: openai" in stdout
+    assert "LLMTRACE_API_KEY" in stdout
+
+
+def test_audit_help_shows_default_protocol() -> None:
+    """audit --help 同样展示默认 protocol=openai 与默认 api-key env."""
+    result = runner.invoke(app, ["audit", "--help"])
+    stdout = _strip_ansi(result.stdout)
+    assert result.exit_code == 0
+    assert "default: openai" in stdout
+    assert "LLMTRACE_API_KEY" in stdout
+
+
+def test_run_dry_run_without_protocol_uses_default() -> None:
+    """run --dry-run 未传 --protocol 时默认 openai，未传 --api-key-env 时也能 dry-run."""
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--base-url",
+            "http://test.example.com",
+            "--model",
+            "test-model",
+            "--dry-run",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Dry Run" in result.stdout
+    assert "openai" in result.stdout
+    assert "未发送任何请求" in result.stdout
+
+
+def test_audit_dry_run_without_protocol_uses_default() -> None:
+    """audit --dry-run 未传 --protocol 时默认 openai."""
+    result = runner.invoke(
+        app,
+        [
+            "audit",
+            "--base-url",
+            "http://test.example.com",
+            "--model",
+            "test-model",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "openai" in result.stdout
+
+
+def test_reference_capture_help_shows_default_protocol() -> None:
+    """reference capture --help 展示默认 protocol=openai 与默认 api-key env."""
+    result = runner.invoke(app, ["reference", "capture", "--help"])
+    stdout = _strip_ansi(result.stdout)
+    assert result.exit_code == 0
+    assert "default: openai" in stdout
+    assert "LLMTRACE_API_KEY" in stdout
+
+
+# ---------------------------------------------------------------------------
 # audit 错误场景测试
 # ---------------------------------------------------------------------------
 
