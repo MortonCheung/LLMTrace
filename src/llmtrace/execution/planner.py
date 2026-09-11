@@ -19,6 +19,7 @@ from llmtrace.execution.protocol_audit import (
     protocol_output_token_ceiling,
     protocol_probe_request_count,
 )
+from llmtrace.fingerprint.models import FingerprintProfile, repetitions_for_profile
 from llmtrace.scoring.policy import CapabilityScoringPolicy
 from llmtrace.security.redaction import redact_url
 
@@ -56,18 +57,37 @@ def build_unified_execution_plan(
     reference_set_content_sha256: str | None = None,
     calibration_policy_id: str | None = None,
     calibration_policy_version: str | None = None,
+    fingerprint_profile: FingerprintProfile | None = None,
+    fingerprint_set_id: str | None = None,
+    fingerprint_set_version: str | None = None,
+    fingerprint_set_content_sha256: str | None = None,
+    fingerprint_probe_count: int = 0,
 ) -> UnifiedExecutionPlan:
     """Build the complete execution plan before any API request is sent.
 
     When reference_set / calibration parameters are provided the plan_id
     binds them, so a different ReferenceSet or calibration policy produces
     a different artifact identity.
+
+    When ``fingerprint_profile`` is provided the plan additionally reserves
+    ``fingerprint_probe_count x repetitions(profile)`` requests, so the
+    hard ``maximum_requests`` ceiling covers protocol + benchmark +
+    fingerprint.  A profile without a probe count (or vice versa) is
+    rejected by ``UnifiedExecutionPlan`` — the budget is never silently
+    under-counted.
     """
     resolved_policy = policy if policy is not None else CapabilityScoringPolicy.create_v1()
 
     protocol_requests = protocol_probe_request_count(config)
     benchmark_requests = QUICK_SUITE_BENCHMARK_REQUESTS
-    planned_requests = protocol_requests + benchmark_requests
+
+    # Repetitions come from the profile (one source of truth); the probe count
+    # comes from the suite that was actually resolved during preflight.
+    fingerprint_requests = (
+        fingerprint_probe_count * repetitions_for_profile(fingerprint_profile) if fingerprint_profile is not None else 0
+    )
+
+    planned_requests = protocol_requests + benchmark_requests + fingerprint_requests
 
     token_ceiling = protocol_output_token_ceiling(config) + benchmark_requests * 512
 
@@ -96,6 +116,10 @@ def build_unified_execution_plan(
         plan_id_input["calibration_policy_id"] = calibration_policy_id
     if calibration_policy_version is not None:
         plan_id_input["calibration_policy_version"] = calibration_policy_version
+    if fingerprint_profile is not None:
+        plan_id_input["fingerprint_profile"] = str(fingerprint_profile.value)
+    if fingerprint_set_content_sha256 is not None:
+        plan_id_input["fingerprint_set_content_sha256"] = fingerprint_set_content_sha256
 
     plan = UnifiedExecutionPlan(
         plan_id=hashlib.sha256(
@@ -126,5 +150,10 @@ def build_unified_execution_plan(
         reference_set_id=reference_set_id,
         reference_set_version=reference_set_version,
         reference_set_content_sha256=reference_set_content_sha256,
+        fingerprint_requests=fingerprint_requests,
+        fingerprint_profile=(str(fingerprint_profile.value) if fingerprint_profile is not None else None),
+        fingerprint_set_id=fingerprint_set_id,
+        fingerprint_set_version=fingerprint_set_version,
+        fingerprint_set_content_sha256=fingerprint_set_content_sha256,
     )
     return plan

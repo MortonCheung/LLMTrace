@@ -288,8 +288,153 @@
 </div>
 {% endif %}
 
+{% if fingerprint_evidence %}
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + 1 }}. Model Fingerprint Evidence (Experimental)</h2>
+<div class="disclaimer">
+  <strong>实验性：</strong>{{ fingerprint_evidence.disclaimer }}
+</div>
+<div class="meta">
+  {% if fingerprint_evidence.suite %}
+  <p>Fingerprint Suite: {{ fingerprint_evidence.suite.suite_id }} {{ fingerprint_evidence.suite.suite_version }}
+    {% if fingerprint_evidence.suite.content_sha256 %}| content sha256: {{ fingerprint_evidence.suite.content_sha256 }}{% endif %}</p>
+  {% endif %}
+  {% if fingerprint_evidence.reference_set %}
+  <p>Fingerprint Set: {{ fingerprint_evidence.reference_set.fingerprint_set_id }} {{ fingerprint_evidence.reference_set.fingerprint_set_version }}
+    | members: {{ fingerprint_evidence.reference_set.member_count }}
+    {% if fingerprint_evidence.reference_set.content_sha256 %}| content sha256: {{ fingerprint_evidence.reference_set.content_sha256 }}{% endif %}</p>
+  {% else %}
+  <p>Fingerprint Set: <strong>UNAVAILABLE</strong>（本次没有可用的参考集，因此只报告候选自身的行为观测）</p>
+  {% endif %}
+  {% if fingerprint_evidence.decision_policy %}
+  <p>Decision Policy: {{ fingerprint_evidence.decision_policy.policy_id }} {{ fingerprint_evidence.decision_policy.policy_version }}
+    | validated: {{ fingerprint_evidence.decision_policy.validated }}
+    | min comparable probes: {{ fingerprint_evidence.decision_policy.minimum_comparable_probes }}
+    | distance threshold: {{ "%.4f"|format(fingerprint_evidence.decision_policy.distance_threshold) }}</p>
+  {% else %}
+  <p>Decision Policy: <strong>UNAVAILABLE</strong>（本次没有通过 held-out validation 的 policy，因此不产生 verified identity verdict）</p>
+  {% endif %}
+  {% if fingerprint_evidence.repetitions is not none %}
+  <p>Repetitions: {{ fingerprint_evidence.repetitions }}</p>
+  {% endif %}
+  {% if fingerprint_evidence.probe_coverage %}
+  <p>Probe Coverage: {{ fingerprint_evidence.probe_coverage.compared_probes }} / {{ fingerprint_evidence.probe_coverage.total_probes }}
+    ({{ "%.1f"|format(fingerprint_evidence.probe_coverage.ratio * 100) }}%)</p>
+  {% endif %}
+  {% if fingerprint_evidence.invalid_outcome_count is not none %}
+  <p>Invalid Outcomes (candidate capture): {{ fingerprint_evidence.invalid_outcome_count }}</p>
+  {% endif %}
+</div>
+<div class="meta">
+  <p>Verdict: <strong>{{ fingerprint_evidence.verdict.match_status or "N/A" }}</strong>
+    | claim verdict produced: {{ fingerprint_evidence.verdict.claim_verdict_produced }}
+    | reference identities: {{ fingerprint_evidence.verdict.reference_identity_count }}</p>
+  {% if fingerprint_evidence.claimed_model_id %}
+  <p>Claimed Model: {{ fingerprint_evidence.claimed_model_id }}
+    {% if fingerprint_evidence.claimed_reference_distance is not none %}| claimed reference distance: {{ "%.4f"|format(fingerprint_evidence.claimed_reference_distance) }}{% else %}| no capture for the claimed model in this fingerprint set{% endif %}</p>
+  {% endif %}
+</div>
+{% if fingerprint_evidence.verdict.notes %}
+<ul>
+  {% for note in fingerprint_evidence.verdict.notes %}<li>{{ note }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% if fingerprint_evidence.jsd_reference %}
+<div class="meta">
+  <p>JSD Reference ({{ fingerprint_evidence.jsd_reference.basis }}):
+    {{ fingerprint_evidence.jsd_reference.provider_id }} / {{ fingerprint_evidence.jsd_reference.model_id }}
+    | comparable probes: {{ fingerprint_evidence.jsd_reference.comparable_probes }}
+    {% if fingerprint_evidence.aggregate_jsd is not none %}| aggregate JSD: {{ "%.4f"|format(fingerprint_evidence.aggregate_jsd) }}{% endif %}</p>
+</div>
+<table>
+  <tr><th>Probe</th><th>Weight</th><th>Comparable</th><th>JSD</th><th>Candidate Samples</th><th>Invalid</th><th>Note</th></tr>
+  {% for probe in fingerprint_evidence.per_probe_jsd %}
+  <tr>
+    <td>{{ probe.probe_id }}</td>
+    <td>{{ "%.2f"|format(probe.weight) }}</td>
+    <td>{{ "yes" if probe.comparable else "no" }}</td>
+    <td>{% if probe.distance is not none %}{{ "%.4f"|format(probe.distance) }}{% else %}N/A{% endif %}</td>
+    <td>{% if probe.candidate_sample_count is not none %}{{ probe.candidate_sample_count }}{% else %}N/A{% endif %}</td>
+    <td>{% if probe.candidate_invalid_count is not none %}{{ probe.candidate_invalid_count }}{% else %}N/A{% endif %}</td>
+    <td>{{ probe.note or "" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% if fingerprint_evidence.top_k %}
+<h3>Behavioral Nearest References (Top-K)</h3>
+<table>
+  <tr><th>Rank</th><th>Provider</th><th>Model</th><th>Distance</th><th>Similarity</th><th>Comparable Probes</th></tr>
+  {% for entry in fingerprint_evidence.top_k %}
+  <tr>
+    <td>{{ entry.rank }}</td>
+    <td>{{ entry.provider_id }}</td>
+    <td>{{ entry.model_id }}</td>
+    <td>{{ "%.4f"|format(entry.distance) }}</td>
+    <td>{{ "%.4f"|format(entry.similarity) }}</td>
+    <td>{{ entry.comparable_probes }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="disclaimer">
+  <strong>语义边界：</strong>Top-K 只是“行为分布最接近的参考”排序窗口，不是 Top-1 身份判定；排名第一不代表上游模型就是该参考。
+</div>
+{% endif %}
+{% if fingerprint_evidence.routing %}
+<h3>Routing Signals</h3>
+<div class="meta">
+  <p>Level: <strong>{{ fingerprint_evidence.routing.level }}</strong>
+    | experimental: {{ fingerprint_evidence.routing.experimental }}
+    | policy: {{ fingerprint_evidence.routing.policy_id }} {{ fingerprint_evidence.routing.policy_version }}</p>
+  <p>Items: {{ fingerprint_evidence.routing.item_count }}
+    | reported model coverage: {{ "%.2f"|format(fingerprint_evidence.routing.response_model_coverage) }}
+    | distinct response models: {{ fingerprint_evidence.routing.distinct_response_models }}
+    | dominant ratio: {% if fingerprint_evidence.routing.dominant_model_ratio is not none %}{{ "%.2f"|format(fingerprint_evidence.routing.dominant_model_ratio) }}{% else %}N/A{% endif %}
+    | failure ratio: {{ "%.2f"|format(fingerprint_evidence.routing.failure_ratio) }}
+    | temporal: {{ fingerprint_evidence.routing.temporal_status }}</p>
+</div>
+<table>
+  <tr><th>Signal</th><th>Strength</th><th>Observed</th><th>Reason</th></tr>
+  {% for signal in fingerprint_evidence.routing.signals %}
+  <tr>
+    <td>{{ signal.signal_id }}</td>
+    <td>{{ signal.strength }}</td>
+    <td>{{ "yes" if signal.observed else "no" }}</td>
+    <td>{{ signal.reason }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if fingerprint_evidence.routing.reasons %}
+<ul>
+  {% for reason in fingerprint_evidence.routing.reasons %}<li>{{ reason }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% if fingerprint_evidence.routing.limitations %}
+<ul>
+  {% for limitation in fingerprint_evidence.routing.limitations %}<li>{{ limitation }}</li>{% endfor %}
+</ul>
+{% endif %}
+{% endif %}
+{% if fingerprint_evidence.confidence %}
+<h3>Confidence Bundle</h3>
+<table>
+  <tr><th>Component</th><th>Level</th><th>Reasons</th><th>Limitations</th></tr>
+  {% for name, component in fingerprint_evidence.confidence.items() %}
+  <tr>
+    <td>{{ name }}</td>
+    <td>{{ component.level }}</td>
+    <td>{{ component.reasons | join('; ') }}</td>
+    <td>{{ component.limitations | join('; ') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<div class="disclaimer">
+  <strong>语义边界：</strong>四个组件各自独立，不合并成单一置信度数字；组件缺失时标记为 unavailable，不做推测。
+</div>
+{% endif %}
+{% endif %}
+
 {% if behavior_drift %}
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + 1 }}. Behavior Drift</h2>
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + (1 if fingerprint_evidence else 0) + 1 }}. Behavior Drift</h2>
 <div class="meta">
   <p>Overall Drift Level: <strong>{{ behavior_drift.drift_level }}</strong></p>
   <p>Baseline Run: {{ behavior_drift.baseline_run_id }} | Current Run: {{ behavior_drift.current_run_id }}</p>
@@ -337,7 +482,7 @@
 </div>
 {% endif %}
 
-<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
+<h2>{{ (7 if benchmarks else 6) + (1 if reference_comparison else 0) + (1 if capability_profile else 0) + (1 if claimed_model_gap else 0) + (1 if fingerprint_evidence else 0) + (1 if behavior_drift else 0) + 1 }}. 限制和免责声明</h2>
 <div class="disclaimer">
   <h3>重要限制</h3>
   <ul>
@@ -348,6 +493,7 @@
     <li>低风险不等于服务商已被证明可信。</li>
     <li>延迟受网络、负载、缓存和队列影响。</li>
     <li>模型别名可能造成名称不一致。</li>
+    <li>行为指纹证据是实验性的：它只描述"行为分布最接近的参考"，不构成模型身份结论。</li>
   </ul>
   <p style="margin-top: 8px;"><strong>LLMTrace 不声称可以识别真实上游模型。本报告仅供审计参考，不构成法律或商业建议。</strong></p>
 </div>

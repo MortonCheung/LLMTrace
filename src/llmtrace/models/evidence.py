@@ -19,6 +19,7 @@ class EvidenceType(StrEnum):
     STREAMING_BASELINE = "streaming_baseline"
     STREAMING_COMPARISON = "streaming_comparison"
     CONNECTIVITY = "connectivity"
+    FINGERPRINT_PROBE = "fingerprint_probe"
 
 
 class HTTPEvidence(BaseModel):
