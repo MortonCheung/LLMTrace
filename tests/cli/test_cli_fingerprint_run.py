@@ -67,8 +67,8 @@ def _strip_ansi(text: str) -> str:
 
 
 def _compact(text: str) -> str:
-    """去掉全部空白与表格分隔符：Rich 会对长值折行，整段断言必须先归一化."""
-    return "".join(text.split()).translate(_TABLE_BORDER)
+    """去掉 ANSI、全部空白与表格分隔符：Rich 会按终端宽度折行，整段断言必须先归一化."""
+    return "".join(_strip_ansi(text).split()).translate(_TABLE_BORDER)
 
 
 def _fingerprint_set(

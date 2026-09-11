@@ -64,8 +64,8 @@ def _strip_ansi(text: str) -> str:
 
 
 def _compact(text: str) -> str:
-    """去掉所有空白，便于跨 Rich 折行做子串断言."""
-    return re.sub(r"\s+", "", text)
+    """去掉 ANSI 与所有空白，便于跨 Rich 折行做子串断言."""
+    return re.sub(r"\s+", "", _strip_ansi(text))
 
 
 def _capture_args(
