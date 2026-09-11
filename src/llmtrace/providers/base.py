@@ -5,16 +5,20 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import httpx
 
 from llmtrace.benchmarks.models import CompletionOptions
 from llmtrace.config import AuditConfig
-from llmtrace.execution.budget import RequestBudget
-from llmtrace.execution.evidence import EvidenceRecorder
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.security.redaction import redact_headers, redact_json_body, redact_url
 from llmtrace.utilities.hashing import sha256_hash
+
+if TYPE_CHECKING:
+    from llmtrace.execution.budget import RequestBudget
+    from llmtrace.execution.evidence import EvidenceRecorder
 
 # 需要从响应头提取 request_id 的 header 名称（大小写不敏感）
 _REQUEST_ID_HEADERS = [
@@ -25,6 +29,16 @@ _REQUEST_ID_HEADERS = [
     "x-amzn-requestid",
     "cf-ray",
 ]
+
+
+def _is_loopback_url(url: str) -> bool:
+    """判断目标 URL 是否指向本机（localhost/127.x/::1）。
+
+    本机目标必须直连：环境里常见的 ``HTTP_PROXY`` 会把发往 localhost 的请求
+    转交给代理（通常无法回环）而失败；真实第三方端点仍信任环境代理。
+    """
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("localhost", "::1", "0.0.0.0") or host.startswith("127.")
 
 
 def _extract_request_id(headers: dict[str, str]) -> str | None:
@@ -122,7 +136,12 @@ class BaseProvider(ABC):
         return self._client
 
     async def __aenter__(self) -> BaseProvider:
-        self._client = httpx.AsyncClient(timeout=self.config.timeout)
+        # 本机目标直连（不走环境代理），防止 HTTP_PROXY 劫持 localhost 请求；
+        # 真实远端端点保留 httpx 默认的 trust_env 行为以支持用户代理。
+        self._client = httpx.AsyncClient(
+            timeout=self.config.timeout,
+            trust_env=not _is_loopback_url(self.config.base_url),
+        )
         return self
 
     async def __aexit__(self, *args: object) -> None:

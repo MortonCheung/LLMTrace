@@ -36,10 +36,14 @@ from llmtrace.benchmarks.models import (
     TaskStatus,
     aggregate_item_results,
 )
+from llmtrace.execution.progress import RunCancelledError
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.scoring.models import CapabilityDimension
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from llmtrace.execution.progress import CancellationToken
     from llmtrace.providers.base import BaseProvider
     from llmtrace.scoring.aggregator import TaskScoringRegistry
 
@@ -607,8 +611,17 @@ class QuickSuiteAdapter(BenchmarkAdapter):
         self,
         task_spec: TaskSpec,
         provider: BaseProvider,
+        *,
+        cancel_token: CancellationToken | None = None,
+        on_item_complete: Callable[[], None] | None = None,
     ) -> TaskAttempt:
-        """Execute a Quick Suite task against the given provider."""
+        """Execute a Quick Suite task against the given provider.
+
+        ``cancel_token`` (cooperative): checked before every item so a web
+        user's Cancel lands at the next item boundary.  ``on_item_complete``
+        fires after each finished item (graded or failed) so the caller can
+        track benchmark progress.
+        """
         task_id = task_spec.task_id
         task_def = _QUICK_TASK_DEFS.get(task_id)
         if task_def is None:
@@ -628,6 +641,8 @@ class QuickSuiteAdapter(BenchmarkAdapter):
         task_failure: AdapterFailure | None = None
 
         for idx, item_data in enumerate(items_data):
+            if cancel_token is not None:
+                cancel_token.throw_if_cancelled()
             prompt = item_data["prompt"]
             source_sample_id = item_data["source_sample_id"]
             input_sha256 = item_data["input_sha256"]
@@ -704,6 +719,10 @@ class QuickSuiteAdapter(BenchmarkAdapter):
                         )
                     )
 
+            except RunCancelledError:
+                # A user cancellation must propagate — never degrade into a
+                # per-item FAILURE that would silently lose cancel semantics.
+                raise
             except Exception as exc:
                 item_failure = AdapterFailure(
                     error_code=type(exc).__name__.upper(),
@@ -725,6 +744,9 @@ class QuickSuiteAdapter(BenchmarkAdapter):
                         grader_id="quick-suite",
                     )
                 )
+            finally:
+                if on_item_complete is not None:
+                    on_item_complete()
 
         finished_at = datetime.now(UTC)
 

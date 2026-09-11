@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}New Audit — LLMTrace{% endblock %}
+{% block content %}
+<h1>New Audit</h1>
+<p class="muted">对第三方 AI API 的端点做一次黑盒模型审计（协议检查 + 能力基准）。API Key 只在本进程内存中保留，绝不落盘。</p>
+
+<form id="audit-form" class="card" autocomplete="off">
+  <div class="field-group">
+    <label for="f-base-url">Base URL <span class="req">*</span></label>
+    <input id="f-base-url" name="base_url" type="text"
+           placeholder="https://api.example.com/v1"
+           {% if demo %}value="{{ demo.base_url }}"{% endif %} required>
+    <small>可含 URL 凭据；仅用于本次进程内请求，落盘时自动脱敏。</small>
+  </div>
+
+  <div class="field-group">
+    <label for="f-model">Model <span class="req">*</span></label>
+    <input id="f-model" name="model" type="text" placeholder="model-id"
+           {% if demo %}value="{{ demo.model }}"{% endif %} required>
+  </div>
+
+  <div class="field-group">
+    <label for="f-api-key">API Key <span class="req">*</span></label>
+    <input id="f-api-key" name="api_key" type="password" placeholder="sk-..."
+           {% if demo %}value="{{ demo.api_key }}"{% endif %} required>
+    <small>只存在于内存；不会进入数据库、报告或任何持久化工件。</small>
+  </div>
+
+  <div class="field-row">
+    <div class="field-group">
+      <label for="f-protocol">Protocol</label>
+      <select id="f-protocol" name="protocol">
+        <option value="openai">openai</option>
+        <option value="anthropic">anthropic</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label for="f-auth-style">Auth style</label>
+      <select id="f-auth-style" name="auth_style">
+        <option value="auto">auto</option>
+        <option value="bearer">bearer</option>
+        <option value="x-api-key">x-api-key</option>
+        <option value="both">both</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="field-row">
+    <div class="field-group">
+      <label for="f-repeat">Repeat</label>
+      <input id="f-repeat" name="repeat" type="number" min="1" max="20" value="3">
+    </div>
+    <div class="field-group">
+      <label for="f-timeout">Timeout (s)</label>
+      <input id="f-timeout" name="timeout" type="number" min="1" max="600" value="30" step="0.5">
+    </div>
+    <div class="field-group">
+      <label class="check">
+        <input id="f-streaming" name="check_streaming" type="checkbox" checked>
+        Verify streaming
+      </label>
+    </div>
+  </div>
+
+  <div class="field-group">
+    <label for="f-reference">Reference set（可选，用于校准对比）</label>
+    <select id="f-reference" name="reference_set_path">
+      <option value="">— 无（raw capability）—</option>
+    </select>
+    <small>加载 data root <code>references/sets/</code> 下的 ReferenceSet。</small>
+  </div>
+
+  <div class="actions">
+    <button type="submit" id="btn-submit" class="primary">Create &amp; Estimate</button>
+  </div>
+  <div id="form-error" class="error-box" hidden></div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.LLMTRACE = { demo: {{ "true" if demo else "false" }} };
+</script>
+{% endblock %}

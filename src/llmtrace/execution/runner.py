@@ -34,6 +34,25 @@ from llmtrace.execution.models import (
     UnifiedRunStatus,
 )
 from llmtrace.execution.planner import build_unified_execution_plan
+from llmtrace.execution.progress import (
+    EVENT_CANCELLED,
+    EVENT_DONE,
+    EVENT_FAILED,
+    EVENT_PROGRESS,
+    EVENT_STAGE,
+    STAGE_BENCHMARK,
+    STAGE_CALIBRATION,
+    STAGE_CANCELLED,
+    STAGE_DONE,
+    STAGE_FAILED,
+    STAGE_PROTOCOL,
+    STAGE_REPORTING,
+    STAGE_SCORING,
+    CancellationToken,
+    ProgressEvent,
+    ProgressSink,
+    RunCancelledError,
+)
 from llmtrace.execution.protocol_audit import ProtocolAuditExecutor
 from llmtrace.execution.quick_suite import QuickSuiteRunner
 from llmtrace.providers.factory import create_provider
@@ -127,6 +146,8 @@ class UnifiedAuditRunner:
         reference_snapshot_path: Path | None = None,
         reference_set_path: Path | None = None,
         max_wall_seconds: float | None = None,
+        progress_sink: ProgressSink | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> None:
         self._code_backend = code_backend if code_backend is not None else create_code_execution_backend()
         self._config = config
@@ -144,11 +165,56 @@ class UnifiedAuditRunner:
         self._calibration_identity_count = 0
         self._scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
         self._budget: RequestBudget | None = None
+        # v0.5 optional observability hooks: both default to None so the CLI
+        # keeps today's exact semantics (no sink, no cooperative cancel).
+        self._sink = progress_sink
+        self._cancel_token = cancel_token
 
     @property
     def request_budget(self) -> RequestBudget | None:
         """The run's request budget, if execution has started."""
         return self._budget
+
+    # -- Observability helpers (no-op when no sink / token provided) ---------
+
+    def _emit(
+        self,
+        event_type: str,
+        stage: str,
+        message: str | None = None,
+        *,
+        completed: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        """Publish a progress event when a sink is attached (no-op for CLI)."""
+        if self._sink is None:
+            return
+        requests = self._budget.consumed_requests if self._budget is not None else 0
+        self._sink(
+            ProgressEvent(
+                type=event_type,
+                stage=stage,
+                message=message,
+                completed=completed,
+                total=total,
+                requests=requests,
+            )
+        )
+
+    def _check_cancelled(self) -> None:
+        """Cooperative cancellation checkpoint at a stage boundary."""
+        if self._cancel_token is not None:
+            self._cancel_token.throw_if_cancelled()
+
+    def _benchmark_progress(self, completed: int, total: int) -> None:
+        """Item-level benchmark progress (called per finished item)."""
+        self._emit(
+            EVENT_PROGRESS,
+            STAGE_BENCHMARK,
+            message=f"benchmark item {completed}/{total}",
+            completed=completed,
+            total=total,
+        )
 
     async def run(self) -> UnifiedRunResult:
         """Run the whole pipeline; on wall-clock timeout salvage a PARTIAL result."""
@@ -156,12 +222,20 @@ class UnifiedAuditRunner:
         started_at = datetime.now(UTC)
 
         try:
+            self._check_cancelled()
             if self._max_wall_seconds is not None:
                 async with asyncio.timeout(self._max_wall_seconds):
                     return await self._execute(execution_id, started_at)
             return await self._execute(execution_id, started_at)
         except TimeoutError:
             return self._timed_out_result(execution_id, started_at)
+        except RunCancelledError:
+            return self._cancelled_result(execution_id, started_at)
+        except Exception as exc:
+            # Surface unexpected failures to an attached sink (SSE) without
+            # swallowing the error — the caller still sees the original raise.
+            self._emit(EVENT_FAILED, STAGE_FAILED, message=f"run failed: {type(exc).__name__}")
+            raise
 
     # -- Full pipeline -----------------------------------------------------
 
@@ -175,6 +249,7 @@ class UnifiedAuditRunner:
         # Preflight never sends HTTP, never creates a provider, and never
         # consumes budget, so ordering it first is safe.
         self._preflight()
+        self._check_cancelled()
 
         plan = self._plan()
         budget = RequestBudget(plan.maximum_requests)
@@ -192,6 +267,8 @@ class UnifiedAuditRunner:
         # *open* provider to both executors, and closes it on any exit path
         # (success, exception, timeout, cancellation).
         async with provider:
+            self._check_cancelled()
+            self._emit(EVENT_STAGE, STAGE_PROTOCOL, message="protocol audit started")
             protocol_outcome = await ProtocolAuditExecutor(self._config, provider).run_open_provider()
             audit_result = protocol_outcome.result
             if protocol_outcome.blocking_failure:
@@ -205,12 +282,26 @@ class UnifiedAuditRunner:
             benchmark_sections: list[BenchmarkReportSection] = []
 
             if not protocol_outcome.blocking_failure:
-                suite_runner = QuickSuiteRunner(provider, code_backend=self._code_backend)
+                self._check_cancelled()
+                self._emit(
+                    EVENT_STAGE,
+                    STAGE_BENCHMARK,
+                    message="quick suite benchmark started",
+                    completed=0,
+                    total=plan.benchmark_requests,
+                )
+                suite_runner = QuickSuiteRunner(
+                    provider,
+                    code_backend=self._code_backend,
+                    cancel_token=self._cancel_token,
+                    on_item_progress=self._benchmark_progress,
+                )
                 suite_result = await suite_runner.run()
                 benchmark_plans = list(suite_result.plans)
                 benchmark_runs = list(suite_result.run_results)
                 benchmark_sections = list(suite_result.report_sections)
 
+                self._emit(EVENT_STAGE, STAGE_SCORING, message="scoring capability profile")
                 registry = self._quick_registry()
                 capability_profile = aggregate_capability_profile(benchmark_runs, registry, self._policy, strict=True)
 
@@ -239,6 +330,7 @@ class UnifiedAuditRunner:
         # ---- REFERENCE CALIBRATION ----------------------------------------
         claimed_model_gap = None
         if capability_profile is not None and self._calibration_context is not None:
+            self._emit(EVENT_STAGE, STAGE_CALIBRATION, message="reference calibration")
             if not self._measurement_allows_formal_calibration(measurement, plan):
                 # B2: a formal 0–100 calibrated score may never sit on a
                 # partial candidate measurement.  This is a skip, not a run
@@ -332,6 +424,7 @@ class UnifiedAuditRunner:
         # whole run (protocol + benchmark), not just the probe subset.
         audit_result.evidence = list(unified_evidence)
 
+        self._emit(EVENT_STAGE, STAGE_REPORTING, message="writing report artifacts")
         self._write_artifacts(
             result,
             actual_requests=actual_requests,
@@ -339,6 +432,7 @@ class UnifiedAuditRunner:
             baseline_snapshot_sha=baseline_snapshot_sha,
             reference_snapshot_id=reference_snapshot_id,
         )
+        self._emit(EVENT_DONE, STAGE_DONE, message="run completed")
         return result
 
     # -- Preflight -------------------------------------------------------------
@@ -689,7 +783,7 @@ class UnifiedAuditRunner:
         return UnifiedRunStatus.PARTIAL
 
     def _timed_out_result(self, execution_id: str, started_at: datetime) -> UnifiedRunResult:
-        return UnifiedRunResult(
+        result = UnifiedRunResult(
             execution_id=execution_id,
             status=UnifiedRunStatus.FAILED,
             plan=self._plan(),
@@ -698,6 +792,24 @@ class UnifiedAuditRunner:
             started_at=started_at,
             finished_at=datetime.now(UTC),
         )
+        self._emit(EVENT_FAILED, STAGE_FAILED, message="execution exceeded the wall-clock limit")
+        return result
+
+    def _cancelled_result(self, execution_id: str, started_at: datetime) -> UnifiedRunResult:
+        """Cooperative cancel: return a CANCELLED result with no calibrated
+        score and no report artifacts — measurement is intentionally partial
+        and must never masquerade as a completed run."""
+        result = UnifiedRunResult(
+            execution_id=execution_id,
+            status=UnifiedRunStatus.CANCELLED,
+            plan=self._plan(),
+            evidence=tuple(self._recorder.list()),
+            warnings=(self._scrubber.scrub_text("run cancelled by user"),),
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+        )
+        self._emit(EVENT_CANCELLED, STAGE_CANCELLED, message="run cancelled by user")
+        return result
 
     def _write_artifacts(
         self,

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}LLMTrace{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">LLMTrace</a>
+    <nav class="nav">
+      <a href="/" {% if active_page == "new" %}class="active"{% endif %}>New Audit</a>
+      <a href="/history" {% if active_page == "history" %}class="active"{% endif %}>History</a>
+    </nav>
+    <span class="version">v0.5 local MVP</span>
+  </header>
+  {% if demo %}
+  <div class="demo-banner">DEMO — 进程内 Mock 端点，不发送真实请求，能力分仅供参考</div>
+  {% endif %}
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

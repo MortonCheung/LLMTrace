@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import secrets
+from typing import TYPE_CHECKING
 
 from llmtrace.config import AuditConfig
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import ProbeStatus, Severity
 from llmtrace.probes.base import BaseProbe, ProbeOutcome
-from llmtrace.providers.base import BaseProvider
+
+if TYPE_CHECKING:
+    from llmtrace.providers.base import BaseProvider
 
 
 class BaselineProbe(BaseProbe):

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from llmtrace.config import AuditConfig, Protocol
 from llmtrace.models.findings import ProbeStatus, Severity
 from llmtrace.probes.base import BaseProbe, ProbeOutcome
-from llmtrace.providers.base import BaseProvider
 from llmtrace.security.redaction import check_api_key
+
+if TYPE_CHECKING:
+    from llmtrace.providers.base import BaseProvider
 
 
 class ConfigPrecheckProbe(BaseProbe):
