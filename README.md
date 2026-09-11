@@ -2,7 +2,7 @@
 
 面向第三方 AI API、中转站和代理服务的黑盒模型审计工具。
 
-## Quick Start（本地 Web）
+## Quick Start（CLI）
 
 ```bash
 git clone https://github.com/MortonCheung/LLMTrace.git
@@ -11,6 +11,21 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 
+export LLMTRACE_API_KEY="your-key"
+llmtrace run \
+  --base-url https://api.example.com/v1 \
+  --model claimed-model \
+  --yes
+```
+
+最小参数集：只需 Base URL、声明模型和一个 API Key 环境变量（默认 `openai` 协议与
+`LLMTRACE_API_KEY`，可用 `-p`/`-k` 覆盖）。`llmtrace run` 会展示执行计划、实时进度
+并给出带回溯证据的审计报告。想先看计划不发送请求：加 `--dry-run`；
+本机环境异常先执行 `llmtrace doctor`。
+
+### Web 界面（可选）
+
+```bash
 llmtrace web
 ```
 
@@ -25,17 +40,6 @@ llmtrace web --demo
 ```
 
 要求 Python 3.11+。
-
-### CLI Quick Start（高级用户）
-
-```bash
-export MY_API_KEY="your-key"
-llmtrace run \
-  --protocol openai \
-  --base-url https://api.example.com/v1 \
-  --model claimed-model \
-  --api-key-env MY_API_KEY
-```
 
 ## 当前版本能做什么
 
@@ -157,12 +161,11 @@ v0.3-E 一键统一审计执行链（`llmtrace run`）、v0.4 受信任参考体
 ### 一键统一审计（推荐）
 
 ```bash
-export MY_API_KEY="your-key"
+export LLMTRACE_API_KEY="your-key"
 llmtrace run \
-  --protocol openai \
   --base-url https://api.example.com/v1 \
   --model claimed-model \
-  --api-key-env MY_API_KEY
+  --yes
 ```
 
 一次 `run` 大约包含：协议探针（若干）+ Quick Suite 32 题 benchmark。实际请求数以
@@ -173,16 +176,14 @@ llmtrace run \
 
 ```bash
 llmtrace run \
-  --protocol openai \
   --base-url https://api.example.com/v1 \
   --model claimed-model \
-  --api-key-env MY_API_KEY \
   --reference-set references/sets/refset-v1_0.1.0.json
 ```
 
 ```bash
 # 只显示执行计划，不发送任何请求（0 HTTP、0 工件、不要求 API key 存在）
-llmtrace run --protocol openai --base-url https://api.example.com/v1 --model demo --api-key-env MY_API_KEY --dry-run
+llmtrace run --base-url https://api.example.com/v1 --model demo --dry-run
 ```
 
 ### OpenAI-compatible 接口审计（protocol-only，legacy/advanced）

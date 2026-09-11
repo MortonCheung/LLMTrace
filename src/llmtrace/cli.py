@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -14,6 +15,8 @@ from llmtrace.adapters.code_execution import SandboxUnavailableError
 from llmtrace.analysis.drift import compare_reports
 from llmtrace.config import AuditConfig, AuthStyle, Protocol
 from llmtrace.constants import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_PROTOCOL,
     DEFAULT_REPEAT_COUNT,
     DEFAULT_TIMEOUT,
     MAX_OUTPUT_TOKENS_DEFAULT,
@@ -32,6 +35,8 @@ from llmtrace.reference.reference_set import (
     ReferenceSetError,
 )
 from llmtrace.reporting.console import (
+    CliProgress,
+    describe_error,
     print_audit_summary,
     print_compare_result,
     print_dry_run,
@@ -88,12 +93,32 @@ def _check_duplicate_evidence_ids(evidence_list: list[HTTPEvidence]) -> None:
         seen.add(eid)
 
 
+def _announce_reference_set(set_path: Path) -> None:
+    """§9：开始前显示将使用的 ReferenceSet（只读，不重新验证信任链）."""
+    from rich.console import Console
+
+    from llmtrace.reference.reference_set import ReferenceSet
+
+    console = Console()
+    try:
+        reference_set = ReferenceSet.model_validate_json(set_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    console.print()
+    console.print("[bold cyan]Reference Calibration[/]")
+    console.print(f"[bold]{reference_set.reference_set_id}[/] v{reference_set.reference_set_version}")
+    console.print(f"Members: {len(reference_set.members)} trusted identities")
+    console.print(f"Set: {set_path}")
+
+
 @app.command()
 def audit(
-    protocol: str = typer.Option(..., "--protocol", "-p", help="协议类型: openai 或 anthropic"),
+    protocol: str = typer.Option(DEFAULT_PROTOCOL, "--protocol", "-p", help="协议类型: openai 或 anthropic"),
     base_url: str = typer.Option(..., "--base-url", "-u", help="API Base URL"),
     model: str = typer.Option(..., "--model", "-m", help="模型名称"),
-    api_key_env: str = typer.Option(..., "--api-key-env", "-k", help="API Key 环境变量名"),
+    api_key_env: str = typer.Option(
+        DEFAULT_API_KEY_ENV, "--api-key-env", "-k", help="API Key 环境变量名（不直接传 key）"
+    ),
     auth_style: str = typer.Option("auto", "--auth-style", help="鉴权方式: auto, bearer, x-api-key, both"),
     repeat: int = typer.Option(DEFAULT_REPEAT_COUNT, "--repeat", "-r", help="重复次数 (1-10)"),
     timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t", help="请求超时(秒)"),
@@ -157,7 +182,7 @@ def audit(
         # Non-debug error output crosses a display boundary — scrub every known
         # secret (API key + base_url credentials) in case the exception echoes it.
         scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
-        print_error(scrubber.scrub_text(str(e)), "审计执行", partial=True)
+        print_error(scrubber.scrub_text(describe_error(e, api_key_env=config.api_key_env)), "审计执行", partial=True)
         raise typer.Exit(code=1)
 
     result = outcome.result
@@ -197,10 +222,12 @@ def audit(
 
 @app.command()
 def run(
-    protocol: str = typer.Option(..., "--protocol", "-p", help="协议类型: openai 或 anthropic"),
+    protocol: str = typer.Option(DEFAULT_PROTOCOL, "--protocol", "-p", help="协议类型: openai 或 anthropic"),
     base_url: str = typer.Option(..., "--base-url", "-u", help="API Base URL"),
     model: str = typer.Option(..., "--model", "-m", help="声明模型名称"),
-    api_key_env: str = typer.Option(..., "--api-key-env", "-k", help="API Key 环境变量名"),
+    api_key_env: str = typer.Option(
+        DEFAULT_API_KEY_ENV, "--api-key-env", "-k", help="API Key 环境变量名（不直接传 key）"
+    ),
     auth_style: str = typer.Option("auto", "--auth-style", help="鉴权方式: auto, bearer, x-api-key, both"),
     target_id: str = typer.Option(None, "--target-id", help="稳定 target 标识（缺省自动派生）"),
     repeat: int = typer.Option(DEFAULT_REPEAT_COUNT, "--repeat", "-r", help="协议探针重复次数 (1-10)"),
@@ -245,7 +272,27 @@ def run(
     calibration_policy_id: str | None = None
     calibration_policy_version: str | None = None
 
-    if reference_set is not None:
+    # §8–§10: explicit --reference-set wins, otherwise auto-discovery scans the
+    # default reference directory.  Priority: explicit > auto discovery > none.
+    resolved_reference_set: Path | None = reference_set
+    if resolved_reference_set is None:
+        from llmtrace.reference.discovery import discover_compatible_sets
+
+        discovered = discover_compatible_sets(RunArtifactRepository(output_dir))
+        if len(discovered) == 1:
+            resolved_reference_set = discovered[0]
+        elif len(discovered) > 1:
+            # Never pick at random (§9).  Fail closed: the user must choose.
+            from rich.console import Console as _RichConsole
+
+            _RichConsole().print(
+                "[yellow]Multiple compatible ReferenceSets found. Specify one with --reference-set.[/]"
+            )
+            for candidate in discovered:
+                _RichConsole().print(f"  {candidate}")
+            raise typer.Exit(code=1)
+
+    if resolved_reference_set is not None:
         # Shared validator — identical to the runner's preflight.  A
         # ReferenceSet that cannot support formal calibration is rejected
         # here, before any dry-run or execution proceeds.  Read-only: it
@@ -255,7 +302,7 @@ def run(
             from llmtrace.reference.validation import validate_reference_set_for_calibration
 
             context = validate_reference_set_for_calibration(
-                set_path=reference_set,
+                set_path=resolved_reference_set,
                 artifact_repository=RunArtifactRepository(output_dir),
             )
             reference_set_id = context.reference_set.reference_set_id
@@ -278,6 +325,7 @@ def run(
     )
 
     if dry_run:
+        # §38: a dry run must answer "will I get a formal score, and why/why not".
         dry_run_info = {
             "Target": resolved_target,
             "协议": config.protocol.value,
@@ -291,8 +339,8 @@ def run(
             "需要安全 Sandbox": "是",
             "参考对比": "是" if reference_snapshot else "否",
         }
-        if reference_set is not None:
-            dry_run_info["Reference Calibration"] = "是"
+        if resolved_reference_set is not None:
+            dry_run_info["Reference Calibration"] = "是 (auto)" if reference_set is None else "是"
             dry_run_info["ReferenceSet ID"] = reference_set_id or "N/A"
             dry_run_info["ReferenceSet Version"] = reference_set_version or "N/A"
             dry_run_info["ReferenceSet Content SHA"] = (
@@ -302,7 +350,8 @@ def run(
                 f"{calibration_policy_id} {calibration_policy_version}" if calibration_policy_id else "N/A"
             )
         else:
-            dry_run_info["Reference Calibration"] = "否"
+            dry_run_info["Reference Calibration"] = "UNAVAILABLE"
+            dry_run_info["说明"] = "未找到兼容的可信 ReferenceSet，不生成正式 0–100 能力分"
         dry_run_info["历史对比"] = "是" if compare_latest else "否"
         print_dry_run(dry_run_info)
         return
@@ -311,6 +360,10 @@ def run(
     if api_key is None:
         print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
         raise typer.Exit(code=1)
+
+    # §9: 自动发现唯一 ReferenceSet 时，在开始前明确显示校准信息。
+    if resolved_reference_set is not None:
+        _announce_reference_set(resolved_reference_set)
 
     if not non_interactive:
         if not sys.stdin.isatty():
@@ -330,6 +383,11 @@ def run(
             raise typer.Exit(code=0)
 
     repository = RunArtifactRepository(output_dir)
+    # §Live / §Cancel: 协作取消 token + 进度渲染（TTY Rich Live / 非 TTY 阶段日志）。
+    from llmtrace.execution.progress import CancellationToken
+
+    cancel_token = CancellationToken()
+    progress = CliProgress()
     try:
         runner = UnifiedAuditRunner(
             config,
@@ -339,25 +397,42 @@ def run(
             compare_latest=compare_latest,
             baseline_snapshot_path=baseline_snapshot,
             reference_snapshot_path=reference_snapshot,
-            reference_set_path=reference_set,
+            reference_set_path=resolved_reference_set,
             max_wall_seconds=max_wall_seconds,
+            progress_sink=progress.on_event,
+            cancel_token=cancel_token,
         )
     except SandboxUnavailableError as exc:
-        print_error(str(exc), "预检", partial=False)
+        print_error(describe_error(exc, api_key_env=config.api_key_env), "预检", partial=False)
         raise typer.Exit(code=1)
 
+    # 第一次 Ctrl+C → 协作取消（完成当前项后安全退出）；第二次 → 强制退出 130。
+    def _on_sigint(signum: int, frame: object) -> None:
+        if cancel_token.cancelled:
+            raise KeyboardInterrupt()
+        cancel_token.cancel()
+        progress.announce_cancel()
+
+    previous_sigint = signal.signal(signal.SIGINT, _on_sigint)
     try:
-        result = asyncio.run(runner.run())
-    except KeyboardInterrupt:
-        raise typer.Exit(code=130)
-    except Exception as exc:
-        if debug:
-            import traceback
+        progress.start()
+        try:
+            result = asyncio.run(runner.run())
+        except KeyboardInterrupt:
+            raise typer.Exit(code=130)
+        except Exception as exc:
+            if debug:
+                import traceback
 
-            traceback.print_exc()
-        scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
-        print_error(scrubber.scrub_text(str(exc)), "统一执行", partial=True)
-        raise typer.Exit(code=1)
+                traceback.print_exc()
+            scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
+            print_error(
+                scrubber.scrub_text(describe_error(exc, api_key_env=config.api_key_env)), "统一执行", partial=True
+            )
+            raise typer.Exit(code=1)
+    finally:
+        progress.stop()
+        signal.signal(signal.SIGINT, previous_sigint)
 
     artifact_paths = {
         "manifest.json": str(output_dir / "runs" / result.execution_id / "manifest.json"),
@@ -365,6 +440,103 @@ def run(
         "report.html": str(output_dir / "runs" / result.execution_id / "report.html"),
     }
     print_unified_summary(result, artifact_paths)
+
+
+@app.command("doctor")
+def doctor() -> None:
+    """诊断本机环境：Python / 依赖 / 沙箱 / 参考集 / API Key（只读，不发送请求）."""
+    import importlib.metadata
+    import importlib.util
+    import platform
+    import sys
+
+    from rich.console import Console as _RichConsole
+    from rich.panel import Panel as _RichPanel
+    from rich.table import Table as _RichTable
+
+    _doctor_console = _RichConsole()
+    # 关键依赖对 CLI 必需；Web 依赖标记为 optional。
+    cli_deps = ("httpx", "rich", "pydantic", "typer")
+    web_deps = ("fastapi", "uvicorn")
+    failures: list[str] = []
+
+    table = _RichTable(title="llmtrace doctor")
+    table.add_column("检查项", style="cyan")
+    table.add_column("值", style="white")
+    table.add_column("状态", style="white")
+
+    # 1) Python / 平台
+    py_ok = sys.version_info >= (3, 10)
+    table.add_row("Python", f"{platform.python_version()} ({platform.system()})", "OK" if py_ok else "FAIL")
+    if not py_ok:
+        failures.append("Python 版本过低（需 >= 3.10）")
+
+    # 2) llmtrace 版本
+    try:
+        version = importlib.metadata.version("llmtrace")
+        table.add_row("llmtrace", version, "OK")
+    except importlib.metadata.PackageNotFoundError:  # pragma: no cover - editable install 总有
+        table.add_row("llmtrace", "未识别（非安装环境）", "WARN")
+        failures.append("llmtrace 未以安装包形式存在（建议 pip install -e .）")
+
+    # 3) 依赖
+    for dep in cli_deps + web_deps:
+        present = importlib.util.find_spec(dep) is not None
+        required = dep in cli_deps
+        status = "OK" if present else ("FAIL" if required else "WARN")
+        table.add_row(dep, "已安装" if present else "缺失", status)
+        if required and not present:
+            failures.append(f"必需依赖缺失: {dep}")
+
+    # 4) 代码沙箱（Docker）
+    try:
+        from llmtrace.adapters.code_execution import create_code_execution_backend
+
+        backend = create_code_execution_backend()
+        table.add_row("代码沙箱", type(backend).__name__, "OK")
+    except Exception as exc:
+        table.add_row("代码沙箱", "Docker 不可用", "WARN")
+        _doctor_console.print(f"[yellow]  沙箱提示：{exc}[/]")
+        _doctor_console.print(
+            "  [yellow]影响：Quick Suite 中的编码类题目无法计分；协议审计与纯文本能力评估不受影响。[/]"
+        )
+
+    # 5) 参考集目录与可信集合数量（自动发现）
+    try:
+        from llmtrace.appdir import default_data_root
+        from llmtrace.execution.artifacts import RunArtifactRepository
+        from llmtrace.reference.discovery import discover_compatible_sets, reference_sets_dir
+
+        sets_dir = reference_sets_dir()
+        sets_dir.mkdir(parents=True, exist_ok=True)
+        all_sets = sorted(p for p in sets_dir.glob("*.json"))
+        trusted = discover_compatible_sets(RunArtifactRepository(default_data_root() / "reports"))
+        status = "OK" if trusted else "WARN"
+        table.add_row("参考集目录", str(sets_dir), status)
+        detail = f"{len(all_sets)} 个文件 / {len(trusted)} 个可信 ReferenceSet"
+        if trusted:
+            detail += f"（{', '.join(p.stem for p in trusted[:3])}）"
+        table.add_row("ReferenceSets", detail, status)
+        if not trusted and not all_sets:
+            pass  # 首次使用属正常，不列为 failure
+    except Exception as exc:
+        table.add_row("参考集目录", f"检查失败: {exc}", "WARN")
+
+    # 6) 默认 API Key 环境变量
+    from llmtrace.security.redaction import check_api_key
+
+    has_default_key = check_api_key("LLMTRACE_API_KEY") is not None
+    table.add_row("LLMTRACE_API_KEY", "已设置" if has_default_key else "未设置", "OK" if has_default_key else "WARN")
+
+    _doctor_console.print()
+    _doctor_console.print(_RichPanel.fit("llmtrace doctor", style="bold blue"))
+    _doctor_console.print(table)
+    if failures:
+        _doctor_console.print("[bold red]发现需要修复的问题:[/]")
+        for msg in failures:
+            _doctor_console.print(f"  [red]- {msg}[/]")
+        raise typer.Exit(code=1)
+    _doctor_console.print("[green]环境基本就绪。下一步：llmtrace run --help 或参考 README Quick Start。[/]")
 
 
 @app.command()
@@ -563,10 +735,12 @@ app.add_typer(reference_app, name="reference")
 
 @reference_app.command("capture")
 def reference_capture(
-    protocol: str = typer.Option(..., "--protocol", "-p", help="协议类型: openai 或 anthropic"),
+    protocol: str = typer.Option(DEFAULT_PROTOCOL, "--protocol", "-p", help="协议类型: openai 或 anthropic"),
     base_url: str = typer.Option(..., "--base-url", "-u", help="API Base URL"),
     model: str = typer.Option(..., "--model", "-m", help="声明模型名称"),
-    api_key_env: str = typer.Option(..., "--api-key-env", "-k", help="API Key 环境变量名"),
+    api_key_env: str = typer.Option(
+        DEFAULT_API_KEY_ENV, "--api-key-env", "-k", help="API Key 环境变量名（不直接传 key）"
+    ),
     auth_style: str = typer.Option("auto", "--auth-style", help="鉴权方式: auto, bearer, x-api-key, both"),
     provider_id: str = typer.Option(..., "--provider-id", help="参考源操作标识（元数据，非身份声明）"),
     snapshot_id: str = typer.Option(..., "--snapshot-id", help="唯一 filename-safe ReferenceSnapshot 标识"),
@@ -591,6 +765,8 @@ def reference_capture(
     但不独立证明 endpoint 归属（§28）。
     """
     import sys
+
+    from rich.console import Console as _RichConsole
 
     config = AuditConfig(
         protocol=Protocol(protocol),
@@ -669,22 +845,36 @@ def reference_capture(
 
             traceback.print_exc()
         scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
-        print_error(scrubber.scrub_text(str(exc)), "reference capture", partial=True)
+        print_error(
+            scrubber.scrub_text(describe_error(exc, api_key_env=config.api_key_env)), "reference capture", partial=True
+        )
         raise typer.Exit(code=1)
 
     if result.status == ReferenceCaptureStatus.CAPTURED:
         snapshot_path = reference_dir / "snapshots" / f"{result.snapshot_id}.json"
         sidecar_path = reference_dir / "snapshots" / f"{result.snapshot_id}.manifest.json"
-        typer.echo(f"[OK] ReferenceSnapshot 已保存: {snapshot_path}")
-        typer.echo(f"     完整性锚点: {sidecar_path}")
-        typer.echo(f"     execution_id: {result.execution_id}")
-    elif result.status == ReferenceCaptureStatus.QUALIFICATION_REJECTED:
-        print_error(
-            f"运行完成但未通过资格门禁，ReferenceSnapshot 未生成（run artifact 保留）: {list(result.reason_codes)}",
-            "reference capture",
-            partial=True,
+        # §14: 完成输出要有明确下一步，不止是文件路径。
+        _console = _RichConsole()
+        _console.print()
+        _console.print("[bold green]Reference capture complete.[/]")
+        _console.print(f"Model:    [bold]{model}[/]")
+        _console.print("Qualified: YES")
+        _console.print(f"Snapshot: {snapshot_path}")
+        _console.print()
+        _console.print("[bold]Next:[/] 将本快照加入 ReferenceSet 以获得 0–100 正式校准：")
+        _console.print(
+            f"  [cyan]llmtrace reference set-create --set-id <id> --set-version 1 --snapshot {snapshot_id}[/]"
         )
-        typer.echo(f"     执行记录保留在: {output_dir / 'runs' / result.execution_id}")
+        _console.print(f"  完整性锚点: {sidecar_path}")
+    elif result.status == ReferenceCaptureStatus.QUALIFICATION_REJECTED:
+        # §14: Qualification 失败明确打印 "Reference rejected" 及原因。
+        _console = _RichConsole()
+        _console.print()
+        _console.print("[bold red]Reference rejected[/]")
+        _console.print("Qualified: NO")
+        _console.print(f"Reason: {list(result.reason_codes)}")
+        _console.print("运行完成但未通过资格门禁，ReferenceSnapshot 未生成（run artifact 保留）。")
+        _console.print(f"执行记录保留在: {output_dir / 'runs' / result.execution_id}")
         raise typer.Exit(code=1)
     else:
         print_error(f"参考运行失败: {result.warnings}", "reference capture", partial=True)
@@ -710,6 +900,8 @@ def reference_set_create(
     完整性 sidecar）。v0.3-C legacy snapshot 没有锚点，仍可读取用于原始能力
     对比，但不能进入 trusted ReferenceSet。
     """
+    from rich.console import Console as _RichConsole
+
     try:
         snapshot_repo = ReferenceRepository.load(reference_dir / "snapshots")
         set_repo = ReferenceSetRepository(directory=reference_dir / "sets")
@@ -734,8 +926,15 @@ def reference_set_create(
         raise typer.Exit(code=1)
 
     set_path = reference_dir / "sets" / f"{set_id}_{set_version}.json"
-    typer.echo(f"[OK] ReferenceSet 已保存: {set_path}")
-    typer.echo(f"     成员数: {len(reference_set.members)}，Content SHA: {reference_set.content_sha256}")
+    _console = _RichConsole()
+    _console.print()
+    _console.print("[bold green]ReferenceSet complete.[/]")
+    _console.print(f"ID:       [bold]{set_id}[/] v{set_version}")
+    _console.print(f"Members:  {len(reference_set.members)} trusted identities")
+    _console.print(f"Set:      {set_path}")
+    _console.print()
+    _console.print("[bold]Next:[/] 直接运行审计即可自动发现本 ReferenceSet：")
+    _console.print("  [cyan]llmtrace run --base-url <url> --model <model>[/]")
 
 
 @app.command()

@@ -2,14 +2,45 @@
 
 from __future__ import annotations
 
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
+from rich.live import Live
 from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from rich.text import Text
 
+from llmtrace.analysis.confidence import ConfidencePolicy
+from llmtrace.analysis.routing import assess_routing_stability
+from llmtrace.execution.progress import (
+    STAGE_BENCHMARK,
+    STAGE_CALIBRATION,
+    STAGE_CANCELLED,
+    STAGE_COMPARISON,
+    STAGE_DONE,
+    STAGE_FAILED,
+    STAGE_PREFLIGHT,
+    STAGE_PROTOCOL,
+    STAGE_REPORTING,
+    STAGE_SCORING,
+)
 from llmtrace.models.audit import AuditResult, RiskLevel
 from llmtrace.security.redaction import redact_url
 
 _console = Console()
+
+# 阶段 token → 中文标签（TTY Live 与 非 TTY 日志共用）。
+_STAGE_LABELS = {
+    STAGE_PREFLIGHT: "预检",
+    STAGE_PROTOCOL: "协议审计",
+    STAGE_BENCHMARK: "能力基准",
+    STAGE_SCORING: "能力评分",
+    STAGE_CALIBRATION: "参考校准",
+    STAGE_COMPARISON: "历史对比",
+    STAGE_REPORTING: "生成报告",
+    STAGE_DONE: "完成",
+    STAGE_FAILED: "失败",
+    STAGE_CANCELLED: "已取消",
+}
 
 
 def print_audit_summary(result: AuditResult) -> None:
@@ -110,6 +141,61 @@ def print_error(message: str, step: str, partial: bool = False) -> None:
     _console.print(Panel.fit(f"[red]错误: {message}[/]", title=f"步骤: {step}"))
     if partial:
         _console.print("[yellow]已生成部分报告，请检查输出目录。[/]")
+
+
+def describe_error(exc: BaseException, api_key_env: str | None = None) -> str:
+    """把底层异常映射为对用户可行动的中文提示（产品化 §Error）。
+
+    已知类别（连接 / 超时 / HTTP 状态 / 沙箱）给出可执行建议；未知异常
+    回退到原始信息，由上层 SecretScrubber 统一脱敏后展示。
+    """
+    from llmtrace.adapters.code_execution import CodeExecutionError, SandboxUnavailableError
+
+    if isinstance(exc, SandboxUnavailableError):
+        return (
+            "代码沙箱不可用（Docker 未就绪）。请确认 Docker 已启动；"
+            "使用 --no-streaming/--dry-run 只做协议层检查，或先运行 llmtrace doctor 诊断。"
+        )
+    if isinstance(exc, CodeExecutionError):
+        return f"代码执行失败：{exc}"
+
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover
+        return str(exc)
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code in (401, 403):
+            hint = f"鉴权失败（HTTP {code}）。请确认 {api_key_env or 'API Key'} 有效、鉴权头格式正确且未被目标拒绝。"
+        elif code == 404:
+            hint = "端点或模型不存在（HTTP 404）。请检查 --base-url 路径与 --model 名称是否正确。"
+        elif code == 429:
+            hint = "触发速率限制（HTTP 429）。请稍后重试；或用 --repeat/-r 调低探测频率、提高 --timeout。"
+        else:
+            hint = f"目标返回 HTTP {code}。请结合报告中的协议风险结论排查。"
+        return hint
+
+    timeout_types: tuple[type[BaseException], ...] = (httpx.TimeoutException,)
+    try:
+        from httpx import ConnectError, ConnectTimeout, ReadTimeout, WriteTimeout
+
+        timeout_types += (ConnectTimeout, ReadTimeout, WriteTimeout)
+        connect_types: tuple[type[BaseException], ...] = (ConnectError,)
+    except ImportError:  # pragma: no cover
+        connect_types = (httpx.ConnectError,)
+
+    if isinstance(exc, connect_types):
+        return (
+            "无法连接到目标端点。请检查 --base-url 是否正确、网络/代理是否可达；使用 llmtrace doctor 排除本地环境问题。"
+        )
+    if isinstance(exc, timeout_types) or type(exc).__name__ == "TimeoutError":
+        return "请求超时。端点响应过慢，可用 --timeout 提高超时上限，或稍后重试。"
+
+    if isinstance(exc, httpx.InvalidURL):
+        return "base-url 格式不合法。示例: https://api.example.com/v1"
+
+    return str(exc)
 
 
 def print_dry_run(config_summary: dict[str, str]) -> None:
@@ -213,6 +299,33 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
     table.add_row("Reference", ref_text)
     table.add_row("请求数", f"planned {plan.planned_requests}")
 
+    # ---- Confidence / Routing / Perf（§34–§42 v1 确定性规则；实验性标签） ----
+    confidence = ConfidencePolicy.create_v1().assess(
+        measurement=getattr(result, "measurement_summary", None),
+        capability_profile=getattr(result, "capability_profile", None),
+    )
+    table.add_row("Confidence", confidence.level.value)
+
+    routing: object | None = None
+    snapshot = getattr(result, "behavior_snapshot", None)
+    if snapshot is not None:
+        routing = assess_routing_stability(snapshot)
+        table.add_row("Routing Stability", str(routing.level.value))
+
+    # Perf：墙钟耗时 + 行为样本延迟 / 输出 token 均值（若可计算）。
+    finished_at = getattr(result, "finished_at", None)
+    if finished_at is not None:
+        elapsed = finished_at - result.started_at  # type: ignore[attr-defined]
+        table.add_row("耗时", f"{elapsed.total_seconds():.1f}s")
+    if snapshot is not None:
+        snapshot_items = list(snapshot.items)
+        latencies = [it.latency_ms for it in snapshot_items if it.latency_ms is not None]
+        outputs = [it.output_tokens for it in snapshot_items if it.output_tokens is not None]
+        if latencies:
+            table.add_row("平均延迟", f"{sum(latencies) / len(latencies):.0f} ms / 请求")
+        if outputs:
+            table.add_row("平均输出 Token", f"{sum(outputs) / len(outputs):.0f} / 请求")
+
     _console.print(table)
     _console.print()
 
@@ -228,6 +341,20 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
         _console.print(
             "[bold yellow]UNCALIBRATED：[/][yellow]capability 分数为 raw / provisional，不是 0–100 正式评分。[/]"
         )
+
+    # ---- 验证注解：Confidence / Routing 的确定性理由（实验性，非统计证明） ----
+    verdict_lines: list[str] = []
+    if confidence.reasons:
+        verdict_lines.append(f"[cyan]Confidence ({confidence.level.value}):[/] {confidence.reasons[0]}")
+    if routing is not None:
+        routing_attr = getattr(routing, "reasons", ())
+        if routing_attr:
+            verdict_lines.append(f"[cyan]Routing ({routing.level.value}):[/] {routing_attr[0]}")  # type: ignore[attr-defined]
+    if verdict_lines:
+        _console.print()
+        _console.print("[bold]验证注解（实验性，非统计证明）:[/]")
+        for line in verdict_lines:
+            _console.print(f"  {line}")
 
     # ---- Claimed Model Gap（§13/§17：能力差距，不是模型身份识别） ---------
     claimed_gap = getattr(result, "claimed_model_gap", None)
@@ -265,3 +392,149 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
         _console.print("[bold]Artifacts:[/]")
         for name, path in artifacts.items():
             _console.print(f"  [cyan]{name}[/] → {path}")
+
+
+class CliProgress:
+    """``run`` 命令执行进度渲染（施工手册 §Live）。
+
+    - TTY: Rich ``Live`` 进度条，展示阶段 / benchmark 项进度 / 请求数。
+    - 非 TTY: 阶段切换打印一行日志，进度事件逐项打印，适合重定向到日志文件。
+    - 取消: ``announce_cancel()`` 切换为"正在取消"状态；终态打印已完成项数。
+
+    实现 :class:`llmtrace.execution.progress.ProgressSink`；不写任何文件、
+    不发送任何请求，只做终端渲染。
+    """
+
+    def __init__(self, *, tty: bool | None = None) -> None:
+        self._console = Console()
+        # 显式 tty 参数用于测试注入；默认跟随 Rich 的终端检测。
+        self._tty = self._console.is_terminal if tty is None else tty
+        self._live: Live | None = None
+        self._progress: Progress | None = None
+        self._task_id: TaskID | None = None
+        # 运行态（由 runner 的 sink 回调 / 信号处理器更新）。
+        self.stage: str = STAGE_PREFLIGHT
+        self.message: str | None = None
+        self.completed: int | None = None
+        self.total: int | None = None
+        self.requests: int = 0
+        self.cancelled: bool = False
+
+    # -- 生命周期 ----------------------------------------------------------
+
+    def start(self) -> None:
+        """开始渲染；TTY 进入 Live，非 TTY 打印首行日志。"""
+        if not self._tty:
+            _console.print("[dim]llmtrace run: 开始执行…[/]")
+            return
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}", justify="left"),
+            BarColumn(bar_width=30),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("({task.completed}/{task.total})"),
+            TimeElapsedColumn(),
+        )
+        self._task_id = self._progress.add_task("", total=None)
+        self._live = Live(self._render(), console=self._console, refresh_per_second=10)
+        self._live.start()
+
+    def stop(self) -> None:
+        """结束渲染；非 TTY 打印终态行。"""
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+            final_line = self._cancel_line()
+            if final_line:
+                _console.print(final_line)
+            elif not self.cancelled:
+                _console.print()
+        elif not self._tty:
+            final_line = self._cancel_line()
+            if final_line:
+                _console.print(final_line)
+
+    # -- ProgressSink 回调（runner async 线程，只做轻量状态更新） -----------
+
+    def on_event(self, event: object) -> None:
+        """接收 :class:`ProgressEvent`，更新渲染（兼容 ProgressSink 签名）。"""
+        payload = getattr(event, "to_dict", lambda: event)()
+        event_type = payload.get("type") if isinstance(payload, dict) else None
+        if isinstance(payload, dict):
+            self.stage = payload.get("stage", self.stage)
+            self.message = payload.get("message", self.message)
+            if payload.get("completed") is not None:
+                self.completed = payload["completed"]
+            if payload.get("total") is not None:
+                self.total = payload["total"]
+            self.requests = payload.get("requests", self.requests)
+        if self._live is not None and self._progress is not None and self._task_id is not None:
+            # Live 模式：只维护底层状态，由 _refresh 重建 renderable。
+            self._refresh()
+            return
+        if not self._tty:
+            self._print_non_tty_line(event_type)
+
+    def announce_cancel(self) -> None:
+        """第一次 Ctrl+C：标记取消（不打印、不阻塞信号处理器）。"""
+        self.cancelled = True
+        self.message = "正在取消… 等待当前项完成后退出（再按一次 Ctrl+C 强制退出）"
+        self._refresh()
+
+    # -- 内部 ---------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        live = self._live
+        progress = self._progress
+        task_id = self._task_id
+        if live is not None and progress is not None and task_id is not None:
+            progress.update(
+                task_id,
+                description=self._description(),
+                completed=self.completed or 0,
+                total=self.total if self.total is not None else None,
+            )
+            live.update(self._render())
+
+    def _render(self) -> RenderableType:
+        if self._progress is None:
+            return Text("")
+        status = "请求: " + str(self.requests)
+        status_render = Text(status, style="yellow") if self.cancelled else status
+        return Panel(Group(self._progress, status_render), title="llmtrace run", style="green")
+
+    def _description(self) -> str:
+        label = _STAGE_LABELS.get(self.stage, self.stage)
+        suffix = ""
+        if self.message:
+            suffix = f" - {self.message}"
+        return f"{label}{suffix}"
+
+    def _cancel_line(self) -> str | None:
+        """取消后的汇总行：已完成项数 + 请求数。"""
+        if not self.cancelled:
+            return None
+        progress_text = f"{self.completed}/{self.total}" if self.total else f"{self.completed or 0}/?"
+        return f"[bold yellow]已取消:[/] 已完成 {progress_text} 个 benchmark 项，已发出 {self.requests} 个请求"
+
+    def _print_non_tty_line(self, event_type: str | None) -> None:
+        """非 TTY：阶段切换与逐项进度打印为可读日志行。"""
+        line = f"[llmtrace] {self._description()}"
+        if event_type in {"progress", "done", "failed", "cancelled"}:
+            if self.completed is not None and self.total:
+                line = f"[llmtrace] benchmark 进度 {self.completed}/{self.total}（请求 {self.requests}）"
+            if event_type == "done":
+                line = "[llmtrace] 执行完成"
+            elif event_type in {"failed", "cancelled"}:
+                line = f"[llmtrace] 执行{'失败' if event_type == 'failed' else '已取消'}"
+        _console.print(line)
+
+
+__all__ = [
+    "CliProgress",
+    "print_audit_summary",
+    "print_compare_result",
+    "print_dry_run",
+    "print_error",
+    "print_unified_summary",
+]

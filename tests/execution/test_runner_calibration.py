@@ -47,11 +47,17 @@ def _build_reference_fixture(
     models: tuple[tuple[str, float], ...] = _REFERENCE_MODELS,
     set_id: str = "llmtrace-reference-v1",
     set_version: str = "0.1.0",
+    execution_prefix: str = "aaaaaaaa-0000-0000-0000",
+    snapshot_prefix: str = "snap-ref",
 ) -> Path:
     """Build a complete trusted ReferenceSet fixture and return its set path.
 
     Each member carries the full v0.4-A trust chain: qualified run artifact →
     trusted snapshot (with integrity sidecar) → ReferenceSet member.
+
+    ``execution_prefix`` / ``snapshot_prefix`` allow building multiple sets
+    inside the same artifact / reference root (discovery tests) without
+    colliding on append-only run artifacts or snapshot IDs.
     """
     repository = RunArtifactRepository(artifact_root)
     snapshot_repository = ReferenceRepository(directory=reference_root / "snapshots")
@@ -59,7 +65,7 @@ def _build_reference_fixture(
 
     snapshots = []
     for index, (model_id, score) in enumerate(models):
-        execution_id = f"aaaaaaaa-0000-0000-0000-{index:012d}"
+        execution_id = f"{execution_prefix}-{index:012d}"
         manifest = make_manifest(execution_id=execution_id).model_copy(update={"candidate_model_id": model_id})
         profile = make_capability_profile(score).model_copy(
             update={"provisional_raw_index": round(score * _COVERAGE_WEIGHT, 6)}
@@ -76,7 +82,7 @@ def _build_reference_fixture(
             artifact_repository=repository,
             reference_repository=snapshot_repository,
             provider_id="openai",
-            snapshot_id=f"snap-ref-{index}",
+            snapshot_id=f"{snapshot_prefix}-{index}",
             created_by="operator",
         )
         snapshots.append(snapshot)

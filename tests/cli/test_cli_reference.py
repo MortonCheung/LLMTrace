@@ -150,8 +150,14 @@ class TestCaptureLive:
         )
         stdout = _strip_ansi(result.stdout)
         assert result.exit_code == 0, stdout
-        assert "[OK] ReferenceSnapshot 已保存" in stdout
-        assert DEFAULT_EXECUTION_ID in stdout
+        assert "Reference capture complete." in stdout
+        assert "Qualified: YES" in stdout
+        # §14: 完成输出展示快照路径与明确的下一步指引，而非内部 execution_id。
+        # Rich Console 会按终端宽度折行，比较时先压缩空白。
+        compact_stdout = re.sub(r"\s+", "", stdout)
+        assert re.sub(r"\s+", "", str(reference_dir / "snapshots" / "operator-test-snapshot.json")) in compact_stdout
+        assert "referenceset-create" in compact_stdout
+        assert "完整性锚点" in stdout
 
     def test_qualification_rejected_exits_1(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         async def fake_capture(self: object, **kwargs: object) -> ReferenceCaptureResult:
@@ -283,7 +289,7 @@ class TestSetCreate:
         )
         stdout = _strip_ansi(result.stdout)
         assert result.exit_code == 0, stdout
-        assert "[OK] ReferenceSet 已保存" in stdout
+        assert "ReferenceSet complete." in stdout
         assert (reference_dir / "sets" / "refset-v1_1.0.0.json").is_file()
 
     def test_missing_snapshot_exits_1(self, tmp_path: Path) -> None:
