@@ -22,6 +22,7 @@ from llmtrace.analysis.behavior_models import (
     BehaviorRunSnapshot,
 )
 from llmtrace.analysis.behavior_snapshot import BehaviorSnapshotBuilder
+from llmtrace.analysis.confidence_v2 import build_confidence_bundle
 from llmtrace.benchmarks.models import BenchmarkRunResult, ItemStatus
 from llmtrace.execution.artifacts import ArtifactIntegrityError, RunArtifactRepository, sha256_of
 from llmtrace.execution.budget import RequestBudget
@@ -45,6 +46,7 @@ from llmtrace.execution.progress import (
     STAGE_CANCELLED,
     STAGE_DONE,
     STAGE_FAILED,
+    STAGE_FINGERPRINTING,
     STAGE_PROTOCOL,
     STAGE_REPORTING,
     STAGE_SCORING,
@@ -55,7 +57,35 @@ from llmtrace.execution.progress import (
 )
 from llmtrace.execution.protocol_audit import ProtocolAuditExecutor
 from llmtrace.execution.quick_suite import QuickSuiteRunner
+from llmtrace.fingerprint.executor import (
+    FingerprintExecutor,
+    assert_evidence_closure,
+)
+from llmtrace.fingerprint.matcher import (
+    FingerprintMatcher,
+    FingerprintMatchResult,
+    FingerprintVerificationResult,
+)
+from llmtrace.fingerprint.models import (
+    FingerprintMatchStatus,
+    FingerprintProfile,
+    FingerprintSourceRole,
+    repetitions_for_profile,
+)
+from llmtrace.fingerprint.reference import (
+    FingerprintReferenceSnapshot,
+    build_fingerprint_snapshot,
+)
+from llmtrace.fingerprint.repository import FingerprintRepository
+from llmtrace.fingerprint.routing import assess_routing_v2
+from llmtrace.fingerprint.runtime import (
+    FingerprintRuntimeContext,
+    FingerprintRuntimeError,
+    resolve_fingerprint_context,
+)
+from llmtrace.providers.base import BaseProvider
 from llmtrace.providers.factory import create_provider
+from llmtrace.reporting.fingerprint_report import build_fingerprint_section
 from llmtrace.reporting.html_report import generate_html_report
 from llmtrace.reporting.json_report import generate_json_report
 from llmtrace.scoring.aggregator import TaskScoringRegistry, aggregate_capability_profile
@@ -116,6 +146,12 @@ class UnifiedRunRequest(BaseModel):
     reference_set_path: Path | None = None
     max_wall_seconds: float | None = Field(default=None, gt=0)
 
+    # Optional identity evidence (v0.6).  Off by default, and never a
+    # capability input — these only add fingerprint artifacts.
+    verify_model: bool = False
+    fingerprint_profile: FingerprintProfile = FingerprintProfile.STANDARD
+    fingerprint_set_path: Path | None = None
+
     model_config = {"frozen": True, "extra": "forbid"}
 
 
@@ -148,6 +184,10 @@ class UnifiedAuditRunner:
         max_wall_seconds: float | None = None,
         progress_sink: ProgressSink | None = None,
         cancel_token: CancellationToken | None = None,
+        verify_model: bool = False,
+        fingerprint_profile: FingerprintProfile = FingerprintProfile.STANDARD,
+        fingerprint_set_path: Path | None = None,
+        fingerprint_repository: FingerprintRepository | None = None,
     ) -> None:
         self._code_backend = code_backend if code_backend is not None else create_code_execution_backend()
         self._config = config
@@ -169,6 +209,14 @@ class UnifiedAuditRunner:
         # keeps today's exact semantics (no sink, no cooperative cancel).
         self._sink = progress_sink
         self._cancel_token = cancel_token
+        # v0.6 optional identity evidence.  The fingerprint context is resolved
+        # in preflight (offline) and is None unless identity evidence was asked
+        # for — so a run without --verify-model is byte-for-byte the old run.
+        self._verify_model = verify_model
+        self._fingerprint_profile = fingerprint_profile
+        self._fingerprint_set_path = fingerprint_set_path
+        self._fingerprint_repository = fingerprint_repository
+        self._fingerprint_context: FingerprintRuntimeContext | None = None
 
     @property
     def request_budget(self) -> RequestBudget | None:
@@ -214,6 +262,21 @@ class UnifiedAuditRunner:
             message=f"benchmark item {completed}/{total}",
             completed=completed,
             total=total,
+        )
+
+    def _forward_fingerprint_progress(self, event: ProgressEvent) -> None:
+        """Re-publish the fingerprint executor's events through ``_emit``.
+
+        The executor builds its own ``ProgressEvent`` (stage ``fingerprinting``);
+        forwarding through ``_emit`` keeps this runner the single emitter, so
+        every event carries the same request counter as the other stages.
+        """
+        self._emit(
+            event.type,
+            event.stage,
+            message=event.message,
+            completed=event.completed,
+            total=event.total,
         )
 
     async def run(self) -> UnifiedRunResult:
@@ -315,6 +378,28 @@ class UnifiedAuditRunner:
                     generation_config=self._generation_config(),
                 )
 
+            # ---- FINGERPRINT (optional identity evidence) -----------------
+            # Deliberately the last stage inside the provider context: it is
+            # additive evidence, and a failure here must never disturb the
+            # capability / calibration stages above (Rule 1).  It still runs
+            # inside ``async with provider`` because this runner is the single
+            # provider-lifecycle owner (Rule 4).
+            fingerprint_snapshot = None
+            fingerprint_match = None
+            fingerprint_verification = None
+            if self._fingerprint_context is not None:
+                if protocol_outcome.blocking_failure:
+                    # A blocking failure means the target is not answering
+                    # usably; 48 more requests would only yield __INVALID__.
+                    warnings.append("fingerprint skipped: protocol blocking failure")
+                else:
+                    self._check_cancelled()
+                    (
+                        fingerprint_snapshot,
+                        fingerprint_match,
+                        fingerprint_verification,
+                    ) = await self._capture_fingerprint(provider, execution_id, warnings)
+
         # ---- MEASUREMENT HEALTH ---------------------------------------------
         measurement = self._measurement_summary(benchmark_runs)
         if measurement is not None:
@@ -414,6 +499,9 @@ class UnifiedAuditRunner:
             behavior_drift=behavior_drift,
             reference_comparison=reference_comparison,
             claimed_model_gap=claimed_model_gap,
+            fingerprint_snapshot=fingerprint_snapshot,
+            fingerprint_match=fingerprint_match,
+            fingerprint_verification=fingerprint_verification,
             evidence=unified_evidence,
             warnings=tuple(self._scrubber.scrub_text(w) for w in warnings),
             started_at=started_at,
@@ -490,10 +578,40 @@ class UnifiedAuditRunner:
                 raise PreflightError(f"reference set unreadable: {self._reference_set_path}") from exc
             self._calibration_context = context
 
+        if self._verify_model:
+            self._preflight_fingerprint()
+
         try:
             self._repository.ensure_writable()
         except OSError as exc:
             raise PreflightError("artifact root is not writable") from exc
+
+    def _preflight_fingerprint(self) -> None:
+        """Resolve the fingerprint reference context offline, before any request.
+
+        Unlike the fingerprint *execution* stage (whose failures only ever add
+        warnings), a broken fingerprint *input* is a hard preflight failure: the
+        user explicitly asked for identity evidence, and there is no honest way
+        to spend 48 requests against a reference set we cannot verify.
+        """
+        if self._fingerprint_set_path is None:
+            raise PreflightError(
+                "--verify-model requires a fingerprint reference set; without references there is nothing to "
+                "compare the captured behavior against"
+            )
+
+        repository = self._fingerprint_repository
+        if repository is None:
+            repository = FingerprintRepository.load()
+
+        try:
+            self._fingerprint_context = resolve_fingerprint_context(
+                set_path=self._fingerprint_set_path,
+                repository=repository,
+                repetitions=repetitions_for_profile(self._fingerprint_profile),
+            )
+        except FingerprintRuntimeError as exc:
+            raise PreflightError(f"fingerprint reference set rejected: {exc}") from exc
 
     # -- Measurement health ------------------------------------------------------
 
@@ -562,6 +680,7 @@ class UnifiedAuditRunner:
         calibration_policy = (
             self._calibration_context.calibration_policy if self._calibration_context is not None else None
         )
+        fingerprint = self._fingerprint_context
         return build_unified_execution_plan(
             self._config,
             target_id=self._target_id,
@@ -571,7 +690,111 @@ class UnifiedAuditRunner:
             reference_set_content_sha256=(reference_set.content_sha256 if reference_set is not None else None),
             calibration_policy_id=(calibration_policy.policy_id if calibration_policy is not None else None),
             calibration_policy_version=(calibration_policy.policy_version if calibration_policy is not None else None),
+            fingerprint_profile=(self._fingerprint_profile if fingerprint is not None else None),
+            fingerprint_set_id=(fingerprint.reference_set.fingerprint_set_id if fingerprint is not None else None),
+            fingerprint_set_version=(
+                fingerprint.reference_set.fingerprint_set_version if fingerprint is not None else None
+            ),
+            fingerprint_set_content_sha256=(
+                fingerprint.reference_set.content_sha256 if fingerprint is not None else None
+            ),
+            fingerprint_probe_count=(len(fingerprint.suite.probes) if fingerprint is not None else 0),
         )
+
+    # -- Optional identity evidence (fingerprint) ------------------------------
+
+    async def _capture_fingerprint(
+        self,
+        provider: BaseProvider,
+        execution_id: str,
+        warnings: list[str],
+    ) -> tuple[
+        FingerprintReferenceSnapshot | None,
+        FingerprintMatchResult | None,
+        FingerprintVerificationResult | None,
+    ]:
+        """Capture this run's behavior under the fingerprint suite, then rank it.
+
+        Every request goes through ``Provider.complete`` inside the caller's
+        provider context, so ``RequestBudget`` still counts it (Rule 4) and the
+        evidence recorder still stores it (Task 27) — the executor has no
+        side channel.
+
+        Fail-soft by design: once preflight has accepted the reference set, any
+        later fingerprint problem becomes a warning and yields
+        ``(None, None, None)`` so the capability / calibration artifacts keep
+        their normal semantics (Rule 1).  Cancellation is the single exception —
+        it must propagate so the run stays CANCELLED (Task 25).
+        """
+        assert self._fingerprint_context is not None
+        context = self._fingerprint_context
+        repetitions = repetitions_for_profile(self._fingerprint_profile)
+
+        self._emit(
+            EVENT_STAGE,
+            STAGE_FINGERPRINTING,
+            message="fingerprint capture started",
+            completed=0,
+            total=len(context.suite.probes) * repetitions,
+        )
+
+        try:
+            observations = await FingerprintExecutor(
+                provider=provider,
+                suite=context.suite,
+                progress_sink=self._forward_fingerprint_progress,
+                cancel_token=self._cancel_token,
+            ).run(model=self._config.model, repetitions=repetitions)
+
+            # Task 27: every observation must point at evidence this run really
+            # recorded — no fabricated ref may reach an artifact.
+            assert_evidence_closure(
+                observations,
+                {str(evidence.evidence_id) for evidence in self._recorder.list()},
+            )
+            snapshot = build_fingerprint_snapshot(
+                snapshot_id=f"candidate-{execution_id}",
+                model_id=self._config.model,
+                # The candidate is the endpoint under audit, not a claimed
+                # upstream provider — the label says exactly that (Rule 3).
+                provider_id=f"target:{self._target_id}",
+                source_role=FingerprintSourceRole.CANDIDATE_CAPTURE,
+                suite=context.suite,
+                repetitions=repetitions,
+                observations=observations,
+            )
+            match = FingerprintMatcher(suite=context.suite).match(
+                candidate=snapshot.distributions,
+                references=context.references,
+                minimum_comparable_probes=context.minimum_comparable_probes,
+                claimed_model_id=self._config.model,
+                policy=context.policy,
+            )
+            # Rule 2 gate, stated explicitly: a claim verdict needs a policy
+            # that passed LLMTrace's own held-out validation.
+            verification = FingerprintVerificationResult(
+                match_status=match.status,
+                claim_verdict_produced=match.status
+                in (
+                    FingerprintMatchStatus.CONSISTENT_WITH_CLAIM,
+                    FingerprintMatchStatus.INCONSISTENT_WITH_CLAIM,
+                ),
+                policy=context.policy,
+                minimum_comparable_probes=context.minimum_comparable_probes,
+                reference_identity_count=len(context.references),
+                notes=context.notes,
+            )
+        except RunCancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — identity evidence never fails the run
+            code = getattr(exc, "error_code", type(exc).__name__)
+            warnings.append(f"fingerprint evidence unavailable: {code}")
+            return None, None, None
+
+        # Why the run did (not) reach a claim verdict belongs in the run's own
+        # warnings, so the limitation is visible without opening an artifact.
+        warnings.extend(context.notes)
+        return snapshot, match, verification
 
     @staticmethod
     def _generation_config() -> dict[str, float | int]:
@@ -811,6 +1034,54 @@ class UnifiedAuditRunner:
         self._emit(EVENT_CANCELLED, STAGE_CANCELLED, message="run cancelled by user")
         return result
 
+    # -- Report serialization (Task 44) ---------------------------------------
+
+    def _fingerprint_report_section(self, result: UnifiedRunResult) -> dict[str, object] | None:
+        """Serialize this run's identity evidence for report.json / report.html.
+
+        Pure assembly: routing v2 and the confidence bundle are built from the
+        shared versioned policies of their own modules — this method introduces
+        no new threshold (Rule 5).  The temporal fingerprint is not wired yet,
+        so routing reports temporal evidence as unavailable instead of
+        pretending it was assessed (Rule 2).  With no fingerprint artifact at
+        all this returns ``None``, keeping non-fingerprint reports byte-shape
+        identical (Rule 1).
+        """
+        snapshot = result.fingerprint_snapshot
+        match = result.fingerprint_match
+        verification = result.fingerprint_verification
+        if snapshot is None and match is None and verification is None:
+            return None
+
+        context = self._fingerprint_context
+        routing = (
+            assess_routing_v2(
+                snapshot=result.behavior_snapshot,
+                fingerprint_policy=(context.policy if context is not None else None),
+            )
+            if result.behavior_snapshot is not None
+            else None
+        )
+        confidence = build_confidence_bundle(
+            measurement=result.measurement_summary,
+            capability_profile=result.capability_profile,
+            verification=verification,
+            match=match,
+            candidate=snapshot.distributions if snapshot is not None else (),
+            routing=routing,
+            expected_reference_set_id=result.plan.reference_set_id,
+            expected_reference_set_content_sha256=result.plan.reference_set_content_sha256,
+        )
+        return build_fingerprint_section(
+            match=match,
+            verification=verification,
+            snapshot=snapshot,
+            suite=context.suite if context is not None else None,
+            reference_set=context.reference_set if context is not None else None,
+            routing=routing,
+            confidence=confidence,
+        )
+
     def _write_artifacts(
         self,
         result: UnifiedRunResult,
@@ -823,6 +1094,7 @@ class UnifiedAuditRunner:
         assert result.protocol_audit is not None
         scrub = self._scrubber.scrub_text
         artifacts: dict[str, str] = {}
+        fingerprint_section = self._fingerprint_report_section(result)
 
         with tempfile.TemporaryDirectory(prefix="llmtrace-report-") as tmpdir:
             json_path = generate_json_report(
@@ -837,6 +1109,7 @@ class UnifiedAuditRunner:
                 # is computed from the already-scrubbed structure.
                 secret_scrubber=self._scrubber,
                 claimed_model_gap=result.claimed_model_gap,
+                fingerprint_section=fingerprint_section,
             )
             html_path = generate_html_report(
                 result.protocol_audit,
@@ -847,6 +1120,7 @@ class UnifiedAuditRunner:
                 capability_profile=result.capability_profile,
                 secret_scrubber=self._scrubber,
                 claimed_model_gap=result.claimed_model_gap,
+                fingerprint_section=fingerprint_section,
             )
             json_content = json_path.read_text(encoding="utf-8")
             html_content = html_path.read_text(encoding="utf-8")
@@ -867,6 +1141,16 @@ class UnifiedAuditRunner:
             artifacts["behavior_snapshot.json"] = scrub(result.behavior_snapshot.model_dump_json(indent=2))
         if result.benchmark_runs:
             artifacts["benchmark_runs.json"] = scrub(_benchmark_runs_json(result.benchmark_runs))
+        # Optional identity evidence (Task 26).  Every file is additive: a run
+        # that did not ask for fingerprinting writes exactly the old set.
+        if result.fingerprint_snapshot is not None:
+            artifacts["fingerprint_snapshot.json"] = scrub(result.fingerprint_snapshot.model_dump_json(indent=2))
+        if result.fingerprint_match is not None:
+            artifacts["fingerprint_match.json"] = scrub(result.fingerprint_match.model_dump_json(indent=2))
+        if result.fingerprint_verification is not None:
+            artifacts["fingerprint_verification.json"] = scrub(
+                result.fingerprint_verification.model_dump_json(indent=2)
+            )
 
         manifest = RunArtifactManifest(
             execution_id=result.execution_id,
@@ -896,6 +1180,10 @@ class UnifiedAuditRunner:
             reference_set_id=result.plan.reference_set_id,
             reference_set_version=result.plan.reference_set_version,
             reference_set_content_sha256=result.plan.reference_set_content_sha256,
+            fingerprint_profile=result.plan.fingerprint_profile,
+            fingerprint_set_id=result.plan.fingerprint_set_id,
+            fingerprint_set_version=result.plan.fingerprint_set_version,
+            fingerprint_set_content_sha256=result.plan.fingerprint_set_content_sha256,
             warnings=result.warnings,
         )
         self._repository.commit(manifest, artifacts)

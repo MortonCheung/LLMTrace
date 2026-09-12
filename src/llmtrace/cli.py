@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import signal
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,12 +24,29 @@ from llmtrace.constants import (
     MAX_RESPONSE_BYTES_DEFAULT,
 )
 from llmtrace.execution.artifacts import RunArtifactRepository
+from llmtrace.execution.budget import RequestBudget
+from llmtrace.execution.evidence import InMemoryEvidenceRecorder
 from llmtrace.execution.planner import build_unified_execution_plan, derive_target_id, sanitize_target_id
 from llmtrace.execution.protocol_audit import ProtocolAuditExecutor, build_audit_plan
 from llmtrace.execution.runner import UnifiedAuditRunner
+from llmtrace.fingerprint.discovery import resolve_fingerprint_set
+from llmtrace.fingerprint.executor import FingerprintExecutor, assert_evidence_closure
+from llmtrace.fingerprint.models import (
+    FingerprintProfile,
+    FingerprintSampleObservation,
+    FingerprintSourceRole,
+    repetitions_for_profile,
+)
+from llmtrace.fingerprint.reference import build_fingerprint_snapshot
+from llmtrace.fingerprint.reference_set import FingerprintReferenceSetBuilder
+from llmtrace.fingerprint.repository import FingerprintRepository
+from llmtrace.fingerprint.runtime import FingerprintRuntimeContext, resolve_fingerprint_context
+from llmtrace.fingerprint.suite import load_fingerprint_suite
+from llmtrace.fingerprint.validation import validate_fingerprint_policy
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.models.findings import FindingResult
 from llmtrace.providers.base import BaseProvider
+from llmtrace.providers.factory import create_provider
 from llmtrace.reference import ReferenceCaptureService, ReferenceSetBuilder, ReferenceSetRepository
 from llmtrace.reference.capture import ReferenceCaptureStatus
 from llmtrace.reference.reference_set import (
@@ -109,6 +127,26 @@ def _announce_reference_set(set_path: Path) -> None:
     console.print(f"[bold]{reference_set.reference_set_id}[/] v{reference_set.reference_set_version}")
     console.print(f"Members: {len(reference_set.members)} trusted identities")
     console.print(f"Set: {set_path}")
+
+
+def _announce_fingerprint_context(context: FingerprintRuntimeContext) -> None:
+    """Task 36：唯一/显式 fingerprint reference set 解析成功后，开始前告知（只读）."""
+    from rich.console import Console
+
+    reference_set = context.reference_set
+    if context.policy is None:
+        policy_text = "UNVALIDATED"
+    else:
+        validated = "validated" if context.policy.validated else "UNVALIDATED"
+        policy_text = f"{context.policy.policy_id} v{context.policy.policy_version} ({validated})"
+
+    console = Console()
+    console.print()
+    console.print("[bold cyan]Model Verification · Experimental[/]")
+    console.print(f"[bold]{reference_set.fingerprint_set_id}[/] v{reference_set.fingerprint_set_version}")
+    console.print(f"Members: {len(context.references)} reference identities")
+    console.print(f"Policy: {policy_text}")
+    console.print("Behavioral evidence only. This is not cryptographic proof of upstream identity.")
 
 
 @app.command()
@@ -239,6 +277,15 @@ def run(
         None, "--reference-set", help="ReferenceSet JSON 路径（用于 Reference Calibration）"
     ),
     baseline_snapshot: Path = typer.Option(None, "--baseline-snapshot", help="显式基线 BehaviorRunSnapshot JSON 路径"),
+    verify_model: bool = typer.Option(
+        False,
+        "--verify-model",
+        help="采集行为身份证据（与能力评测完全分离；需要 fingerprint reference set）",
+    ),
+    fingerprint_profile: str = typer.Option(
+        "standard", "--fingerprint-profile", help="指纹成本档位: quick, standard, research（不代表准确率）"
+    ),
+    fingerprint_set: Path = typer.Option(None, "--fingerprint-set", help="Fingerprint reference set JSON 路径"),
     compare_latest: bool = typer.Option(
         True, "--compare-latest/--no-compare-latest", help="自动与最新兼容历史运行比较"
     ),
@@ -314,6 +361,62 @@ def run(
             print_error(str(exc), "reference set 预检", partial=False)
             raise typer.Exit(code=1)
 
+    # §Task 35/36: identity evidence is opt-in and completely separate from
+    # capability calibration.  Resolution order mirrors the capability path:
+    # explicit --fingerprint-set > unique compatible discovery > fail closed.
+    # Nothing here sends HTTP, reads an API key, or writes an artifact.
+    resolved_fingerprint_set: Path | None = None
+    fingerprint_profile_enum: FingerprintProfile | None = None
+    fingerprint_context: FingerprintRuntimeContext | None = None
+    fingerprint_repository: FingerprintRepository | None = None
+
+    if fingerprint_set is not None and not verify_model:
+        print_error("--fingerprint-set 只在 --verify-model 下生效", "fingerprint 配置", partial=False)
+        raise typer.Exit(code=1)
+
+    if verify_model:
+        fingerprint_profile_enum = _fingerprint_profile(fingerprint_profile)
+        fingerprint_repetitions = repetitions_for_profile(fingerprint_profile_enum)
+        fingerprint_repository = FingerprintRepository.load()
+        try:
+            resolution = resolve_fingerprint_set(
+                explicit_path=fingerprint_set,
+                repository=fingerprint_repository,
+                repetitions=fingerprint_repetitions,
+            )
+            if resolution.resolved_path is not None:
+                fingerprint_context = resolve_fingerprint_context(
+                    set_path=resolution.resolved_path,
+                    repository=fingerprint_repository,
+                    repetitions=fingerprint_repetitions,
+                )
+        except Exception as exc:
+            print_error(str(exc), "fingerprint reference set 预检", partial=False)
+            raise typer.Exit(code=1)
+
+        if resolution.resolved_path is None:
+            from rich.console import Console as _FingerprintConsole
+
+            _fingerprint_console = _FingerprintConsole()
+            if len(resolution.candidates) > 1:
+                # Never pick at random (Task 36).  Fail closed: the user must choose.
+                _fingerprint_console.print(
+                    "[yellow]Multiple compatible fingerprint reference sets found. "
+                    "Specify one with --fingerprint-set.[/]"
+                )
+                for candidate in resolution.candidates:
+                    _fingerprint_console.print(f"  {candidate}")
+                raise typer.Exit(code=1)
+            print_error(
+                "未找到与本次运行兼容的 fingerprint reference set；"
+                "可用 `llmtrace fingerprint capture` + `set-create` 采集并装配",
+                "fingerprint reference set 预检",
+                partial=False,
+            )
+            raise typer.Exit(code=1)
+
+        resolved_fingerprint_set = resolution.resolved_path
+
     plan = build_unified_execution_plan(
         config,
         target_id=resolved_target,
@@ -322,6 +425,17 @@ def run(
         reference_set_content_sha256=reference_set_content_sha256,
         calibration_policy_id=calibration_policy_id,
         calibration_policy_version=calibration_policy_version,
+        fingerprint_profile=fingerprint_profile_enum,
+        fingerprint_set_id=(
+            fingerprint_context.reference_set.fingerprint_set_id if fingerprint_context is not None else None
+        ),
+        fingerprint_set_version=(
+            fingerprint_context.reference_set.fingerprint_set_version if fingerprint_context is not None else None
+        ),
+        fingerprint_set_content_sha256=(
+            fingerprint_context.reference_set.content_sha256 if fingerprint_context is not None else None
+        ),
+        fingerprint_probe_count=(len(fingerprint_context.suite.probes) if fingerprint_context is not None else 0),
     )
 
     if dry_run:
@@ -352,6 +466,19 @@ def run(
         else:
             dry_run_info["Reference Calibration"] = "UNAVAILABLE"
             dry_run_info["说明"] = "未找到兼容的可信 ReferenceSet，不生成正式 0–100 能力分"
+        if fingerprint_context is not None:
+            # §Task 22: --verify-model 必须进入 dry-run，且请求上限包含指纹请求。
+            dry_run_info["Fingerprint Profile"] = fingerprint_profile
+            dry_run_info["Fingerprint Set"] = (
+                f"{fingerprint_context.reference_set.fingerprint_set_id} "
+                f"v{fingerprint_context.reference_set.fingerprint_set_version}"
+            )
+            dry_run_info["Fingerprint 请求"] = str(plan.fingerprint_requests)
+            dry_run_info["Fingerprint Policy"] = (
+                f"{fingerprint_context.policy.policy_id} v{fingerprint_context.policy.policy_version}"
+                if fingerprint_context.policy is not None
+                else "UNVALIDATED"
+            )
         dry_run_info["历史对比"] = "是" if compare_latest else "否"
         print_dry_run(dry_run_info)
         return
@@ -364,6 +491,10 @@ def run(
     # §9: 自动发现唯一 ReferenceSet 时，在开始前明确显示校准信息。
     if resolved_reference_set is not None:
         _announce_reference_set(resolved_reference_set)
+
+    # §Task 36: 唯一/显式 fingerprint reference set 解析成功后，在开始前告知。
+    if fingerprint_context is not None:
+        _announce_fingerprint_context(fingerprint_context)
 
     if not non_interactive:
         if not sys.stdin.isatty():
@@ -401,6 +532,12 @@ def run(
             max_wall_seconds=max_wall_seconds,
             progress_sink=progress.on_event,
             cancel_token=cancel_token,
+            verify_model=verify_model,
+            fingerprint_profile=(
+                fingerprint_profile_enum if fingerprint_profile_enum is not None else FingerprintProfile.STANDARD
+            ),
+            fingerprint_set_path=resolved_fingerprint_set,
+            fingerprint_repository=fingerprint_repository,
         )
     except SandboxUnavailableError as exc:
         print_error(describe_error(exc, api_key_env=config.api_key_env), "预检", partial=False)
@@ -935,6 +1072,407 @@ def reference_set_create(
     _console.print()
     _console.print("[bold]Next:[/] 直接运行审计即可自动发现本 ReferenceSet：")
     _console.print("  [cyan]llmtrace run --base-url <url> --model <model>[/]")
+
+
+# ---------------------------------------------------------------------------
+# fingerprint（v0.6 Identity Evidence Foundation）
+# ---------------------------------------------------------------------------
+
+#: ``--role`` 的生产取值。``test_fixture`` 刻意缺席：production 路径不提供任何
+#: 生成 test fixture 的 CLI flag（Step 14.2 / Task 40）。
+_FINGERPRINT_ROLES: dict[str, FingerprintSourceRole] = {
+    "trusted-reference": FingerprintSourceRole.TRUSTED_REFERENCE,
+    "official-baseline": FingerprintSourceRole.OFFICIAL_BASELINE,
+}
+
+
+def _fingerprint_role(value: str) -> FingerprintSourceRole:
+    """把 ``--role`` 解析成生产来源角色；未知取值在发出任何请求前 fail closed."""
+    try:
+        return _FINGERPRINT_ROLES[value]
+    except KeyError:
+        raise typer.BadParameter(f"role must be one of {sorted(_FINGERPRINT_ROLES)}, got {value!r}") from None
+
+
+def _fingerprint_profile(value: str) -> FingerprintProfile:
+    """把 ``--profile`` 解析成成本档位；未知取值在发出任何请求前 fail closed."""
+    try:
+        return FingerprintProfile(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"profile must be one of {[profile.value for profile in FingerprintProfile]}, got {value!r}"
+        ) from None
+
+
+def _derive_snapshot_id(
+    *,
+    model: str,
+    role: FingerprintSourceRole,
+    profile: FingerprintProfile,
+) -> str:
+    """未显式给出 ``--snapshot-id`` 时推导一个 filename-safe 标识.
+
+    snapshot 是 append-only 的，所以默认标识带 UTC 时间戳：同一基线在不同时间
+    采集得到不同 snapshot，而不是被覆盖或判为重复。
+    """
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", model).strip("-") or "model"
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"{slug}-{role.value.replace('_', '-')}-{profile.value}-{stamp}"
+
+
+fingerprint_app = typer.Typer(
+    name="fingerprint",
+    help="Fingerprint：捕获模型身份行为证据（v0.6，与能力评测完全分离）",
+    no_args_is_help=True,
+)
+app.add_typer(fingerprint_app, name="fingerprint")
+
+
+@fingerprint_app.command("capture")
+def fingerprint_capture(
+    protocol: str = typer.Option(DEFAULT_PROTOCOL, "--protocol", "-p", help="协议类型: openai 或 anthropic"),
+    base_url: str = typer.Option(..., "--base-url", "-u", help="API Base URL"),
+    model: str = typer.Option(..., "--model", "-m", help="模型名称（声明标签，不是身份判定）"),
+    role: str = typer.Option(
+        "trusted-reference",
+        "--role",
+        help="采集来源角色: trusted-reference 或 official-baseline（operator 断言，非上游归属证明）",
+    ),
+    profile: str = typer.Option("standard", "--profile", help="成本档位: quick, standard, research（不代表准确率）"),
+    api_key_env: str = typer.Option(
+        DEFAULT_API_KEY_ENV, "--api-key-env", "-k", help="API Key 环境变量名（不直接传 key）"
+    ),
+    auth_style: str = typer.Option("auto", "--auth-style", help="鉴权方式: auto, bearer, x-api-key, both"),
+    provider_id: str = typer.Option(None, "--provider-id", help="参考源操作标识（元数据，非身份声明；缺省取协议名）"),
+    snapshot_id: str = typer.Option(None, "--snapshot-id", help="唯一 filename-safe snapshot 标识（缺省自动推导）"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="数据目录（默认 $LLMTRACE_HOME 或 ~/.llmtrace）"),
+    timeout: float = typer.Option(DEFAULT_TIMEOUT, "--timeout", "-t", help="请求超时(秒)"),
+    non_interactive: bool = typer.Option(False, "--yes", "-y", help="跳过确认"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """对一个 endpoint 做一次指纹采集并保存自哈希 snapshot.
+
+    真实请求全部经由 Provider → RequestBudget → EvidenceRecorder（Rule 4）：
+    Provider 统一消费预算并记录 HTTPEvidence，executor 不持有旁路 HTTP client，
+    因此本命令不产生任何能力/校准数据。
+
+    Operator 断言 endpoint 属于所声明的来源角色；LLMTrace 只记录声明与测量
+    provenance，不独立证明上游归属（Rule 3 / Task 48）。
+    """
+    import sys
+
+    from rich.console import Console as _RichConsole
+
+    resolved_role = _fingerprint_role(role)
+    resolved_profile = _fingerprint_profile(profile)
+    repetitions = repetitions_for_profile(resolved_profile)
+    suite = load_fingerprint_suite()
+    resolved_provider_id = provider_id if provider_id else protocol
+    resolved_snapshot_id = (
+        snapshot_id if snapshot_id else _derive_snapshot_id(model=model, role=resolved_role, profile=resolved_profile)
+    )
+
+    config = AuditConfig(
+        protocol=Protocol(protocol),
+        base_url=base_url,
+        model=model,
+        api_key_env=api_key_env,
+        auth_style=AuthStyle(auth_style),
+        repeat_count=DEFAULT_REPEAT_COUNT,
+        timeout=timeout,
+    )
+    probe_requests = len(suite.probes) * repetitions
+
+    api_key = check_api_key(config.api_key_env)
+    if api_key is None:
+        print_error(f"环境变量 {config.api_key_env} 不存在或为空", "配置检查", partial=False)
+        raise typer.Exit(code=1)
+
+    if not non_interactive:
+        if not sys.stdin.isatty():
+            print_error("非交互式执行需要 --yes", "确认", partial=False)
+            raise typer.Exit(code=1)
+        # Never echo a raw base URL: it may carry userinfo credentials or a
+        # secret query parameter (§34).  redact_url is the single scrubber.
+        if not typer.confirm(
+            f"本次 fingerprint capture 将向 {redact_url(config.base_url)} 发送最多 {probe_requests} 个请求。是否继续？"
+        ):
+            raise typer.Exit(code=0)
+
+    repository = FingerprintRepository.load(data_root=data_dir)
+    budget = RequestBudget(probe_requests)
+    recorder = InMemoryEvidenceRecorder()
+
+    async def _capture(key: str) -> tuple[FingerprintSampleObservation, ...]:
+        """单次 provider 生命周期内跑完全部探测轮次（Rule 4 的唯一 owner）."""
+        provider = create_provider(config, key, evidence_recorder=recorder, request_budget=budget)
+        async with provider:
+            return await FingerprintExecutor(provider=provider, suite=suite).run(
+                model=model,
+                repetitions=repetitions,
+            )
+
+    try:
+        observations = asyncio.run(_capture(api_key))
+        # Task 27: every observation must point at evidence this capture really
+        # recorded — no fabricated ref may reach a snapshot.
+        assert_evidence_closure(observations, {str(evidence.evidence_id) for evidence in recorder.list()})
+        snapshot = build_fingerprint_snapshot(
+            snapshot_id=resolved_snapshot_id,
+            model_id=model,
+            provider_id=resolved_provider_id,
+            source_role=resolved_role,
+            suite=suite,
+            repetitions=repetitions,
+            observations=observations,
+        )
+        repository.snapshots.save(snapshot)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
+    except Exception as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        scrubber = SecretScrubber([api_key, *extract_url_secret_values(config.base_url)])
+        print_error(
+            scrubber.scrub_text(describe_error(exc, api_key_env=config.api_key_env)),
+            "fingerprint capture",
+            partial=True,
+        )
+        raise typer.Exit(code=1)
+
+    valid_samples = sum(1 for observation in observations if observation.valid)
+    snapshot_path = repository.layout.fingerprint_snapshots_dir / f"{snapshot.snapshot_id}.json"
+
+    # §14: 完成输出要有明确的下一步，不止是文件路径（Task 39）。
+    _console = _RichConsole()
+    _console.print()
+    _console.print("[bold green]Fingerprint capture complete[/]")
+    _console.print()
+    _console.print("Model")
+    _console.print(f"[bold]{snapshot.model_id}[/]")
+    _console.print()
+    _console.print("Role")
+    _console.print(f"operator-asserted {snapshot.source_role.value.replace('_', ' ')}")
+    _console.print()
+    _console.print("Suite")
+    _console.print(f"{snapshot.suite_id} {snapshot.suite_version}")
+    _console.print()
+    _console.print("Samples")
+    _console.print(f"{valid_samples} / {len(snapshot.observations)}")
+    _console.print()
+    _console.print("Snapshot")
+    _console.print(str(snapshot_path))
+    _console.print()
+    _console.print("[bold]Next:[/] 将本次采集加入 fingerprint 参考集：")
+    _console.print(
+        f"  [cyan]llmtrace fingerprint set-create --set-id <id> --set-version <version> "
+        f"--snapshot {snapshot.snapshot_id}[/]"
+    )
+
+
+@fingerprint_app.command("set-create")
+def fingerprint_set_create(
+    set_id: str = typer.Option(..., "--set-id", help="唯一 fingerprint reference set 标识"),
+    set_version: str = typer.Option(..., "--set-version", help="set 修订版本（filename-safe）"),
+    snapshots: list[str] = typer.Option(..., "--snapshot", help="成员 snapshot id（可重复传入）"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="数据目录（默认 $LLMTRACE_HOME 或 ~/.llmtrace）"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """从已验证的 fingerprint snapshot 构建并保存 reference set（0 API 请求）.
+
+    流程（Task 40）：加载 snapshot → 校验内容身份与磁盘字节 → 兼容门禁
+    （套件 / 归一化策略 / 生成配置 / 重复轮数）→ append-only 落盘。
+
+    Fail closed 的情况：``test_fixture`` / ``candidate_capture`` 快照、被篡改的
+    快照、与集合不一致的配置、重复 snapshot、重复 ``(set_id, set_version)``。
+    Production 路径不提供 ``--allow-test-fixture``：test fixture 永远进不了
+    trusted set（Step 14.2）。
+    """
+    from rich.console import Console as _RichConsole
+
+    try:
+        repository = FingerprintRepository.load(data_root=data_dir)
+        loaded = [repository.snapshots.get(snapshot_id) for snapshot_id in snapshots]
+        # verify() 同时校验声明的内容身份与磁盘字节：被篡改的快照在这里 fail closed。
+        snapshot_sha256s = {snapshot_id: repository.snapshots.verify(snapshot_id) for snapshot_id in snapshots}
+        reference_set = FingerprintReferenceSetBuilder().build(
+            fingerprint_set_id=set_id,
+            fingerprint_set_version=set_version,
+            snapshots=loaded,
+            snapshot_sha256s=snapshot_sha256s,
+        )
+        repository.sets.save(reference_set)
+    except Exception as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        print_error(str(exc), "fingerprint set-create", partial=False)
+        raise typer.Exit(code=1)
+
+    identities = {(member.provider_id, member.model_id) for member in reference_set.members}
+    set_path = repository.layout.fingerprint_sets_dir / f"{set_id}_{set_version}.json"
+
+    _console = _RichConsole()
+    _console.print()
+    _console.print("[bold green]FingerprintSet complete[/]")
+    _console.print(f"ID:         [bold]{set_id}[/] v{set_version}")
+    _console.print(f"Members:    {len(reference_set.members)} captures")
+    _console.print(f"Identities: {len(identities)}")
+    _console.print(f"Set:        {set_path}")
+    _console.print()
+    _console.print("[bold]Next:[/] 用 held-out 验证生成 decision policy（没有验证就不给判定结论）：")
+    _console.print(
+        f"  [cyan]llmtrace fingerprint validate --set-id {set_id} --set-version {set_version} "
+        f"--policy-id <policy-id> --policy-version <version>[/]"
+    )
+
+
+@fingerprint_app.command("validate")
+def fingerprint_validate(
+    set_id: str = typer.Option(..., "--set-id", help="fingerprint reference set 标识"),
+    set_version: str = typer.Option(..., "--set-version", help="fingerprint reference set 版本"),
+    policy_id: str = typer.Option(..., "--policy-id", help="本次验证产出的 policy 标识"),
+    policy_version: str = typer.Option(..., "--policy-version", help="本次验证产出的 policy 版本"),
+    min_comparable_probes: int | None = typer.Option(
+        None,
+        "--min-comparable-probes",
+        help="可比 probe 下限（缺省取套件 probe 总数，即最保守的下限）",
+    ),
+    max_far: float = typer.Option(0.01, "--max-far", help="允许的 false accept rate 上界"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="数据目录（默认 $LLMTRACE_HOME 或 ~/.llmtrace）"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """对 reference set 执行 leave-one-capture-out held-out 验证并保存 policy（0 API 请求）.
+
+    条件不足（identity 数或每个 identity 的独立 capture 数不够、没有满足 FAR 约束的
+    threshold）时输出 ``Validated NO`` 并以 exit 0 结束 —— 这不是异常，只是"还不能
+    给出判定结论"（Step 18.1）。只有 ``Validated YES`` 的 policy 才会在 run 中给出
+    行为一致/不一致的判定（Rule 2）。
+    """
+    from rich.console import Console as _RichConsole
+
+    suite = load_fingerprint_suite()
+    resolved_minimum = min_comparable_probes if min_comparable_probes is not None else len(suite.probes)
+
+    try:
+        repository = FingerprintRepository.load(data_root=data_dir)
+        reference_set = repository.sets.get(set_id, set_version)
+        members = [repository.snapshots.get(member.snapshot_id) for member in reference_set.members]
+        policy, report = validate_fingerprint_policy(
+            reference_set=reference_set,
+            snapshots=members,
+            suite=suite,
+            policy_id=policy_id,
+            policy_version=policy_version,
+            minimum_comparable_probes=resolved_minimum,
+            max_far_target=max_far,
+        )
+        repository.policies.save(policy)
+    except Exception as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        print_error(str(exc), "fingerprint validate", partial=False)
+        raise typer.Exit(code=1)
+
+    def _rate(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.2f}"
+
+    threshold_text = "n/a" if policy.distance_threshold is None else f"{policy.distance_threshold:.4f}"
+    policy_path = repository.layout.fingerprint_policies_dir / f"{policy_id}_{policy_version}.json"
+
+    _console = _RichConsole()
+    _console.print()
+    _console.print("[bold green]Fingerprint validation complete[/]")
+    _console.print(f"Identity count:    {report.identity_count}")
+    _console.print(f"Held-out captures: {len(report.outcomes)}")
+    _console.print(f"Top-1:             {_rate(report.top1_accuracy)}")
+    _console.print(f"Top-3:             {_rate(report.top3_accuracy)}")
+    _console.print(f"TPR:               {_rate(policy.true_positive_rate)}")
+    _console.print(f"FAR:               {_rate(policy.false_accept_rate)}")
+    _console.print(f"Threshold:         {threshold_text}")
+    _console.print(f"[bold]Validated {'YES' if policy.validated else 'NO'}[/]")
+    if report.insufficient_reason is not None:
+        _console.print(f"Reason: {report.insufficient_reason}")
+    _console.print(f"Policy: {policy_path}")
+    _console.print()
+    _console.print("[bold]Next:[/] 在审计中启用行为一致性验证（需 reference set 与本次轮数一致）：")
+    _console.print(
+        "  [cyan]llmtrace run --base-url <url> --model <model> --verify-model --fingerprint-set <set.json>[/]"
+    )
+
+
+@fingerprint_app.command("inspect")
+def fingerprint_inspect(
+    snapshot: str | None = typer.Option(None, "--snapshot", help="只看某个 snapshot 的详情（缺省列出仓库概况）"),
+    data_dir: Path | None = typer.Option(None, "--data-dir", help="数据目录（默认 $LLMTRACE_HOME 或 ~/.llmtrace）"),
+    debug: bool = typer.Option(False, "--debug", help="显示完整异常堆栈"),
+) -> None:
+    """只读查看 fingerprint 仓库或其某个 snapshot（0 API 请求、0 写入）."""
+    from rich.console import Console as _RichConsole
+
+    _console = _RichConsole()
+
+    try:
+        repository = FingerprintRepository.load(data_root=data_dir)
+        if snapshot is not None:
+            loaded = repository.snapshots.get(snapshot)
+            disk_sha256 = repository.snapshots.verify(snapshot)
+        else:
+            loaded = None
+            disk_sha256 = ""
+    except Exception as exc:
+        if debug:
+            import traceback
+
+            traceback.print_exc()
+        print_error(str(exc), "fingerprint inspect", partial=False)
+        raise typer.Exit(code=1)
+
+    if loaded is not None:
+        valid_samples = sum(1 for observation in loaded.observations if observation.valid)
+        snapshot_path = repository.layout.fingerprint_snapshots_dir / f"{loaded.snapshot_id}.json"
+        _console.print()
+        _console.print(f"Snapshot:  [bold]{loaded.snapshot_id}[/]")
+        _console.print(f"Identity:  {loaded.provider_id} / {loaded.model_id}")
+        _console.print(f"Role:      operator-asserted {loaded.source_role.value.replace('_', ' ')}")
+        _console.print(f"Suite:     {loaded.suite_id} {loaded.suite_version}")
+        _console.print(f"Rounds:    {loaded.repetitions}")
+        _console.print(f"Samples:   {valid_samples} / {len(loaded.observations)} valid")
+        _console.print(f"Captured:  {loaded.captured_at.isoformat()}")
+        _console.print(f"Integrity: verified ({disk_sha256})")
+        _console.print(f"File:      {snapshot_path}")
+        return
+
+    snapshots = repository.snapshots.list()
+    sets = repository.sets.list()
+    policies = repository.policies.list()
+
+    _console.print()
+    _console.print("[bold]Fingerprint repository[/]")
+    _console.print(f"Data root: {repository.layout.root}")
+    _console.print()
+    _console.print(f"Snapshots: {len(snapshots)}")
+    for item in snapshots:
+        _console.print(
+            f"  {item.snapshot_id}  {item.provider_id} / {item.model_id}  "
+            f"{item.source_role.value}  rounds={item.repetitions}"
+        )
+    _console.print(f"Sets: {len(sets)}")
+    for reference_set in sets:
+        _console.print(
+            f"  {reference_set.fingerprint_set_id} v{reference_set.fingerprint_set_version}  "
+            f"members={len(reference_set.members)}"
+        )
+    _console.print(f"Policies: {len(policies)}")
+    for policy in policies:
+        _console.print(
+            f"  {policy.policy_id} v{policy.policy_version}  validated={'YES' if policy.validated else 'NO'}"
+        )
 
 
 @app.command()

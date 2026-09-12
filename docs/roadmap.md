@@ -254,6 +254,8 @@ Quick Suite 重复运行的统计置信区间（v0.5+）。
 
 > 定位转变：先产品化（可用的本地工具），再精修。Roadmap 不再按
 > "v0.5 Fingerprint + v0.6 Web" 串行展开，指纹/路由类能力进入未来方向。
+> （v0.6 后续以 **CLI-first** 方式单独交付 Identity Evidence Foundation，见下节；
+> Web / Service 的 fingerprint 接线仍为 deferred。）
 
 - **本地 Web 应用**：`llmtrace web`（默认 `127.0.0.1:8765`）——New Audit / Running（SSE 实时进度）/
   Result / History 页面，Jinja + Vanilla JS，无外部前端依赖；API Key 仅存进程内存
@@ -268,6 +270,78 @@ Quick Suite 重复运行的统计置信区间（v0.5+）。
 
 完成标准：`llmtrace web`（`--demo`）真实启动，Web 表单 → create → estimate → start → SSE →
 runner → report → history 全流程跑通，门禁全绿。√ 已达成。
+
+## v0.6 Identity Evidence Foundation（已完成，Experimental）
+
+> 定位：在**不触碰** Capability / Calibration / ReferenceSet 语义的前提下，新增一层与能力评测
+> **完全分离**的行为身份证据层。里程碑为 **CLI-first**；Web / Service 执行路径本轮冻结。
+> 方法论见 [`docs/methodology/fingerprinting.md`](./methodology/fingerprinting.md) 与
+> [`docs/methodology/routing.md`](./methodology/routing.md)；
+> 外部影响与许可台账见 [`docs/research/external-influences.md`](./research/external-influences.md)。
+
+### 已完成内容
+
+- **categorical fingerprint probe suite**：`llmtrace-fingerprint-categorical` v0.1.0
+  （6 个低熵分类探测项，normalization policy `llmtrace-exact-choice` v1.0.0，套件 `content_sha256` 自校验）
+- **repeated stochastic sampling**：`--fingerprint-profile quick|standard|research`（4 / 8 / 16 轮，
+  仅表示成本档位、不表示准确率）；按轮交错执行，避免时间漂移被误读为 probe 差异
+- **JSD distribution matching**：per-probe Jensen–Shannon 散度 + 按权重聚合距离（纯 stdlib `math`，
+  无 numpy / scipy / sklearn）
+- **FingerprintReferenceSnapshot**：不可变、append-only、自哈希的参考采集（角色
+  `trusted_reference` / `official_baseline` / `test_fixture` / `candidate_capture`）
+- **FingerprintReferenceSet**：多快照装配的受信任参考集，content hash 自校验 + 成员完整性校验；
+  生产 builder 拒绝 `test_fixture`；`candidate_capture` 永不进入参考集
+- **held-out validation**：leave-one-capture-out（≥ 5 identity × ≥ 2 capture），
+  最低条件不满足即 `validated = False`
+- **FingerprintDecisionPolicy**：只有通过验证才携带 threshold / TPR / FAR / temporal baseline；
+  未验证 policy 在模型层禁止携带这些字段（Rule 2）
+- **claimed-model consistency**：validated policy + 被声称身份参考 + 足够可比证据
+  → `BEHAVIOR_CONSISTENT_WITH_CLAIM` / `BEHAVIOR_INCONSISTENT_WITH_CLAIM`；否则仅 `RANKED_ONLY` / `INCONCLUSIVE`
+- **routing v2 evidence**：强证据（多 identifier 无主导 / 已验证参考匹配跨窗口切换 /
+  候选时间散度超参考基线）与支持证据（延迟离散度 / token 离散度 / provider 失败率）分层；
+  四个既有标签不变；支持证据单独不产生 "mixed routing detected"
+- **domain-specific fingerprint confidence**：`HIGH` / `MEDIUM` / `LOW` / `UNAVAILABLE`
+- **CLI integration**：`llmtrace fingerprint capture|set-create|validate|inspect`
+  与 `llmtrace run --verify-model [--fingerprint-profile] [--fingerprint-set]`；
+  参考集自动发现（显式 > 唯一兼容 > 无；多个兼容集合 fail closed）
+- **JSON/HTML artifact integration**：报告新增 `fingerprint` 段
+  （suite / reference_set / decision_policy / aggregate_jsd / per_probe_jsd / top_k /
+  claimed_model_id / claimed_reference_distance / verdict / routing）；
+  工件含 `fingerprint_snapshot.json` / `fingerprint_match.json` / `fingerprint_verification.json`
+- 语义纪律：报告文本禁止定罪式措辞；身份证据必须与
+  "not cryptographic proof of upstream model identity" 免责声明同时出现
+- 质量：Ruff + Format + Mypy + Pytest 全量回归（1497 passed / 1 skipped，coverage 89.33%，阈值 68%）
+
+完成标准：受信任参考集 → 候选端点 `run --verify-model` → claim consistency +
+Top-K 行为匹配 + routing 证据 + 完整工件；无兼容参考集时 Model Verification = `Unavailable`
+且能力审计继续；`Suspicious` 不改变 run status。√ 已达成。
+
+### Deferred（v0.6 明确不做）
+
+Web / Service 路径的 fingerprint 接线：`RunService.start()` 尚未接线 `verify_model` /
+`fingerprint_profile` / `fingerprint_set_path`。
+
+> **RunService fingerprint option wiring is deferred to the future Web/Service milestone.
+> The CLI execution path is the supported v0.6 identity-verification path.**
+
+本轮不修改 `RunService.start()`：`llmtrace run --verify-model` 的 `UnifiedAuditRunner` 路径
+已完成并通过端到端验证，Service / Web execution path 当前冻结。
+
+## v0.7 Relay Integrity / Protocol Conformance（未开始）
+
+## v0.8 Claims Verification / Billing Integrity（未开始）
+
+## v0.9 Evaluation Reliability / Standard-Deep（未开始）
+
+## Research（仅登记，不在本轮实现）
+
+```text
+Rank-Based Uniformity Test
+LLMPrint-style stronger statistical verification
+natural-query anti-evasion fingerprinting
+open-set model verification
+mixture / routing statistical estimation
+```
 
 ## 未来方向（先产品化，再精修）
 

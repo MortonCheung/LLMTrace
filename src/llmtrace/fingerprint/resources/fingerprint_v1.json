@@ -1,0 +1,62 @@
+{
+  "suite_id": "llmtrace-fingerprint-categorical",
+  "suite_version": "0.1.0",
+  "normalization_policy_id": "llmtrace-exact-choice",
+  "normalization_policy_version": "1.0.0",
+  "probes": [
+    {
+      "probe_id": "symbol-choice",
+      "prompt": "Select exactly one item from this list: circle, square, triangle, star. Return only the selected item.",
+      "choices": ["circle", "square", "triangle", "star"],
+      "temperature": 1.0,
+      "max_output_tokens": 8,
+      "weight": 1.0,
+      "tags": ["categorical", "neutral"]
+    },
+    {
+      "probe_id": "direction-choice",
+      "prompt": "Select exactly one item from this list: north, east, south, west. Return only the selected item.",
+      "choices": ["north", "east", "south", "west"],
+      "temperature": 1.0,
+      "max_output_tokens": 8,
+      "weight": 1.0,
+      "tags": ["categorical", "neutral"]
+    },
+    {
+      "probe_id": "prime-choice",
+      "prompt": "Select exactly one item from this list: 2, 3, 5, 7. Return only the selected item.",
+      "choices": ["2", "3", "5", "7"],
+      "temperature": 1.0,
+      "max_output_tokens": 8,
+      "weight": 1.0,
+      "tags": ["categorical", "numeric"]
+    },
+    {
+      "probe_id": "season-choice",
+      "prompt": "Select exactly one item from this list: spring, summer, autumn, winter. Return only the selected item.",
+      "choices": ["spring", "summer", "autumn", "winter"],
+      "temperature": 1.0,
+      "max_output_tokens": 8,
+      "weight": 1.0,
+      "tags": ["categorical", "neutral"]
+    },
+    {
+      "probe_id": "weekday-choice",
+      "prompt": "Select exactly one item from this list: monday, friday, saturday, sunday. Return only the selected item.",
+      "choices": ["monday", "friday", "saturday", "sunday"],
+      "temperature": 1.0,
+      "max_output_tokens": 8,
+      "weight": 1.0,
+      "tags": ["categorical", "neutral"]
+    },
+    {
+      "probe_id": "color-choice",
+      "prompt": "Select exactly one item from this list: red, blue, green, yellow. Return only the selected item.",
+      "choices": ["red", "blue", "green", "yellow"],
+      "temperature": 1.0,
+      "max_output_tokens": 8,
+      "weight": 1.0,
+      "tags": ["categorical", "neutral"]
+    }
+  ]
+}

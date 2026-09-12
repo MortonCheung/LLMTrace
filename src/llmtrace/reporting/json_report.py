@@ -21,7 +21,8 @@ from llmtrace.utilities.hashing import sha256_hash
 # Single source of truth for schema version
 # 1.1 → 1.2: added the optional `behavior_drift` section (v0.3-D).
 # 1.2 → 1.3: added `capability_profile` and execution metadata (v0.3-E).
-SCHEMA_VERSION = "1.3"
+# 1.3 → 1.4: added the optional experimental `fingerprint` section (v0.6 identity evidence).
+SCHEMA_VERSION = "1.4"
 
 
 def evidence_to_dict(ev: HTTPEvidence) -> dict[str, object]:
@@ -227,8 +228,9 @@ def generate_json_report(
     execution_metadata: dict[str, object] | None = None,
     secret_scrubber: SecretScrubber | None = None,
     claimed_model_gap: ClaimedModelGap | None = None,
+    fingerprint_section: dict[str, object] | None = None,
 ) -> Path:
-    """生成 JSON 报告（v1.3 — 支持 benchmark / behavior_drift / capability_profile 段).
+    """生成 JSON 报告（v1.4 — 支持 benchmark / behavior_drift / capability_profile / fingerprint 段).
 
     Args:
         result: 审计结果.
@@ -236,9 +238,14 @@ def generate_json_report(
         benchmark_sections: 可选 benchmark 报告段列表.
         reference_comparison: 可选 reference comparison 段（Reference Snapshot vs Candidate）.
         behavior_drift: 可选 behavior drift 段（BehaviorRunSnapshot vs BehaviorRunSnapshot）.
+        capability_profile: 可选 capability profile 段.
+        execution_metadata: 可选执行元数据.
         secret_scrubber: 可选持久化边界 scrubber；若提供，则在 content_hash
             计算**之前**对完整 report 结构做精确值脱敏，保证 hash 描述的就是
             实际落盘的字节.
+        claimed_model_gap: 可选 claimed model gap 段.
+        fingerprint_section: 由 :func:`build_fingerprint_section` 产出的身份证据段；
+            传入 ``None`` 时报告里不出现 ``fingerprint`` 键（本次 run 无身份证据）.
 
     Returns:
         写入后的输出文件路径.
@@ -308,6 +315,9 @@ def generate_json_report(
 
     if claimed_model_gap is not None:
         report["claimed_model_gap"] = _claimed_model_gap_to_dict(claimed_model_gap)
+
+    if fingerprint_section is not None:
+        report["fingerprint"] = fingerprint_section
 
     if execution_metadata is not None:
         report["execution"] = execution_metadata

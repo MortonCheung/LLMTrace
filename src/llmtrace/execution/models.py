@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import ClassVar
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_va
 from llmtrace.analysis.behavior_drift import BehaviorDriftResult
 from llmtrace.analysis.behavior_models import BehaviorRunSnapshot
 from llmtrace.benchmarks.models import BenchmarkRunResult, RunPlan
+from llmtrace.fingerprint.matcher import FingerprintMatchResult, FingerprintVerificationResult
+from llmtrace.fingerprint.reference import FingerprintReferenceSnapshot
 from llmtrace.models.audit import AuditResult
 from llmtrace.models.evidence import HTTPEvidence
 from llmtrace.reporting.benchmark_models import BenchmarkReportSection
@@ -49,15 +52,36 @@ _CALIBRATION_CONTEXT_FIELDS = (
 )
 
 
-def _assert_calibration_context_all_or_none(model: BaseModel, label: str) -> None:
-    """Require the five calibration-context fields to be all None or all set."""
-    values = [getattr(model, name) for name in _CALIBRATION_CONTEXT_FIELDS]
+def _assert_all_or_none(model: BaseModel, field_names: Sequence[str], label: str) -> None:
+    """Require every named provenance field to be all None or all set."""
+    values = [getattr(model, name) for name in field_names]
     if any(v is not None for v in values) and not all(v is not None for v in values):
-        missing = [name for name in _CALIBRATION_CONTEXT_FIELDS if getattr(model, name) is None]
+        missing = [name for name in field_names if getattr(model, name) is None]
         raise ValueError(
-            f"{label} calibration context must be all-or-none "
+            f"{label} provenance must be all-or-none "
             f"(all fields set together or all None); missing: {', '.join(missing)}"
         )
+
+
+def _assert_calibration_context_all_or_none(model: BaseModel, label: str) -> None:
+    """Require the five calibration-context fields to be all None or all set."""
+    _assert_all_or_none(model, _CALIBRATION_CONTEXT_FIELDS, f"{label} calibration context")
+
+
+# The four fingerprint-context provenance fields (Task 21 / Task 26).  Same
+# all-or-none rule as the calibration context: a partial record would make the
+# plan's fingerprint identity un-auditable.
+_FINGERPRINT_CONTEXT_FIELDS = (
+    "fingerprint_profile",
+    "fingerprint_set_id",
+    "fingerprint_set_version",
+    "fingerprint_set_content_sha256",
+)
+
+
+def _assert_fingerprint_context_all_or_none(model: BaseModel, label: str) -> None:
+    """Require the four fingerprint-context fields to be all None or all set."""
+    _assert_all_or_none(model, _FINGERPRINT_CONTEXT_FIELDS, f"{label} fingerprint context")
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +147,27 @@ class UnifiedExecutionPlan(BaseModel):
         description="ReferenceSet content hash; None when no calibration",
     )
 
+    # ---- Optional fingerprint (identity evidence) context -------------------
+    # Off by default: a run without --verify-model keeps today's exact plan.
+    fingerprint_requests: int = Field(
+        default=0,
+        ge=0,
+        description="Planned fingerprint probe requests (probes x repetitions); 0 when identity evidence is off",
+    )
+    fingerprint_profile: str | None = Field(
+        default=None,
+        description="Fingerprint cost profile (quick/standard/research); cost tier only, never accuracy",
+    )
+    fingerprint_set_id: str | None = Field(
+        default=None,
+        description="Fingerprint reference set id; None when identity evidence is off",
+    )
+    fingerprint_set_version: str | None = Field(default=None)
+    fingerprint_set_content_sha256: str | None = Field(
+        default=None,
+        description="Fingerprint reference set content hash; None when identity evidence is off",
+    )
+
     model_config = {"frozen": True, "extra": "forbid"}
 
     @field_validator("suite_content_sha256")
@@ -137,18 +182,36 @@ class UnifiedExecutionPlan(BaseModel):
             return None
         return _normalize_sha256(v, "reference_set_content_sha256")
 
+    @field_validator("fingerprint_set_content_sha256")
+    @classmethod
+    def _validate_fingerprint_set_content_sha256(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalize_sha256(v, "fingerprint_set_content_sha256")
+
     @model_validator(mode="after")
     def _check_consistency(self) -> UnifiedExecutionPlan:
-        if self.planned_requests != self.protocol_probe_requests + self.benchmark_requests:
+        if self.planned_requests != (
+            self.protocol_probe_requests + self.benchmark_requests + self.fingerprint_requests
+        ):
             raise ValueError(
-                f"planned_requests ({self.planned_requests}) must equal "
-                f"protocol ({self.protocol_probe_requests}) + benchmark ({self.benchmark_requests})"
+                f"planned_requests ({self.planned_requests}) must equal protocol "
+                f"({self.protocol_probe_requests}) + benchmark ({self.benchmark_requests}) + "
+                f"fingerprint ({self.fingerprint_requests})"
             )
         if self.maximum_requests < self.planned_requests:
             raise ValueError(
                 f"maximum_requests ({self.maximum_requests}) must be >= planned_requests ({self.planned_requests})"
             )
         _assert_calibration_context_all_or_none(self, "UnifiedExecutionPlan")
+        _assert_fingerprint_context_all_or_none(self, "UnifiedExecutionPlan")
+        # The request count and the provenance bundle must agree: a context
+        # without planned requests (or the reverse) is an un-auditable plan.
+        if (self.fingerprint_profile is not None) != (self.fingerprint_requests > 0):
+            raise ValueError(
+                "fingerprint context and fingerprint_requests must be set together "
+                f"(profile={self.fingerprint_profile!r}, requests={self.fingerprint_requests})"
+            )
         return self
 
 
@@ -212,6 +275,14 @@ class RunArtifactManifest(BaseModel):
     reference_set_version: str | None = Field(default=None)
     reference_set_content_sha256: str | None = Field(default=None)
 
+    fingerprint_profile: str | None = Field(
+        default=None,
+        description="Fingerprint cost profile; None when identity evidence was not requested",
+    )
+    fingerprint_set_id: str | None = Field(default=None)
+    fingerprint_set_version: str | None = Field(default=None)
+    fingerprint_set_content_sha256: str | None = Field(default=None)
+
     warnings: tuple[str, ...] = Field(default_factory=tuple)
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -230,11 +301,20 @@ class RunArtifactManifest(BaseModel):
             return None
         return _normalize_sha256(v, "suite_content_sha256")
 
+    @field_validator("fingerprint_set_content_sha256")
+    @classmethod
+    def _validate_manifest_fingerprint_set_content_sha256(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return _normalize_sha256(v, "fingerprint_set_content_sha256")
+
     @model_validator(mode="after")
     def _check_calibration_context_completeness(self) -> RunArtifactManifest:
-        """Calibration provenance is copied from the plan, so it must obey the
-        same all-or-none rule.  Legacy manifests (all None) stay valid."""
+        """Calibration and fingerprint provenance are copied from the plan, so
+        they must obey the same all-or-none rule.  Legacy manifests (all None)
+        stay valid — and remain readable, since every new field is optional."""
         _assert_calibration_context_all_or_none(self, "RunArtifactManifest")
+        _assert_fingerprint_context_all_or_none(self, "RunArtifactManifest")
         return self
 
 
@@ -310,6 +390,22 @@ class UnifiedRunResult(BaseModel):
     claimed_model_gap: ClaimedModelGap | None = Field(
         default=None,
         description="Capability gap vs the claimed model's trusted reference; None when unavailable (§13)",
+    )
+
+    # ---- Optional fingerprint (identity evidence) outputs -------------------
+    # All None unless the run was asked for identity evidence.  These are
+    # behavioral evidence only — never an upstream identity verdict (Rule 3).
+    fingerprint_snapshot: FingerprintReferenceSnapshot | None = Field(
+        default=None,
+        description="This run's candidate capture (source_role=candidate_capture)",
+    )
+    fingerprint_match: FingerprintMatchResult | None = Field(
+        default=None,
+        description="Ranked behavioral distances and the achieved verdict level",
+    )
+    fingerprint_verification: FingerprintVerificationResult | None = Field(
+        default=None,
+        description="Why this run could (not) produce a claim verdict — the Rule 2 gate record",
     )
 
     evidence: tuple[HTTPEvidence, ...] = Field(default_factory=tuple, description="Central evidence, arrival order")

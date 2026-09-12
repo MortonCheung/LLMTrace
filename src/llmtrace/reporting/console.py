@@ -23,10 +23,31 @@ from llmtrace.execution.progress import (
     STAGE_REPORTING,
     STAGE_SCORING,
 )
+from llmtrace.fingerprint.models import FingerprintMatchStatus
 from llmtrace.models.audit import AuditResult, RiskLevel
 from llmtrace.security.redaction import redact_url
 
 _console = Console()
+
+#: "Top Behavioral Matches" 控制台预览条数；纯展示截断，不是阈值、不是 Top-K 结论。
+_TOP_MATCH_DISPLAY_LIMIT = 3
+
+#: matcher status → 控制台 "Claim Consistency" 文案（Task 42 / Task 43 / Task 20）.
+#:
+#: ``RANKED_ONLY`` 的含义是"只有排序、没有 validated policy 支撑的判定"，在控制台上
+#: 就是 INCONCLUSIVE；它绝不能被写成任何形式的身份结论（Rule 2 / Rule 3 / Task 48）。
+_CLAIM_CONSISTENCY_LABELS = {
+    FingerprintMatchStatus.CONSISTENT_WITH_CLAIM: "BEHAVIOR CONSISTENT WITH CLAIM",
+    FingerprintMatchStatus.INCONSISTENT_WITH_CLAIM: "BEHAVIOR INCONSISTENT WITH CLAIM",
+    FingerprintMatchStatus.RANKED_ONLY: "INCONCLUSIVE",
+    FingerprintMatchStatus.INCONCLUSIVE: "INCONCLUSIVE",
+}
+
+
+def _claim_consistency_label(status: FingerprintMatchStatus) -> str:
+    """把 matcher status 映射为控制台文案；未验证 policy 一律 INCONCLUSIVE."""
+    return _CLAIM_CONSISTENCY_LABELS[status]
+
 
 # 阶段 token → 中文标签（TTY Live 与 非 TTY 日志共用）。
 _STAGE_LABELS = {
@@ -251,7 +272,7 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
     table.add_column("项目", style="cyan")
     table.add_column("值", style="white")
 
-    table.add_row("Target", str(result.target_id))  # type: ignore[attr-defined]
+    table.add_row("Target", str(plan.target_id))
     protocol = "N/A"
     if result.protocol_audit is not None:  # type: ignore[attr-defined]
         protocol = str(result.protocol_audit.config.protocol.value)  # type: ignore[attr-defined]
@@ -386,6 +407,67 @@ def print_unified_summary(result: object, artifacts: dict[str, str]) -> None:
         _console.print(
             "[bold]解读：[/]被测端点的能力分与声明模型兼容的可信参考配置存在上述差距。这是能力比较，不是模型身份证明。"
         )
+
+    # ---- Model Verification（Task 42 / Task 43）：身份证据，与能力评测并列 ---------
+    match = getattr(result, "fingerprint_match", None)
+    if match is not None:
+        # 局部 import：``analysis.confidence_v2`` 依赖 ``execution.models``，而
+        # ``execution.models`` 又经 ``reporting`` 包回到本模块，模块级导入会成环。
+        from llmtrace.analysis.confidence_v2 import fingerprint_confidence
+
+        verification = getattr(result, "fingerprint_verification", None)
+        snapshot = getattr(result, "fingerprint_snapshot", None)
+
+        _console.print()
+        _console.print(Panel.fit("Model Verification · Experimental", style="bold magenta"))
+
+        identity_table = Table(title="行为身份证据（实验性，非密码学证明）")
+        identity_table.add_column("项目", style="cyan")
+        identity_table.add_column("值", style="white")
+        identity_table.add_row("Claimed Model", str(match.claimed_model_id or plan.candidate_model_id))
+
+        set_text = "N/A"
+        if plan.fingerprint_set_id:
+            set_text = plan.fingerprint_set_id
+            if plan.fingerprint_set_version:
+                set_text = f"{set_text} v{plan.fingerprint_set_version}"
+        identity_table.add_row("Fingerprint Set", set_text)
+
+        # Task 43：只有 reference set、没有 validated decision policy 时必须写
+        # UNVALIDATED —— 不借用任何"看起来已验证"的说法。
+        decision_policy = getattr(verification, "policy", None)
+        if decision_policy is None:
+            policy_text = "UNVALIDATED"
+        else:
+            policy_state = "validated" if decision_policy.validated else "UNVALIDATED"
+            policy_text = f"{decision_policy.policy_id} v{decision_policy.policy_version} ({policy_state})"
+        identity_table.add_row("Policy", policy_text)
+
+        identity_table.add_row("Claim Consistency", _claim_consistency_label(match.status))
+
+        fingerprint_confidence_component = fingerprint_confidence(
+            verification=verification,
+            match=match,
+            candidate=snapshot.distributions if snapshot is not None else (),
+        )
+        identity_table.add_row("Fingerprint Confidence", fingerprint_confidence_component.level.value.upper())
+        _console.print(identity_table)
+
+        # Task 43：没有 claim verdict 时仍允许 Top-K 排序展示。
+        if match.entries:
+            _console.print()
+            matches_table = Table(title="Top Behavioral Matches")
+            matches_table.add_column("#", style="cyan", justify="right")
+            matches_table.add_column("Reference", style="white")
+            matches_table.add_column("Distance", style="white")
+            for rank, entry in enumerate(match.entries[:_TOP_MATCH_DISPLAY_LIMIT], start=1):
+                matches_table.add_row(str(rank), entry.model_id, f"distance {entry.distance:.3f}")
+            _console.print(matches_table)
+
+        _console.print()
+        _console.print("[bold]Important[/]")
+        _console.print("Behavioral evidence only.")
+        _console.print("This is not cryptographic proof of upstream identity.")
 
     if artifacts:
         _console.print()

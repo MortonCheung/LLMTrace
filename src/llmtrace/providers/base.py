@@ -231,6 +231,7 @@ class BaseProvider(ABC):
         messages: list[dict[str, str]],
         *,
         options: CompletionOptions | None = None,
+        evidence_type: str | None = None,
     ) -> HTTPEvidence:
         """非流式补全请求.
 
@@ -239,6 +240,10 @@ class BaseProvider(ABC):
             messages: Chat messages.
             options: Optional CompletionOptions for generation kwargs.
                      Providers apply these via _apply_options_to_body().
+            evidence_type: Optional evidence purpose label stamped on the
+                           recorded HTTPEvidence *before* the request is sent.
+                           Defaults to None so every existing caller is
+                           unaffected.
         """
         self._consume_budget()
         url = self._build_completion_url()
@@ -247,6 +252,8 @@ class BaseProvider(ABC):
         if options is not None:
             self._apply_options_to_body(body, options)
         evidence = self._build_evidence("POST", url, body, model=model)
+        if evidence_type is not None:
+            evidence.evidence_type = evidence_type
 
         try:
             evidence.request_time = datetime.now(tz=UTC)

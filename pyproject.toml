@@ -54,6 +54,9 @@ where = ["src"]
     "_resources/*.yaml",
     "_resources/*.json",
 ]
+"llmtrace.fingerprint" = [
+    "resources/*.json",
+]
 "llmtrace.web" = [
     "templates/*.html",
     "static/*.css",

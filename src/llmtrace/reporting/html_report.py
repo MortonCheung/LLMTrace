@@ -166,12 +166,16 @@ def generate_html_report(
     capability_profile: CapabilityProfile | None = None,
     secret_scrubber: SecretScrubber | None = None,
     claimed_model_gap: ClaimedModelGap | None = None,
+    fingerprint_section: dict[str, object] | None = None,
 ) -> Path:
     """生成 HTML 报告.
 
     When ``secret_scrubber`` is provided, the full template context is
     scrubbed *before* rendering — a known secret can never reach the
     persisted HTML, neither raw nor as an autoescaped representation.
+
+    ``fingerprint_section`` 是 :func:`build_fingerprint_section` 产出的 JSON 可序列化
+    dict（与 JSON 报告同一份数据），复用现有报告模板渲染，不新建独立页面.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -318,6 +322,7 @@ def generate_html_report(
         "behavior_drift": behavior_drift_data,
         "capability_profile": capability_profile_data,
         "claimed_model_gap": claimed_model_gap_data,
+        "fingerprint_evidence": fingerprint_section,
     }
 
     # Scrub the full context BEFORE template rendering: a known secret must

@@ -9,6 +9,7 @@ API key to disk, and keeps cancelled runs free of report artifacts.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -216,6 +217,41 @@ class TestLifecycle:
                 svc4.close()
         finally:
             pass
+
+    @pytest.mark.asyncio
+    async def test_result_view_tolerates_the_v06_report_schema(self, tmp_path: Path) -> None:
+        """Task 45：Web 冻结 —— 新增的 optional fingerprint 段不得让结果视图 crash。
+
+        两条保证：(1) 未接线身份证据的 run 报告形状不变（consumers 读的
+        ``capability_profile`` 仍在、没有 surprise key）；(2) 一旦报告里出现
+        v0.6 的 fingerprint 段，service 的 raw JSON 视图照常返回而不报错。
+        """
+        svc = _make_service(tmp_path)
+        try:
+            record = svc.create(_make_input())
+            with respx.mock as mock:
+                _mock_openai(mock)
+                svc.start(record.run_id)
+                await _wait_terminal(svc, record.run_id)
+
+            report = svc.result(record.run_id)["report"]
+            assert report is not None
+            assert report["schema_version"] == "1.4"
+            # web/static/app.js 依赖的字段仍在（additive change only）。
+            assert "capability_profile" in report
+            assert "fingerprint" not in report  # 未接线 → 不写该段
+
+            # 手工注入 v0.6 段：模拟将来接线的 run，Web 仍必须能读。
+            report_path = Path(svc.result(record.run_id)["run"]["report_json_path"])
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            payload["fingerprint"] = {"available": True, "experimental": True, "verdict": None}
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            reloaded = svc.result(record.run_id)
+            assert reloaded["report"]["fingerprint"]["experimental"] is True
+            assert reloaded["report"]["capability_profile"] == report["capability_profile"]
+        finally:
+            svc.close()
 
     @pytest.mark.asyncio
     async def test_double_start_conflicts(self, tmp_path: Path) -> None:

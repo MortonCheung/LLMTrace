@@ -49,7 +49,38 @@
 - 样本量有限（默认 3 次重复），统计结论可能不具代表性
 - 报告中的证据数对应真实 HTTP 请求数（每条请求一条证据），但请求计数以 AuditPlan 和 Mock Server 调试接口为准，不以报告文字为准
 - 跨报告比较受测试套件版本和接口变化影响
-- 当前版本仍不具备模型指纹识别能力，不能识别真实模型身份
+- v0.5 及以前不具备模型指纹识别能力；v0.6 起提供**实验性行为身份证据**，
+  但该证据不是身份证明，也不能回答"真实上游模型是什么"（见下节）
+
+## Quick Suite 与校准分的可靠性语义
+
+- **32 题 Quick Suite 是 low-cost screening measurement（低成本筛查测量）**，
+  用于在不消耗大量预算的前提下给出可复现的能力坐标，不追求与全量基准同等的测量精度。
+- **正式 reference calibration 使分数在已定义的 Reference Universe 内可复现**
+  （同一 ReferenceSet + 同一 CalibrationPolicy + 同一 suite 下，同一测量得到同一分数），
+  但**不意味着**较小的数值差异能忠实复现 full-benchmark ranking —— 32 题上的小幅差距
+  不足以支撑"模型 A 强于模型 B"这类排序结论。
+- **小的 capability score 差异不得解读为 model-identity evidence**：
+  能力分是能力坐标，不是身份判据；分数接近 ≠ 同一个模型，分数差异 ≠ 模型被替换。
+- 30 题以内的小样本筛查会受题目抽样与随机性影响；如需排序结论，应扩大测量范围并
+  在多组参考宇宙下复核，而不是引用 Quick Suite 的小数点后差异。
+
+## 指纹与身份证据限制（v0.6，实验性）
+
+- 指纹匹配产出的是 **behavioral identity evidence**，**不是密码学证明**，
+  也不构成对上游身份的证明。
+- `Top-K` 只是在**已登记的受信任参考集**中最接近的若干参考；参考集是有限且人工采集的，
+  因此**不能**回答开放世界（open-set）的身份判定问题。
+- `Top-1` 不得被解读为 "actual upstream model"；`similarity = 1 - distance`
+  不是概率、不是置信度、不是准确率。
+- 只有 **validated** `FingerprintDecisionPolicy` + 被声称身份的参考 + 足够可比证据，
+  才允许输出 claim consistency；否则只有排序（`RANKED_ONLY`）或无结论（`INCONCLUSIVE`）。
+- 没有兼容的 `FingerprintReferenceSet` 时 Model Verification 为 `Unavailable`，
+  能力审计照常继续；这属于正常降级，不是运行失败。
+- 低熵选择题的行为分布可被提示包装、采样参数与后处理改变；
+  行为一致/不一致都可能来自版本升级、系统提示变化或负载差异，而非模型替换。
+- routing 报 `Suspicious` 是审计结论，**不等于 run 失败**，也**不构成**已证明的混合路由
+  （不输出任何混合比例）。详见 [`docs/methodology/routing.md`](./methodology/routing.md)。
 
 ## 协议限制
 
