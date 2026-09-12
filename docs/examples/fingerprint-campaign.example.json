@@ -1,0 +1,26 @@
+{
+  "campaign_id": "real-fingerprint-v1",
+  "suite_version": "0.1.0",
+  "profile": "standard",
+  "captures_per_identity": 2,
+  "identities": [
+    {
+      "label": "official-model-a",
+      "protocol": "openai",
+      "base_url": "https://provider.example/v1",
+      "model": "model-a",
+      "provider_id": "official-provider-a",
+      "role": "official-baseline",
+      "api_key_env": "PROVIDER_A_API_KEY"
+    },
+    {
+      "label": "official-model-b",
+      "protocol": "anthropic",
+      "base_url": "https://provider.example",
+      "model": "model-b",
+      "provider_id": "official-provider-b",
+      "role": "official-baseline",
+      "api_key_env": "PROVIDER_B_API_KEY"
+    }
+  ]
+}

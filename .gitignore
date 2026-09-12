@@ -27,6 +27,9 @@ build/
 # Reports
 reports/
 
+# Local campaign manifests (contain real endpoint provenance, never commit)
+.local/
+
 # IDE
 .idea/
 .vscode/
